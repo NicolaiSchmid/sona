@@ -1,0 +1,29 @@
+# dependencies
+node_modules/
+.pnpm-store/
+
+# env/secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+
+# local data / sensitive exports
+/data/
+/exports/
+/receipts/
+*.sqlite
+*.sqlite-*
+*.db
+*.csv
+*.zip
+
+# build/cache
+/dist/
+/coverage/
+.tmp/
+.cache/
+.DS_Store
