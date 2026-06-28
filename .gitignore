@@ -23,7 +23,10 @@ node_modules/
 
 # build/cache
 /dist/
+dist/
 /coverage/
+coverage/
+*.tsbuildinfo
 .tmp/
 .cache/
 .DS_Store
