@@ -16,6 +16,11 @@ function load(file: string): string {
 /**
  * Ordered list of core migrations. The `.sql` files are the source of truth so
  * they stay readable and usable by external migration tooling.
+ *
+ * The SQL is read relative to this module. Packages are consumed from source
+ * via the pnpm workspace (Vitest/tsx), and bundled for production, so the
+ * `.sql` sits next to this file at resolution time. A plain `tsc` build emits
+ * declarations only and does not copy `.sql` assets.
  */
 export const CORE_MIGRATIONS: readonly Migration[] = [
   { id: "0001_core", sql: load("./0001_core.sql") },
