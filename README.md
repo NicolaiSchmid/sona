@@ -101,6 +101,42 @@ The first implementation should be TypeScript, strict, test-first, and exposed t
 - AI suggestions are auditable drafts, not silent mutations.
 - Use Conventional Commits: `type(scope): summary`.
 
+## Development
+
+Sona is a `pnpm` workspace using TypeScript strict mode, Biome for lint/format, and Vitest for tests.
+
+```bash
+pnpm install
+pnpm check     # typecheck + lint + test
+```
+
+Other scripts:
+
+```bash
+pnpm build      # tsc -b across all packages
+pnpm typecheck  # tsc -b only
+pnpm lint       # biome check .
+pnpm format     # biome format --write .
+pnpm test       # vitest run
+```
+
+### Workspace layout
+
+```text
+packages/
+  core/         ledger, evidence graph, validation, domain types
+  db/           schema, migrations, repositories
+  connectors/   bank/email/portal/portfolio adapters
+  receipts/     document processing and matching
+  tax-de/       German private-tax templates and export mappings
+  mcp/          code-mode MCP surface and the typed sona.* facade
+apps/
+  worker/       scheduled source sync, OCR, reconciliation, exports
+  web/          review UI, onboarding, document upload
+```
+
+Never commit secrets, credentials, real financial data, or generated build/data output.
+
 ## Status
 
 Pre-implementation product definition. The first milestone is a TypeScript repo skeleton with migrations, tests, and an MCP/code-mode shell.

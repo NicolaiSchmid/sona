@@ -1,0 +1,13 @@
+{
+  "files": [],
+  "references": [
+    { "path": "./packages/core" },
+    { "path": "./packages/db" },
+    { "path": "./packages/connectors" },
+    { "path": "./packages/receipts" },
+    { "path": "./packages/tax-de" },
+    { "path": "./packages/mcp" },
+    { "path": "./apps/worker" },
+    { "path": "./apps/web" }
+  ]
+}

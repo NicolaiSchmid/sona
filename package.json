@@ -1,0 +1,28 @@
+{
+  "name": "sona",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@11.4.0",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "check": "pnpm typecheck && pnpm lint && pnpm test",
+    "typecheck": "tsc -b --pretty false",
+    "lint": "biome check .",
+    "lint:fix": "biome check --write .",
+    "format": "biome format --write .",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.2.0",
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0",
+    "vitest": "^2.1.0"
+  },
+  "dependencies": {
+    "zod": "^3.24.0"
+  }
+}
