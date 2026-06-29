@@ -137,6 +137,25 @@ apps/
 
 Never commit secrets, credentials, real financial data, or generated build/data output.
 
+### Code-mode MCP surface
+
+`@sona/mcp` exposes a flat, code-mode tool surface — `docs`, `search`, and
+`execute` — over a typed `sona.*` facade, instead of one MCP tool per backend
+operation:
+
+```ts
+import { runSonaTool } from "@sona/mcp";
+
+await runSonaTool("docs", {}); // product boundary + safety rules
+await runSonaTool("search", { query: "receipt" }); // discover sona.* operations
+await runSonaTool("execute", { code: "return await sona.sources.list();" });
+```
+
+`execute` runs the snippet against the facade in a constrained `node:vm`
+context (only `sona` is in scope). It is a dev/local harness, not a hardened
+sandbox — see the warning in `packages/mcp/src/tools/execute.ts` before exposing
+it to untrusted input.
+
 ## Status
 
 Pre-implementation product definition. The first milestone is a TypeScript repo skeleton with migrations, tests, and an MCP/code-mode shell.
