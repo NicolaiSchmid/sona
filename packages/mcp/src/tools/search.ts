@@ -3,7 +3,7 @@
  * `sona.*` operations exist before writing code for the `execute` tool.
  */
 import { z } from "zod";
-import { CATALOG, type CatalogEntry, FAMILIES, type RiskLabel } from "../catalog";
+import { CATALOG, type CatalogEntry, FAMILIES, type RiskLabel } from "../catalog.js";
 
 export interface CatalogSearchResult {
   path: string;

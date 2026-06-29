@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { getDocs } from "./docs";
+import { getDocs } from "./docs.js";
 
 describe("getDocs", () => {
   it("states the product boundary and lists families", () => {

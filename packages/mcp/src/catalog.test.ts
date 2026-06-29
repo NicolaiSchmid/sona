@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { CATALOG, FAMILIES, RISK_LABELS } from "./catalog";
-import { searchCatalog } from "./tools/search";
+import { CATALOG, FAMILIES, RISK_LABELS } from "./catalog.js";
+import { searchCatalog } from "./tools/search.js";
 
 describe("catalog", () => {
   it("every entry has a path, description, schema, and a valid risk", () => {
