@@ -144,17 +144,21 @@ Never commit secrets, credentials, real financial data, or generated build/data 
 operation:
 
 ```ts
-import { runSonaTool } from "@sona/mcp";
+import { createSonaTools, runSonaTool } from "@sona/mcp";
 
 await runSonaTool("docs", {}); // product boundary + safety rules
 await runSonaTool("search", { query: "receipt" }); // discover sona.* operations
-await runSonaTool("execute", { code: "return await sona.sources.list();" });
+
+// `execute` is OFF by default. Opt in explicitly (dev/local only):
+const tools = createSonaTools({ enableExecute: true });
+await runSonaTool("execute", { code: "return await sona.sources.list();" }, tools);
 ```
 
-`execute` runs the snippet against the facade in a constrained `node:vm`
-context (only `sona` is in scope). It is a dev/local harness, not a hardened
-sandbox — see the warning in `packages/mcp/src/tools/execute.ts` before exposing
-it to untrusted input.
+`execute` runs the snippet against a facade rebuilt **inside** a `node:vm`
+context (no host object is reachable, so executed code can't walk a
+constructor back to the host realm), with both sync and async time bounded. It
+is still a dev/local harness, not a hardened sandbox — see the warning in
+`packages/mcp/src/tools/execute.ts` before exposing it to untrusted input.
 
 ## Status
 

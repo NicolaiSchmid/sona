@@ -2,7 +2,7 @@
  * `docs` returns the product boundary and safety rules an agent must respect
  * before operating Sona, plus the list of available facade families.
  */
-import { FAMILIES } from "../catalog";
+import { FAMILIES } from "../catalog.js";
 
 export interface DocsResponse {
   productBoundary: string;

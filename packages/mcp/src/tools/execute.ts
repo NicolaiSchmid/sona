@@ -2,24 +2,32 @@
  * `execute` runs a small snippet of agent-authored code against the typed
  * `sona.*` facade.
  *
- * ⚠️ Security scope (READ THIS): this is a constrained, DEV/LOCAL execution
- * harness, not a hardened multi-tenant sandbox. The snippet runs in a fresh
- * `node:vm` context whose only injected binding is `sona`. There is no
- * `process`, `require`, `import`, `fetch`, filesystem, network, or secret
- * access in scope, and a static deny-list rejects obvious escape attempts.
+ * ⚠️ Security scope (READ THIS): this is a DEV/LOCAL execution harness. It is
+ * NOT part of the default public tool surface — `runSonaTool` only exposes it
+ * when a server is built with `createSonaTools({ enableExecute: true })`.
  *
- * However, `node:vm` does NOT provide a real security boundary (async work is
- * not bounded by the timeout, and a determined snippet can reach shared
- * intrinsics). Do NOT expose this to untrusted input over a network without
- * replacing the engine with a true sandbox (isolated worker/V8 isolate) and
- * adding auth, resource limits, and per-operation risk gating.
+ * Hardening within the harness:
+ * - The snippet runs in a fresh `node:vm` context. The `sona` facade is rebuilt
+ *   *inside* that context from its own source, so executed code cannot reach a
+ *   host object — and therefore cannot walk `someHostObject.constructor.
+ *   constructor("return process")()` back to the host realm, secrets, or
+ *   builtin modules. There is no `process`, `require`, `import`, `fetch`, or fs
+ *   in scope.
+ * - A substring deny-list rejects obvious escape attempts (defense in depth,
+ *   not the security boundary).
+ * - Both synchronous CPU time and async settlement are bounded by `timeoutMs`.
+ *
+ * `node:vm` is still not a guaranteed isolation boundary. Before exposing
+ * `execute` to untrusted/networked input, replace the engine with a true
+ * isolate (e.g. a V8 isolate / isolated worker) plus auth, resource limits, and
+ * per-operation risk gating.
  */
-import { createContext, Script } from "node:vm";
-import { createFacade, type SonaFacade } from "../facade";
+import { createContext, runInContext } from "node:vm";
+import { createFacade } from "../facade.js";
 
 export interface ExecuteInput {
   code: string;
-  /** Sync wall-clock budget in ms (does not bound async work). */
+  /** Wall-clock budget in ms for both sync execution and async settlement. */
   timeoutMs?: number;
 }
 
@@ -47,6 +55,11 @@ const DENIED_PATTERNS = [
   "__proto__",
 ];
 
+// `createFacade` is self-contained (literals and async functions only), so its
+// source can be re-evaluated inside the vm realm to produce a sandbox-owned
+// facade. Keep it free of external references for this to hold.
+const FACADE_FACTORY_SOURCE = `(${createFacade.toString()})()`;
+
 function normalizeError(error: unknown): ExecuteFailure {
   // Errors thrown inside the vm come from a different realm, so `instanceof
   // Error` does not hold; match structurally on an error-like object instead.
@@ -64,13 +77,11 @@ function normalizeError(error: unknown): ExecuteFailure {
 }
 
 /**
- * Executes `code` as the body of an async function with `sona` in scope.
- * The snippet returns its result, e.g. `return await sona.sources.list();`.
+ * Executes `code` as the body of an async function with a sandbox-realm `sona`
+ * in scope. The snippet returns its result, e.g.
+ * `return await sona.sources.list();`.
  */
-export async function execute(
-  input: ExecuteInput,
-  facade: SonaFacade = createFacade(),
-): Promise<ExecuteResult> {
+export async function execute(input: ExecuteInput): Promise<ExecuteResult> {
   const { code, timeoutMs = 1000 } = input;
 
   const offending = DENIED_PATTERNS.find((pattern) => code.includes(pattern));
@@ -84,15 +95,28 @@ export async function execute(
     };
   }
 
-  // Only `sona` is reachable; ECMAScript intrinsics exist, Node globals do not.
-  const context = createContext({ sona: facade });
-
+  const context = createContext({});
+  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    const script = new Script(`(async () => { ${code}\n })()`);
-    const promise = script.runInContext(context, { timeout: timeoutMs }) as Promise<unknown>;
-    const value = await promise;
+    // Build the facade inside the realm; `sona` is a sandbox-owned object.
+    runInContext(`globalThis.sona = ${FACADE_FACTORY_SOURCE};`, context, { timeout: timeoutMs });
+
+    const execution = runInContext(`(async () => { ${code}\n })()`, context, {
+      timeout: timeoutMs,
+    }) as Promise<unknown>;
+
+    const deadline = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => reject(new Error("Execution timed out")), timeoutMs);
+      timer.unref?.();
+    });
+
+    const value = await Promise.race([execution, deadline]);
     return { ok: true, value };
   } catch (error) {
     return normalizeError(error);
+  } finally {
+    if (timer) {
+      clearTimeout(timer);
+    }
   }
 }
