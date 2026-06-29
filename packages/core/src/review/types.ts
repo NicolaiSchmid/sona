@@ -35,10 +35,13 @@ const REVIEW_STATE_RANK: Record<ReviewState, number> = {
 
 /**
  * Returns true if `actual` is at least as approved as `required`.
- * `superseded` never satisfies any requirement.
+ *
+ * `superseded` is terminal, not a rank: a superseded record never satisfies a
+ * requirement, and "require superseded" is not a meaningful gate, so it is
+ * always rejected rather than compared through the rank table.
  */
 export function meetsReviewState(actual: ReviewState, required: ReviewState): boolean {
-  if (actual === "superseded") {
+  if (actual === "superseded" || required === "superseded") {
     return false;
   }
   return REVIEW_STATE_RANK[actual] >= REVIEW_STATE_RANK[required];

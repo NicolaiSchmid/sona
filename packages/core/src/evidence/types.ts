@@ -38,7 +38,7 @@ export const evidenceLinkSchema = z.object({
   toId: z.string().min(1),
   kind: z.enum(EVIDENCE_LINK_KINDS),
   notes: z.string().optional(),
-  createdAt: z.string().min(1),
+  createdAt: z.string().datetime({ offset: true }),
 });
 
 export type EvidenceLink = z.infer<typeof evidenceLinkSchema>;

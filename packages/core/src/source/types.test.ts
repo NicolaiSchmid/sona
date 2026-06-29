@@ -33,6 +33,23 @@ describe("raw source records", () => {
     expect(record.externalId).toBe("ext_1");
   });
 
+  it("clones and deeply freezes the payload so later caller mutation can't drift the hash", () => {
+    const payload = { amount: "-12.00", currency: "EUR", meta: { card: "1234" } };
+    const record = createRawSourceRecord({ ...baseInput, payloadJson: payload });
+    const before = record.payloadHash;
+
+    // Mutating the caller's original object must not affect the stored record.
+    payload.meta.card = "9999";
+    expect((record.payloadJson as typeof payload).meta.card).toBe("1234");
+
+    // The stored payload is itself frozen all the way down.
+    expect(Object.isFrozen(record.payloadJson)).toBe(true);
+    expect(() => {
+      (record.payloadJson as typeof payload).meta.card = "0000";
+    }).toThrow();
+    expect(record.payloadHash).toBe(before);
+  });
+
   it("supersedes via a new appended record without mutating the original", () => {
     const original = createRawSourceRecord(baseInput);
     const correction = supersedeRawSourceRecord(original, {

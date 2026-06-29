@@ -18,4 +18,9 @@ describe("review states", () => {
     expect(meetsReviewState("superseded", "draft")).toBe(false);
     expect(meetsReviewState("superseded", "user_reviewed")).toBe(false);
   });
+
+  it("never treats 'superseded' as a satisfiable requirement", () => {
+    expect(meetsReviewState("exported", "superseded")).toBe(false);
+    expect(meetsReviewState("user_reviewed", "superseded")).toBe(false);
+  });
 });

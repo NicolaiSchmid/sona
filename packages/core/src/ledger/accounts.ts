@@ -55,7 +55,7 @@ export function validateAccountPath(path: string): AccountPathValidation {
   for (const [index, segment] of segments.entries()) {
     if (segment.length === 0) {
       errors.push(`Empty segment at position ${index} in "${path}"`);
-    } else if (!SEGMENT_RE.test(segment)) {
+    } else if (segment.trim() !== segment || !SEGMENT_RE.test(segment)) {
       errors.push(`Invalid segment "${segment}" at position ${index} in "${path}"`);
     }
   }
@@ -100,7 +100,8 @@ export const DEFAULT_ACCOUNTS = [
   { path: "Expenses:WorkRelated", kind: "expense", receiptRequired: false },
   { path: "Expenses:Donations", kind: "expense", receiptRequired: true },
   { path: "Suspense:Unclassified", kind: "suspense", receiptRequired: false },
-  { path: "Suspense:NeedsReceipt", kind: "suspense", receiptRequired: false },
+  // Postings parked here are explicitly waiting on evidence, so gate them.
+  { path: "Suspense:NeedsReceipt", kind: "suspense", receiptRequired: true },
   { path: "Equity:OpeningBalances", kind: "equity", receiptRequired: false },
 ] as const satisfies readonly DefaultAccount[];
 

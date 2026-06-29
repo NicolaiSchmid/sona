@@ -54,6 +54,12 @@ describe("validateBalancedTransaction", () => {
   it("rejects an empty posting list", () => {
     const result = validateBalancedTransaction([]);
     expect(result.balanced).toBe(false);
-    expect(result.errors[0]).toContain("no postings");
+    expect(result.errors[0]).toContain("at least two postings");
+  });
+
+  it("rejects a single-posting transaction even if it nets to zero", () => {
+    const result = validateBalancedTransaction([eur("0")]);
+    expect(result.balanced).toBe(false);
+    expect(result.errors[0]).toContain("at least two postings");
   });
 });

@@ -30,8 +30,12 @@ export function validateBalancedTransaction(
 ): BalanceResult {
   const errors: string[] = [];
 
-  if (postings.length === 0) {
-    return { balanced: false, totalsByCommodity: {}, errors: ["Transaction has no postings"] };
+  if (postings.length < 2) {
+    return {
+      balanced: false,
+      totalsByCommodity: {},
+      errors: ["Transaction must have at least two postings"],
+    };
   }
 
   const amountsByCommodity = new Map<string, string[]>();

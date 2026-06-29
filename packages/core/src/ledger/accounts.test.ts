@@ -27,6 +27,11 @@ describe("validateAccountPath", () => {
     expect(isValidAccountPath("Assets: Bank")).toBe(false); // leading space
   });
 
+  it("rejects segments with leading or trailing whitespace", () => {
+    expect(isValidAccountPath("Assets:Bank ")).toBe(false); // trailing space
+    expect(isValidAccountPath("Assets:Giro\t")).toBe(false);
+  });
+
   it("allows spaces, underscores and hyphens within a segment", () => {
     expect(isValidAccountPath("Assets:Bank Account_1-eur")).toBe(true);
   });
@@ -57,5 +62,8 @@ describe("DEFAULT_ACCOUNTS", () => {
     const byPath = new Map(DEFAULT_ACCOUNTS.map((a) => [a.path, a]));
     expect(byPath.get("Expenses:TaxAdvice")?.receiptRequired).toBe(true);
     expect(byPath.get("Expenses:RealEstate:Maintenance")?.receiptRequired).toBe(true);
+    // The needs-receipt suspense bucket must itself be receipt-gated.
+    expect(byPath.get("Suspense:NeedsReceipt")?.receiptRequired).toBe(true);
+    expect(byPath.get("Suspense:Unclassified")?.receiptRequired).toBe(false);
   });
 });

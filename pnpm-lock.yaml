@@ -40,7 +40,11 @@ importers:
         specifier: ^3.24.0
         version: 3.25.76
 
-  packages/db: {}
+  packages/db:
+    dependencies:
+      '@sona/core':
+        specifier: workspace:*
+        version: link:../core
 
   packages/mcp: {}
 

@@ -6,7 +6,7 @@
  * {@link supersedeRawSourceRecord}. This preserves a faithful, auditable trail
  * of exactly what each provider returned.
  */
-import { stableJsonHash } from "../util/hash";
+import { type JsonValue, stableJsonHash } from "../util/hash";
 
 /** The kind of upstream Sona collects from. */
 export type SourceKind =
@@ -18,12 +18,14 @@ export type SourceKind =
   | "portfolio"
   | "manual";
 
+export type SourceStatus = "active" | "paused" | "error" | "revoked";
+
 export interface Source {
   id: string;
   workspaceId: string;
   kind: SourceKind;
   displayName: string;
-  status: "active" | "paused" | "error" | "revoked";
+  status: SourceStatus;
   createdAt: string;
 }
 
@@ -43,8 +45,8 @@ export interface RawSourceRecord {
   /** Provider-assigned identifier for this record, when available. */
   readonly externalId: string | undefined;
   readonly recordType: RawSourceRecordType;
-  /** Verbatim provider payload. Never edited after creation. */
-  readonly payloadJson: unknown;
+  /** Verbatim provider payload. Cloned and deeply frozen; never edited after creation. */
+  readonly payloadJson: JsonValue;
   /** Stable hash of the payload, used for idempotent imports and dedup. */
   readonly payloadHash: string;
   /** When the provider observed/returned this record (ISO timestamp). */
@@ -60,25 +62,38 @@ export interface CreateRawSourceRecordInput {
   sourceId: string;
   externalId?: string;
   recordType: RawSourceRecordType;
-  payloadJson: unknown;
+  payloadJson: JsonValue;
   observedAt: string;
   createdAt: string;
   supersedesRecordId?: string;
 }
 
+/** Recursively freezes a value and everything it transitively contains. */
+function deepFreeze<T>(value: T): T {
+  if (value !== null && typeof value === "object") {
+    for (const child of Object.values(value)) {
+      deepFreeze(child);
+    }
+    Object.freeze(value);
+  }
+  return value;
+}
+
 /**
- * Creates a frozen raw source record with a computed payload hash. The returned
- * object is `Object.freeze`d to make the immutability guarantee concrete.
+ * Creates a frozen raw source record with a computed payload hash. The payload
+ * is cloned and deeply frozen so neither the record nor its nested payload can
+ * be mutated after creation — keeping `payloadHash`, dedup, and audit faithful.
  */
 export function createRawSourceRecord(input: CreateRawSourceRecordInput): RawSourceRecord {
+  const payloadJson = deepFreeze(structuredClone(input.payloadJson));
   return Object.freeze({
     id: input.id,
     workspaceId: input.workspaceId,
     sourceId: input.sourceId,
     externalId: input.externalId,
     recordType: input.recordType,
-    payloadJson: input.payloadJson,
-    payloadHash: stableJsonHash(input.payloadJson),
+    payloadJson,
+    payloadHash: stableJsonHash(payloadJson),
     observedAt: input.observedAt,
     supersedesRecordId: input.supersedesRecordId,
     createdAt: input.createdAt,

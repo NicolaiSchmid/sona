@@ -59,7 +59,35 @@ describe("core migrations", () => {
             ` VALUES ('${id}', 'ws_1', 'src_1', 'bank_transaction', '{}', 'hash_dup', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
         );
       insertRaw("raw_1");
-      expect(() => insertRaw("raw_2")).toThrow();
+      expect(() => insertRaw("raw_2")).toThrow(/UNIQUE constraint failed/i);
+    } finally {
+      db.close();
+    }
+  });
+
+  it("rejects a child row that references a parent in another workspace", () => {
+    const db = new DatabaseSync(":memory:");
+    try {
+      applyMigrations(db, CORE_MIGRATIONS);
+      db.exec("PRAGMA foreign_keys = ON");
+      db.exec(
+        "INSERT INTO workspaces (id, name, created_at) VALUES ('ws_1', 'A', '2026-01-01T00:00:00Z')",
+      );
+      db.exec(
+        "INSERT INTO workspaces (id, name, created_at) VALUES ('ws_2', 'B', '2026-01-01T00:00:00Z')",
+      );
+      db.exec(
+        "INSERT INTO sources (id, workspace_id, kind, display_name, status, created_at)" +
+          " VALUES ('src_1', 'ws_1', 'manual', 'Manual', 'active', '2026-01-01T00:00:00Z')",
+      );
+      // ws_2 trying to attach a raw record to ws_1's source must fail the
+      // composite (workspace_id, source_id) foreign key.
+      expect(() =>
+        db.exec(
+          "INSERT INTO raw_source_records (id, workspace_id, source_id, record_type, payload_json, payload_hash, observed_at, created_at)" +
+            " VALUES ('raw_x', 'ws_2', 'src_1', 'bank_transaction', '{}', 'h', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+        ),
+      ).toThrow(/FOREIGN KEY constraint failed/i);
     } finally {
       db.close();
     }

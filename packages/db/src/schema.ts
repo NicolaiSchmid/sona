@@ -2,9 +2,19 @@
  * Typed row interfaces for the core schema (`migrations/0001_core.sql`).
  *
  * These mirror the on-disk columns (snake_case, TEXT ids/timestamps, decimal
- * strings for money, INTEGER 0/1 booleans). Domain mapping to camelCase types
- * in `@sona/core` happens in the repository layer, added in a later phase.
+ * strings for money, INTEGER 0/1 booleans). Workflow/domain columns are typed
+ * with the literal unions from `@sona/core` so the persisted vocabulary stays
+ * in sync with the domain model. Mapping to camelCase domain types happens in
+ * the repository layer, added in a later phase.
  */
+import type {
+  AccountKind,
+  EvidenceLinkKind,
+  RawSourceRecordType,
+  ReviewState,
+  SourceKind,
+  SourceStatus,
+} from "@sona/core";
 
 export interface UserRow {
   id: string;
@@ -28,9 +38,9 @@ export interface WorkspaceMemberRow {
 export interface SourceRow {
   id: string;
   workspace_id: string;
-  kind: string;
+  kind: SourceKind;
   display_name: string;
-  status: string;
+  status: SourceStatus;
   created_at: string;
 }
 
@@ -57,7 +67,7 @@ export interface RawSourceRecordRow {
   workspace_id: string;
   source_id: string;
   external_id: string | null;
-  record_type: string;
+  record_type: RawSourceRecordType;
   payload_json: string;
   payload_hash: string;
   observed_at: string;
@@ -69,7 +79,7 @@ export interface LedgerAccountRow {
   id: string;
   workspace_id: string;
   path: string;
-  kind: string;
+  kind: AccountKind;
   commodity: string | null;
   receipt_required: 0 | 1;
   created_at: string;
@@ -80,7 +90,7 @@ export interface LedgerTransactionRow {
   workspace_id: string;
   booked_on: string;
   description: string;
-  review_state: string;
+  review_state: ReviewState;
   created_at: string;
 }
 
@@ -101,7 +111,7 @@ export interface EvidenceLinkRow {
   from_id: string;
   to_type: string;
   to_id: string;
-  kind: string;
+  kind: EvidenceLinkKind;
   notes: string | null;
   created_at: string;
 }
@@ -111,8 +121,8 @@ export interface ReviewEventRow {
   workspace_id: string;
   target_type: string;
   target_id: string;
-  from_state: string;
-  to_state: string;
+  from_state: ReviewState;
+  to_state: ReviewState;
   actor: string;
   notes: string | null;
   created_at: string;
