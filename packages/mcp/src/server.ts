@@ -1,10 +1,11 @@
 /**
  * The public MCP tool surface. The default surface is intentionally just two
- * read-only-ish tools — `docs` and `search` — over the typed `sona.*` facade.
+ * tools — `docs` and `search` — over the typed `sona.*` facade.
  *
- * `execute` runs agent-authored code and is a dev/local harness, not a hardened
- * sandbox (see `./tools/execute.ts`). It is therefore OFF by default and only
- * included when a caller opts in via `createSonaTools({ enableExecute: true })`.
+ * `execute` runs agent-authored code and is therefore NOT included by default.
+ * It is only added when a caller supplies a {@link CodeRunner} via
+ * `createSonaTools({ runner })`. For untrusted/networked input that runner MUST
+ * be a true isolate; `createVmDevRunner` is local-dev only (see `./tools/execute`).
  *
  * Tools are defined transport-agnostically as {@link SonaTool} descriptors with
  * zod input schemas, so they can be mounted on any MCP transport. Wiring these
@@ -13,7 +14,7 @@
  */
 import { z } from "zod";
 import { getDocs } from "./tools/docs.js";
-import { execute } from "./tools/execute.js";
+import { type CodeRunner, execute } from "./tools/execute.js";
 import { searchCatalog } from "./tools/search.js";
 
 export interface SonaTool {
@@ -39,13 +40,6 @@ function defineTool<S extends z.ZodTypeAny>(def: {
   };
 }
 
-const docsTool = defineTool({
-  name: "docs",
-  description: "Return Sona's product boundary, safety rules, and available facade families.",
-  inputSchema: z.object({}),
-  handler: async () => getDocs(),
-});
-
 const searchTool = defineTool({
   name: "search",
   description: "Search the reviewed sona.* function catalog by keyword.",
@@ -53,28 +47,42 @@ const searchTool = defineTool({
   handler: async ({ query }) => searchCatalog(query),
 });
 
-const executeTool = defineTool({
-  name: "execute",
-  description:
-    "Run code against the typed sona.* facade, e.g. `return await sona.sources.list();`.",
-  inputSchema: z.object({ code: z.string(), timeoutMs: z.number().int().positive().optional() }),
-  handler: async (input) => execute(input),
-});
-
 export interface CreateSonaToolsOptions {
   /**
-   * Include the `execute` code-runner. OFF by default: it is a dev/local
-   * harness and must not be exposed to untrusted input. See `./tools/execute`.
+   * Execution backend for the `execute` tool. Omit to disable code execution
+   * (the safe default). For untrusted input pass a true isolate; for local dev
+   * pass `createVmDevRunner()`.
    */
-  enableExecute?: boolean;
+  runner?: CodeRunner;
 }
 
-/** Builds the tool surface. Defaults to the safe `docs` + `search` tools only. */
+/** Builds the tool surface. Defaults to `docs` + `search`; no code execution. */
 export function createSonaTools(options: CreateSonaToolsOptions = {}): SonaTool[] {
+  const { runner } = options;
+  const docsTool = defineTool({
+    name: "docs",
+    description: "Return Sona's product boundary, safety rules, and available facade families.",
+    inputSchema: z.object({}),
+    handler: async () => getDocs({ hasExecute: runner !== undefined }),
+  });
+
   const tools = [docsTool, searchTool];
-  if (options.enableExecute) {
-    tools.push(executeTool);
+
+  if (runner) {
+    tools.push(
+      defineTool({
+        name: "execute",
+        description:
+          "Run code against the typed sona.* facade, e.g. `return await sona.sources.list();`.",
+        inputSchema: z.object({
+          code: z.string(),
+          timeoutMs: z.number().int().positive().optional(),
+        }),
+        handler: async (input) => execute(input, runner),
+      }),
+    );
   }
+
   return tools;
 }
 
@@ -83,8 +91,8 @@ export const SONA_TOOLS: readonly SonaTool[] = createSonaTools();
 
 /**
  * Validates `rawInput` against the named tool's schema and runs it. Pass a tool
- * list from {@link createSonaTools} to enable `execute`. Throws on an unknown
- * tool name; input validation errors surface as zod errors.
+ * list from {@link createSonaTools} (with a `runner`) to enable `execute`.
+ * Throws on an unknown tool name; input validation errors surface as zod errors.
  */
 export async function runSonaTool(
   name: string,

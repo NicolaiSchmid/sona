@@ -144,21 +144,24 @@ Never commit secrets, credentials, real financial data, or generated build/data 
 operation:
 
 ```ts
-import { createSonaTools, runSonaTool } from "@sona/mcp";
+import { createSonaTools, createVmDevRunner, runSonaTool } from "@sona/mcp";
 
 await runSonaTool("docs", {}); // product boundary + safety rules
 await runSonaTool("search", { query: "receipt" }); // discover sona.* operations
 
-// `execute` is OFF by default. Opt in explicitly (dev/local only):
-const tools = createSonaTools({ enableExecute: true });
+// Code execution is OFF by default. To enable `execute`, supply a CodeRunner.
+// `createVmDevRunner` is LOCAL DEV ONLY — never for untrusted input.
+const tools = createSonaTools({ runner: createVmDevRunner() });
 await runSonaTool("execute", { code: "return await sona.sources.list();" }, tools);
 ```
 
-`execute` runs the snippet against a facade rebuilt **inside** a `node:vm`
-context (no host object is reachable, so executed code can't walk a
-constructor back to the host realm), with both sync and async time bounded. It
-is still a dev/local harness, not a hardened sandbox — see the warning in
-`packages/mcp/src/tools/execute.ts` before exposing it to untrusted input.
+Running agent-authored code safely needs a real isolate; Node's `vm` is **not**
+a security mechanism. So `@sona/mcp` ships no enabled-by-default executor —
+execution is pluggable via a `CodeRunner`, and the default surface is just
+`docs` + `search`. For untrusted/networked input, provide an isolate-based
+runner (e.g. `isolated-vm` or a locked-down worker); `createVmDevRunner` is a
+local-dev convenience only. See the security model in
+`packages/mcp/src/tools/execute.ts`.
 
 ## Status
 

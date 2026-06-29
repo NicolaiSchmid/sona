@@ -4,6 +4,11 @@
  */
 import { FAMILIES } from "../catalog.js";
 
+export interface DocsOptions {
+  /** Whether the `execute` tool is enabled on this surface. */
+  hasExecute?: boolean;
+}
+
 export interface DocsResponse {
   productBoundary: string;
   families: readonly string[];
@@ -27,7 +32,11 @@ const SAFETY_RULES = [
   "Never expose secrets, credentials, or raw backend paths in outputs.",
 ];
 
-export function getDocs(): DocsResponse {
+export function getDocs(options: DocsOptions = {}): DocsResponse {
+  const usage = options.hasExecute
+    ? "Use `search` to discover operations, then `execute` to run code against the typed `sona.*` facade."
+    : "Use `search` to discover operations. The `execute` tool is disabled on this surface; enable it server-side (dev only) to run code against the `sona.*` facade.";
+
   const text = [
     "# Sona code-mode MCP",
     "",
@@ -39,7 +48,7 @@ export function getDocs(): DocsResponse {
     "## Safety rules",
     ...SAFETY_RULES.map((rule) => `- ${rule}`),
     "",
-    "Use `search` to discover operations, then `execute` to run code against the typed `sona.*` facade.",
+    usage,
   ].join("\n");
 
   return {
