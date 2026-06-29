@@ -18,7 +18,13 @@ export {
   type SonaTool,
 } from "./server.js";
 export { type DocsResponse, getDocs } from "./tools/docs.js";
-export { type ExecuteInput, type ExecuteResult, execute } from "./tools/execute.js";
+export {
+  type CodeRunner,
+  createVmDevRunner,
+  type ExecuteInput,
+  type ExecuteResult,
+  execute,
+} from "./tools/execute.js";
 export {
   type CatalogSearchResponse,
   type CatalogSearchResult,

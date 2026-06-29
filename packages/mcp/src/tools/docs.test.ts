@@ -15,4 +15,9 @@ describe("getDocs", () => {
     expect(joined).toContain("no automatic elster submission");
     expect(joined).toContain("no payment initiation");
   });
+
+  it("describes execute as disabled by default but advertises it when enabled", () => {
+    expect(getDocs().text).toContain("`execute` tool is disabled");
+    expect(getDocs({ hasExecute: true }).text).toContain("then `execute`");
+  });
 });
