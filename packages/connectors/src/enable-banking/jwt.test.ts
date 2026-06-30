@@ -13,7 +13,8 @@ describe("createEnableBankingJwt", () => {
     const { header, payload } = decodeJwt(token);
 
     expect(header).toEqual({ typ: "JWT", alg: "RS256", kid: "app_1" });
-    expect(payload.iss).toBe("app_1");
+    // The app id is the `kid`; the issuer is the documented constant.
+    expect(payload.iss).toBe("enablebanking.com");
     expect(payload.aud).toBe("api.enablebanking.com");
     expect(payload.iat).toBe(1000);
     expect(payload.exp).toBe(1000 + 3600);

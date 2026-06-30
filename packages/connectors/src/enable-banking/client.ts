@@ -46,10 +46,27 @@ export interface EnableBankingConfig {
   maxRetries?: number;
   /** Backoff before retry `attempt` (1-based). Default 250ms * attempt. */
   retryDelayMs?: (attempt: number) => number;
+  /**
+   * Default PSU context headers (e.g. `PSU-IP-Address`) sent on data-retrieval
+   * requests. Some ASPSPs return `PSU_HEADER_NOT_PROVIDED` without them. Only
+   * `PSU-*` headers are forwarded; anything else is ignored.
+   */
+  psuHeaders?: Record<string, string>;
 }
 
 const DEFAULT_API_BASE = "https://api.enablebanking.com";
 const RETRYABLE_STATUS = new Set([502, 503, 504]);
+
+/** Keeps only `PSU-*` headers so callers can't inject arbitrary request headers. */
+function allowlistPsuHeaders(headers: Record<string, string> | undefined): Record<string, string> {
+  const result: Record<string, string> = {};
+  for (const [key, value] of Object.entries(headers ?? {})) {
+    if (/^psu-/i.test(key)) {
+      result[key] = value;
+    }
+  }
+  return result;
+}
 
 export class EnableBankingApiError extends Error {
   readonly status: number;
@@ -69,6 +86,8 @@ export class EnableBankingApiError extends Error {
 interface RequestOptions {
   query?: Record<string, string | undefined>;
   body?: unknown;
+  /** Extra PSU-context headers (already allowlisted) for data requests. */
+  psuHeaders?: Record<string, string>;
 }
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
@@ -86,11 +105,18 @@ export interface EnableBankingClient {
   }): Promise<EbAuthResponse>;
   exchangeCode(input: { code: string }): Promise<EbSession>;
   getSession(input: { sessionId: string }): Promise<EbSession>;
-  getAccountDetails(input: { accountUid: string }): Promise<EbAccountDetails>;
-  getBalances(input: { accountUid: string }): Promise<EbBalancesResponse>;
+  getAccountDetails(input: {
+    accountUid: string;
+    psuHeaders?: Record<string, string>;
+  }): Promise<EbAccountDetails>;
+  getBalances(input: {
+    accountUid: string;
+    psuHeaders?: Record<string, string>;
+  }): Promise<EbBalancesResponse>;
   getTransactions(input: {
     accountUid: string;
     continuationKey?: string;
+    psuHeaders?: Record<string, string>;
   }): Promise<EbTransactionsResponse>;
 }
 
@@ -136,6 +162,7 @@ export function createEnableBankingClient(config: EnableBankingConfig): EnableBa
       headers: {
         Authorization: authHeader(),
         Accept: "application/json",
+        ...allowlistPsuHeaders(options.psuHeaders),
         ...(options.body !== undefined ? { "Content-Type": "application/json" } : {}),
       },
       ...(options.body !== undefined ? { body: JSON.stringify(options.body) } : {}),
@@ -194,13 +221,18 @@ export function createEnableBankingClient(config: EnableBankingConfig): EnableBa
       }),
     exchangeCode: ({ code }) => request("POST", "/sessions", { body: { code } }),
     getSession: ({ sessionId }) => request("GET", `/sessions/${encodeURIComponent(sessionId)}`),
-    getAccountDetails: ({ accountUid }) =>
-      request("GET", `/accounts/${encodeURIComponent(accountUid)}/details`),
-    getBalances: ({ accountUid }) =>
-      request("GET", `/accounts/${encodeURIComponent(accountUid)}/balances`),
-    getTransactions: ({ accountUid, continuationKey }) =>
+    getAccountDetails: ({ accountUid, psuHeaders }) =>
+      request("GET", `/accounts/${encodeURIComponent(accountUid)}/details`, {
+        psuHeaders: { ...config.psuHeaders, ...psuHeaders },
+      }),
+    getBalances: ({ accountUid, psuHeaders }) =>
+      request("GET", `/accounts/${encodeURIComponent(accountUid)}/balances`, {
+        psuHeaders: { ...config.psuHeaders, ...psuHeaders },
+      }),
+    getTransactions: ({ accountUid, continuationKey, psuHeaders }) =>
       request("GET", `/accounts/${encodeURIComponent(accountUid)}/transactions`, {
         query: { continuation_key: continuationKey },
+        psuHeaders: { ...config.psuHeaders, ...psuHeaders },
       }),
   };
 }

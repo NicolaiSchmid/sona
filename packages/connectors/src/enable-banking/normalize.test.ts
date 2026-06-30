@@ -28,15 +28,21 @@ describe("accountUidsFromSession", () => {
 });
 
 describe("normalizeAccount", () => {
-  it("preserves stable id, iban and raw payload", () => {
+  it("uses the stable identification hash, not the session uid", () => {
     const account = normalizeAccount(ACCOUNT_DETAILS_FIXTURE);
-    expect(account.externalId).toBe("acc_demo_1");
+    expect(account.externalId).toBe("idhash_demo_1");
     expect(account.iban).toBe("DE00000000000000000000");
     expect(account.currency).toBe("EUR");
     expect(account.raw).toEqual(ACCOUNT_DETAILS_FIXTURE);
   });
 
-  it("falls back to a stable hash id when uid and iban are missing", () => {
+  it("prefers identification_hash over a session-scoped uid", () => {
+    const account = normalizeAccount({ uid: "session_only", identification_hash: "stable_1" });
+    expect(account.externalId).toBe("stable_1");
+  });
+
+  it("falls back to IBAN, then a stable hash, when no identification hash exists", () => {
+    expect(normalizeAccount({ account_id: { iban: "DE123" } }).externalId).toBe("DE123");
     const a = normalizeAccount({ name: "No id" });
     const b = normalizeAccount({ name: "No id" });
     expect(a.externalId).toBe(b.externalId);

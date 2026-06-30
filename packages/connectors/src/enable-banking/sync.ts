@@ -36,6 +36,12 @@ export interface SyncRunStore {
 }
 
 export interface RawRecordStore {
+  /**
+   * Appends a raw record. MUST be idempotent on the record's dedup key
+   * (workspace + source + payload hash): re-importing an unchanged provider
+   * payload must be a no-op, not an error, so repeated syncs don't fail on the
+   * `uq_raw_records_dedup` constraint.
+   */
   append(record: RawSourceRecord): Promise<void>;
 }
 
@@ -52,7 +58,10 @@ export interface SyncEnv {
   nowIso: () => string;
 }
 
-export type SyncStatus = "succeeded" | "completed_with_errors";
+export type SyncStatus = "succeeded" | "completed_with_errors" | "failed";
+
+/** Pseudo "account" id used to record a session-level (non per-account) failure. */
+const SESSION_SCOPE = "(session)";
 
 export interface SyncSummary {
   runId: string;
@@ -112,8 +121,19 @@ export async function runEnableBankingSync(input: RunEnableBankingSyncInput): Pr
     );
   };
 
-  const session = await client.getSession({ sessionId });
-  const accountUids = accountUidsFromSession(session);
+  let accountUids: string[];
+  try {
+    const session = await client.getSession({ sessionId });
+    accountUids = accountUidsFromSession(session);
+  } catch (error) {
+    // A session-level failure (revoked/expired consent, endpoint down) must
+    // still close the run with a terminal status and an audit trail.
+    const message = errorMessage(error);
+    summary.errors.push({ accountUid: SESSION_SCOPE, message });
+    await runStore.recordError({ runId, accountUid: SESSION_SCOPE, message, at: env.nowIso() });
+    await runStore.finish({ runId, status: "failed", finishedAt: env.nowIso(), summary });
+    throw error;
+  }
 
   for (const accountUid of accountUids) {
     try {
@@ -130,16 +150,24 @@ export async function runEnableBankingSync(input: RunEnableBankingSyncInput): Pr
         summary.balancesSynced += 1;
       }
 
-      const transactions = await client.getTransactions({ accountUid });
-      await appendRaw(
-        "bank_transaction",
-        `${account.externalId}:transactions`,
-        toJson(transactions),
-      );
-      for (const transaction of transactions.transactions) {
-        await bankStore.saveTransaction(normalizeTransaction(account.externalId, transaction));
-        summary.transactionsSynced += 1;
-      }
+      // Follow continuation keys so accounts with many transactions are fully
+      // imported, not just the first page.
+      let continuationKey: string | undefined;
+      let page = 0;
+      do {
+        const transactions = await client.getTransactions({ accountUid, continuationKey });
+        await appendRaw(
+          "bank_transaction",
+          `${account.externalId}:transactions:${page}`,
+          toJson(transactions),
+        );
+        for (const transaction of transactions.transactions) {
+          await bankStore.saveTransaction(normalizeTransaction(account.externalId, transaction));
+          summary.transactionsSynced += 1;
+        }
+        continuationKey = transactions.continuation_key;
+        page += 1;
+      } while (continuationKey !== undefined);
     } catch (error) {
       const message = errorMessage(error);
       summary.errors.push({ accountUid, message });
