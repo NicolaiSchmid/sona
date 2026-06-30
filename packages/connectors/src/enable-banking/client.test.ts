@@ -115,6 +115,22 @@ describe("EnableBankingClient", () => {
     });
   });
 
+  it("forwards allowlisted PSU headers on data requests and drops others", async () => {
+    const { fetch, calls } = recordingFetch([jsonResponse(200, { balances: [] })]);
+    const client = createEnableBankingClient({
+      ...baseConfig,
+      fetch,
+      psuHeaders: { "PSU-IP-Address": "203.0.113.7", "X-Evil": "nope" },
+    });
+
+    await client.getBalances({ accountUid: "acc_1", psuHeaders: { "PSU-User-Agent": "Sona/1" } });
+
+    const headers = calls[0]?.init.headers ?? {};
+    expect(headers["PSU-IP-Address"]).toBe("203.0.113.7");
+    expect(headers["PSU-User-Agent"]).toBe("Sona/1");
+    expect(headers["X-Evil"]).toBeUndefined();
+  });
+
   it("gives up after exhausting retries on persistent 503", async () => {
     const { fetch, calls } = recordingFetch([
       jsonResponse(503, {}),

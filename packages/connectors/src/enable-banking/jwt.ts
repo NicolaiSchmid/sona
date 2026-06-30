@@ -12,12 +12,16 @@ export const MAX_JWT_TTL_SECONDS = 24 * 60 * 60;
 
 const DEFAULT_TTL_SECONDS = 3600;
 const DEFAULT_AUDIENCE = "api.enablebanking.com";
+/** Per the Enable Banking API reference, the JWT issuer is this constant. */
+const DEFAULT_ISSUER = "enablebanking.com";
 
 export interface JwtConfig {
-  /** Enable Banking Application ID; used as both `kid` and `iss`. */
+  /** Enable Banking Application ID; used as the JWT `kid`. */
   applicationId: string;
   /** PEM-encoded RSA private key. */
   privateKeyPem: string;
+  /** JWT issuer; defaults to the documented `enablebanking.com`. */
+  issuer?: string;
   /** Token audience; defaults to the Enable Banking API host. */
   audience?: string;
   /** Lifetime in seconds; clamped to {@link MAX_JWT_TTL_SECONDS}. */
@@ -53,7 +57,7 @@ export function createEnableBankingJwt(
   const ttl = Math.min(config.ttlSeconds ?? DEFAULT_TTL_SECONDS, MAX_JWT_TTL_SECONDS);
   const header: JwtHeader = { typ: "JWT", alg: "RS256", kid: config.applicationId };
   const payload: JwtPayload = {
-    iss: config.applicationId,
+    iss: config.issuer ?? DEFAULT_ISSUER,
     aud: config.audience ?? DEFAULT_AUDIENCE,
     iat: nowSeconds,
     exp: nowSeconds + ttl,

@@ -26,7 +26,14 @@ export function accountUidsFromSession(session: EbSession): string[] {
 
 export function normalizeAccount(details: EbAccountDetails): NormalizedAccount {
   const raw = asJson(details);
-  const externalId = details.uid ?? details.account_id?.iban ?? `eb_${stableJsonHash(raw)}`;
+  // Enable Banking's `uid` is only valid for the current authorized session, so
+  // prefer the stable identification hash; fall back to IBAN, then a content
+  // hash. The session `uid` is intentionally not used as the durable id.
+  const externalId =
+    details.identification_hash ??
+    details.identification_hashes?.[0] ??
+    details.account_id?.iban ??
+    `eb_${stableJsonHash(raw)}`;
   return {
     externalId,
     name: details.name,

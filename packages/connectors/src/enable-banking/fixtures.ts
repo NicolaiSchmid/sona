@@ -18,6 +18,7 @@ export const SESSION_FIXTURE: EbSession = {
 
 export const ACCOUNT_DETAILS_FIXTURE: EbAccountDetails = {
   uid: "acc_demo_1",
+  identification_hash: "idhash_demo_1",
   name: "Demo Giro",
   product: "Current Account",
   currency: "EUR",

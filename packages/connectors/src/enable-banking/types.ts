@@ -47,7 +47,12 @@ export interface EbSession {
 }
 
 export interface EbAccountDetails {
+  /** Session-scoped account id used for API calls; NOT stable across sessions. */
   uid?: string;
+  /** Stable account identifier for matching across sessions. */
+  identification_hash?: string;
+  /** Some responses return multiple stable hashes; the first is canonical. */
+  identification_hashes?: string[];
   name?: string;
   product?: string;
   currency?: string;

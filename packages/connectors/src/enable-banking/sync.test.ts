@@ -38,7 +38,11 @@ function harness(options: { failTransactionsFor?: string } = {}): Harness {
     startAuth: async () => ({ url: "https://auth.example" }),
     exchangeCode: async () => SESSION_FIXTURE,
     getSession: async () => SESSION_FIXTURE,
-    getAccountDetails: async ({ accountUid }) => ({ ...ACCOUNT_DETAILS_FIXTURE, uid: accountUid }),
+    getAccountDetails: async ({ accountUid }) => ({
+      ...ACCOUNT_DETAILS_FIXTURE,
+      uid: accountUid,
+      identification_hash: `idhash_${accountUid}`,
+    }),
     getBalances: async () => BALANCES_FIXTURE,
     getTransactions: async ({ accountUid }) => {
       if (options.failTransactionsFor === accountUid) {
@@ -126,5 +130,58 @@ describe("runEnableBankingSync", () => {
     expect(h.runEvents.some(([kind]) => kind === "error")).toBe(true);
     const finish = h.runEvents.find(([kind]) => kind === "finish");
     expect((finish?.[1] as { status: string }).status).toBe("completed_with_errors");
+  });
+
+  it("follows continuation keys to import every transaction page", async () => {
+    const h = harness();
+    const single = { uid: "acc_one" };
+    h.client.getSession = async () => ({ session_id: "s", accounts: [single] });
+    let call = 0;
+    h.client.getTransactions = async ({ continuationKey }) => {
+      call += 1;
+      if (continuationKey === undefined) {
+        return {
+          transactions: [
+            {
+              entry_reference: "p1a",
+              transaction_amount: { amount: "1.00", currency: "EUR" },
+              credit_debit_indicator: "DBIT",
+            },
+          ],
+          continuation_key: "page2",
+        };
+      }
+      return {
+        transactions: [
+          {
+            entry_reference: "p2a",
+            transaction_amount: { amount: "2.00", currency: "EUR" },
+            credit_debit_indicator: "DBIT",
+          },
+        ],
+      };
+    };
+
+    const summary = await runEnableBankingSync({ ...baseInput, ...h });
+
+    expect(call).toBe(2);
+    expect(summary.transactionsSynced).toBe(2);
+    // One raw transaction page record per page.
+    expect(h.raws.filter((r) => r.recordType === "bank_transaction")).toHaveLength(2);
+  });
+
+  it("finishes the run as failed when the session fetch throws", async () => {
+    const h = harness();
+    h.client.getSession = async () => {
+      throw new EnableBankingApiError(403, "GET", "/sessions/x", "consent revoked");
+    };
+
+    await expect(runEnableBankingSync({ ...baseInput, ...h })).rejects.toBeInstanceOf(
+      EnableBankingApiError,
+    );
+
+    const finish = h.runEvents.find(([kind]) => kind === "finish");
+    expect((finish?.[1] as { status: string }).status).toBe("failed");
+    expect(h.runEvents.some(([kind]) => kind === "error")).toBe(true);
   });
 });
