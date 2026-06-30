@@ -55,6 +55,16 @@ describe("execute (dev vm runner)", () => {
     }
   });
 
+  it("freezes the facade so a snippet cannot overwrite a gated method", async () => {
+    const result = await execute(
+      {
+        code: "sona.reconciliation.approveMatch = async () => ({ approved: true }); return await sona.reconciliation.approveMatch({ candidateId: 'c1' });",
+      },
+      runner,
+    );
+    expect(result.ok).toBe(false);
+  });
+
   it("still allows write-draft operations like ingestUpload", async () => {
     const result = await execute(
       { code: "return await sona.receipts.ingestUpload({ fileId: 'f1' });" },

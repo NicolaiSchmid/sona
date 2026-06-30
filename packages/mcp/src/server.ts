@@ -76,7 +76,9 @@ export function createSonaTools(options: CreateSonaToolsOptions = {}): SonaTool[
           "Run code against the typed sona.* facade, e.g. `return await sona.sources.list();`.",
         inputSchema: z.object({
           code: z.string(),
-          timeoutMs: z.number().int().positive().optional(),
+          // Bounded here so no runner receives an unbounded budget; each runner
+          // additionally clamps to its own safe maximum.
+          timeoutMs: z.number().int().positive().max(60_000).optional(),
         }),
         handler: async (input) => execute(input, runner),
       }),

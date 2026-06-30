@@ -77,8 +77,12 @@ const REVIEW_GATED_OPERATIONS: ReadonlyArray<[family: string, method: string]> =
   ["agents", "runPortalTask"],
 ];
 
-// Source that rebuilds the facade in-realm and replaces review-gated methods
-// with ones that throw, so executed code can request work but never approve it.
+/** Upper bound on a single execution, regardless of caller-supplied timeout. */
+const MAX_TIMEOUT_MS = 5_000;
+
+// Source that rebuilds the facade in-realm, replaces review-gated methods with
+// ones that throw, then deeply freezes the facade so a snippet can neither call
+// gated operations nor reassign them to bypass the gate.
 const SANDBOX_SETUP_SOURCE = `
   globalThis.sona = ${FACADE_FACTORY_SOURCE};
   for (const [family, method] of ${JSON.stringify(REVIEW_GATED_OPERATIONS)}) {
@@ -89,6 +93,10 @@ const SANDBOX_SETUP_SOURCE = `
       );
     };
   }
+  for (const family of Object.keys(globalThis.sona)) {
+    Object.freeze(globalThis.sona[family]);
+  }
+  Object.freeze(globalThis.sona);
 `;
 
 function hostError(error: unknown): ExecuteFailure {
@@ -105,10 +113,14 @@ function hostError(error: unknown): ExecuteFailure {
 export function createVmDevRunner(): CodeRunner {
   return {
     async run({ code, timeoutMs = 1000 }) {
+      // Clamp the caller-controlled budget so a large value cannot block the
+      // event loop for long (a custom runner receives the same raw value).
+      const budgetMs = Math.min(Math.max(Math.trunc(timeoutMs), 1), MAX_TIMEOUT_MS);
+
       const context = createContext({});
       let timer: ReturnType<typeof setTimeout> | undefined;
       try {
-        runInContext(SANDBOX_SETUP_SOURCE, context, { timeout: timeoutMs });
+        runInContext(SANDBOX_SETUP_SOURCE, context, { timeout: budgetMs });
 
         // Strict-mode body so user `this` is undefined; the result and any error
         // are serialized to JSON *inside* the realm, so the host only ever
@@ -135,9 +147,9 @@ export function createVmDevRunner(): CodeRunner {
           }
         })()`;
 
-        const execution = runInContext(wrapped, context, { timeout: timeoutMs }) as Promise<string>;
+        const execution = runInContext(wrapped, context, { timeout: budgetMs }) as Promise<string>;
         const deadline = new Promise<never>((_resolve, reject) => {
-          timer = setTimeout(() => reject(new Error("Execution timed out")), timeoutMs);
+          timer = setTimeout(() => reject(new Error("Execution timed out")), budgetMs);
           timer.unref?.();
         });
 
