@@ -56,7 +56,15 @@ export interface SonaFacade {
   };
 }
 
-/** Creates the deterministic stub facade used by the `execute` tool. */
+/**
+ * Creates the deterministic stub facade used by the `execute` tool.
+ *
+ * NOTE: when these stubs are wired to real write-draft operations, each method
+ * MUST validate its input against the corresponding catalog `inputSchema`
+ * (`packages/mcp/src/catalog.ts`) at that write boundary — agent snippets are
+ * plain JavaScript and do not go through the catalog's zod schemas, so malformed
+ * ids/accounts would otherwise reach real jobs.
+ */
 export function createFacade(): SonaFacade {
   return {
     sources: {
