@@ -32,7 +32,11 @@ importers:
 
   apps/worker: {}
 
-  packages/connectors: {}
+  packages/connectors:
+    dependencies:
+      '@sona/core':
+        specifier: workspace:*
+        version: link:../core
 
   packages/core:
     dependencies:
