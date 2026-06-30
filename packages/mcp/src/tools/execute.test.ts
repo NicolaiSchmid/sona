@@ -27,13 +27,40 @@ describe("execute (dev vm runner)", () => {
     expect(result).toEqual({ ok: true, value: "undefined" });
   });
 
-  it("rejects code containing denied tokens up front", async () => {
+  it("leaves `process` unreachable in the realm", async () => {
     const result = await execute({ code: "return process.env.SECRET;" }, runner);
     expect(result.ok).toBe(false);
     if (!result.ok) {
-      expect(result.error.name).toBe("ForbiddenAccessError");
-      expect(result.error.message).toContain("process");
+      expect(result.error.name).toBe("ReferenceError");
     }
+  });
+
+  it("does not reject ordinary data values that look like keywords", async () => {
+    // A real id such as "import_2026" must not be blocked by a brittle deny-list.
+    const result = await execute(
+      { code: "return await sona.sources.sync({ sourceId: 'import_2026' });" },
+      runner,
+    );
+    expect(result).toEqual({ ok: true, value: { sourceId: "import_2026", status: "queued" } });
+  });
+
+  it("disables review-gated operations so code cannot bypass the human gate", async () => {
+    const result = await execute(
+      { code: "return await sona.reconciliation.approveMatch({ candidateId: 'c1' });" },
+      runner,
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.message).toContain("requires human review");
+    }
+  });
+
+  it("still allows write-draft operations like ingestUpload", async () => {
+    const result = await execute(
+      { code: "return await sona.receipts.ingestUpload({ fileId: 'f1' });" },
+      runner,
+    );
+    expect(result).toEqual({ ok: true, value: { documentId: "doc_f1", status: "queued" } });
   });
 
   it("normalizes thrown errors to a bounded name/message", async () => {
@@ -52,6 +79,18 @@ describe("execute (dev vm runner)", () => {
     if (!result.ok) {
       expect(result.error.name).toBe("X");
       expect(result.error.message).toBe("safe");
+    }
+  });
+
+  it("stays bounded when a thrown error's name getter throws", async () => {
+    const result = await execute(
+      { code: "throw { get name() { throw new Error('trap'); }, message: 'm' };" },
+      runner,
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      // The getter throws inside the realm; we fall back to bounded defaults.
+      expect(result.error.name).toBe("Error");
     }
   });
 
