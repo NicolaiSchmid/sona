@@ -16,11 +16,17 @@
  * isolate via `isolated-vm`, or a locked-down worker/subprocess).
  *
  * {@link createVmDevRunner} is provided for LOCAL DEV ONLY. It is hardened in
- * shallow ways (facade rebuilt in-realm, strict-mode body so `this` is
- * undefined, deny-list, results crossing back as JSON so the host never touches
- * live VM objects, watchdog + deadline timers) but it is explicitly NOT a
- * security boundary: it cannot stop capability escapes through `globalThis` /
- * `Function`, nor bound a microtask loop. Never expose it to untrusted input.
+ * shallow ways (facade rebuilt in-realm with review-gated operations disabled,
+ * strict-mode body so `this` is undefined, results crossing back as JSON so the
+ * host never touches live VM objects, watchdog + deadline timers) but it is
+ * explicitly NOT a security boundary: it cannot stop capability escapes through
+ * `globalThis` / `Function`, nor bound a microtask loop. Never expose it to
+ * untrusted input.
+ *
+ * Regardless of runner, code execution must not let an agent bypass the human
+ * review gate, so operations whose catalog risk is `review_required` or higher
+ * (e.g. `approveMatch`, `autoApply`, `generatePackage`, `runPortalTask`) are
+ * disabled inside the executable facade — they throw if called from a snippet.
  */
 import { createContext, runInContext } from "node:vm";
 import { createFacade } from "../facade.js";
@@ -56,32 +62,34 @@ export function execute(input: ExecuteInput, runner: CodeRunner): Promise<Execut
   return runner.run(input);
 }
 
-/** Substrings rejected up front (defense in depth, NOT the security boundary). */
-const DENIED_PATTERNS = [
-  "process",
-  "require",
-  "import",
-  "globalThis",
-  "eval",
-  "Function(",
-  "constructor",
-  "__proto__",
-];
-
 // `createFacade` is self-contained (literals and async functions only), so its
 // source can be re-evaluated inside the vm realm to produce a sandbox-owned
 // facade. Keep it free of external references for this to hold.
 const FACADE_FACTORY_SOURCE = `(${createFacade.toString()})()`;
 
-function forbidden(token: string): ExecuteFailure {
-  return {
-    ok: false,
-    error: {
-      name: "ForbiddenAccessError",
-      message: `Code may only use the sona.* facade; disallowed token: ${token}`,
-    },
-  };
-}
+// Operations whose catalog risk is review_required or higher. They are disabled
+// inside the executable facade so a snippet cannot bypass the human review gate.
+// (Kept in sync with packages/mcp/src/catalog.ts.)
+const REVIEW_GATED_OPERATIONS: ReadonlyArray<[family: string, method: string]> = [
+  ["reconciliation", "autoApply"],
+  ["reconciliation", "approveMatch"],
+  ["tax", "generatePackage"],
+  ["agents", "runPortalTask"],
+];
+
+// Source that rebuilds the facade in-realm and replaces review-gated methods
+// with ones that throw, so executed code can request work but never approve it.
+const SANDBOX_SETUP_SOURCE = `
+  globalThis.sona = ${FACADE_FACTORY_SOURCE};
+  for (const [family, method] of ${JSON.stringify(REVIEW_GATED_OPERATIONS)}) {
+    globalThis.sona[family][method] = function () {
+      throw new Error(
+        "sona." + family + "." + method +
+        " requires human review or policy and is not callable from execute()",
+      );
+    };
+  }
+`;
 
 function hostError(error: unknown): ExecuteFailure {
   if (error instanceof Error) {
@@ -97,34 +105,32 @@ function hostError(error: unknown): ExecuteFailure {
 export function createVmDevRunner(): CodeRunner {
   return {
     async run({ code, timeoutMs = 1000 }) {
-      const offending = DENIED_PATTERNS.find((pattern) => code.includes(pattern));
-      if (offending) {
-        return forbidden(offending);
-      }
-
       const context = createContext({});
       let timer: ReturnType<typeof setTimeout> | undefined;
       try {
-        runInContext(`globalThis.sona = ${FACADE_FACTORY_SOURCE};`, context, {
-          timeout: timeoutMs,
-        });
+        runInContext(SANDBOX_SETUP_SOURCE, context, { timeout: timeoutMs });
 
         // Strict-mode body so user `this` is undefined; the result and any error
         // are serialized to JSON *inside* the realm, so the host only ever
         // handles a primitive string (never live getters/Proxies/accessors).
+        // All error-property reads happen inside the guarded block, so a hostile
+        // throwing getter is caught here and never reaches the host.
         const wrapped = `(async function () {
           "use strict";
           try {
             const __value = await (async () => { ${code}\n })();
             return JSON.stringify({ ok: true, value: __value === undefined ? null : __value });
           } catch (err) {
-            const name = err && typeof err === "object" && typeof err.name === "string"
-              ? err.name : "Error";
-            let message;
+            let name = "Error";
+            let message = "Error";
             try {
-              message = err && typeof err === "object" && "message" in err
-                ? String(err.message) : String(err);
-            } catch { message = "Error"; }
+              if (err && typeof err === "object") {
+                if (typeof err.name === "string") name = err.name;
+                message = "message" in err ? String(err.message) : String(err);
+              } else {
+                message = String(err);
+              }
+            } catch { /* keep bounded defaults */ }
             return JSON.stringify({ ok: false, error: { name, message } });
           }
         })()`;
