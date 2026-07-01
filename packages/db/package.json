@@ -16,6 +16,7 @@
     "typecheck": "tsc -b"
   },
   "dependencies": {
-    "@sona/core": "workspace:*"
+    "@sona/core": "workspace:*",
+    "@sona/receipts": "workspace:*"
   }
 }

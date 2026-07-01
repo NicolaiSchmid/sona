@@ -15,6 +15,12 @@ import type {
   SourceKind,
   SourceStatus,
 } from "@sona/core";
+import type {
+  DocumentSourceKind,
+  MatchDecisionKind,
+  MatchOutcome,
+  RetentionState,
+} from "@sona/receipts";
 
 export interface UserRow {
   id: string;
@@ -157,3 +163,68 @@ export const CORE_TABLES = [
 ] as const;
 
 export type CoreTableName = (typeof CORE_TABLES)[number];
+
+// --- Receipts schema (migrations/0002_receipts.sql) -------------------------
+
+export interface DocumentRow {
+  id: string;
+  workspace_id: string;
+  content_hash: string;
+  mime_type: string;
+  original_filename: string;
+  storage_uri: string;
+  source_kind: DocumentSourceKind;
+  source_metadata_json: string | null;
+  retention_state: RetentionState;
+  created_at: string;
+}
+
+export interface DocumentExtractionRow {
+  id: string;
+  workspace_id: string;
+  document_id: string;
+  vendor_name: string | null;
+  document_date: string | null;
+  due_date: string | null;
+  total_amount: string | null;
+  tax_amount: string | null;
+  currency: string | null;
+  invoice_number: string | null;
+  payment_reference: string | null;
+  extracted_text: string | null;
+  confidence: string;
+  extractor_version: string;
+  created_at: string;
+}
+
+export interface MatchCandidateRow {
+  id: string;
+  workspace_id: string;
+  document_id: string;
+  transaction_ref: string;
+  score: string;
+  reasons_json: string;
+  blockers_json: string;
+  outcome: MatchOutcome;
+  created_at: string;
+}
+
+export interface MatchDecisionRow {
+  id: string;
+  workspace_id: string;
+  candidate_id: string;
+  decision: MatchDecisionKind;
+  actor: string;
+  notes: string | null;
+  created_at: string;
+}
+
+/** Names of every table created by the receipts migration. */
+export const RECEIPT_TABLES = [
+  "documents",
+  "document_extractions",
+  "match_candidates",
+  "match_decisions",
+] as const;
+
+export type ReceiptTableName = (typeof RECEIPT_TABLES)[number];
