@@ -121,6 +121,8 @@ export interface NormalizedTransaction {
   /** Signed decimal string: DBIT is negative, CRDT is positive. */
   amount: string;
   currency: string;
+  /** Booking status, e.g. "BOOK" (booked) or "PDNG" (pending). */
+  status: string | undefined;
   counterpartyName: string | undefined;
   remittanceInfo: string | undefined;
   raw: JsonValue;

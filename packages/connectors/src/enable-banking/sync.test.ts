@@ -24,12 +24,14 @@ interface Harness {
   events: string[];
   raws: RawSourceRecord[];
   runEvents: Array<[string, unknown]>;
+  txLinks: string[];
 }
 
 function harness(options: { failTransactionsFor?: string } = {}): Harness {
   const events: string[] = [];
   const raws: RawSourceRecord[] = [];
   const runEvents: Array<[string, unknown]> = [];
+  const txLinks: string[] = [];
   let counter = 0;
 
   const client: EnableBankingClient = {
@@ -65,8 +67,9 @@ function harness(options: { failTransactionsFor?: string } = {}): Harness {
     saveBalance: async () => {
       events.push("balance");
     },
-    saveTransaction: async () => {
+    saveTransaction: async (_transaction, link) => {
       events.push("transaction");
+      txLinks.push(link.rawRecordId);
     },
   };
   const runStore: SyncRunStore = {
@@ -85,7 +88,7 @@ function harness(options: { failTransactionsFor?: string } = {}): Harness {
     nowIso: () => "2026-02-01T00:00:00Z",
   };
 
-  return { client, rawStore, bankStore, runStore, env, events, raws, runEvents };
+  return { client, rawStore, bankStore, runStore, env, events, raws, runEvents, txLinks };
 }
 
 const baseInput = { workspaceId: "ws_1", sourceId: "src_1", sessionId: "sess_demo_1" };
@@ -116,6 +119,13 @@ describe("runEnableBankingSync", () => {
 
     const finish = h.runEvents.find(([kind]) => kind === "finish");
     expect((finish?.[1] as { status: string }).status).toBe("succeeded");
+
+    // Each saved transaction links back to a real raw transaction record.
+    const txRawIds = new Set(
+      h.raws.filter((r) => r.recordType === "bank_transaction").map((r) => r.id),
+    );
+    expect(h.txLinks.length).toBe(4);
+    expect(h.txLinks.every((id) => txRawIds.has(id))).toBe(true);
   });
 
   it("records a per-account error without failing the whole sync", async () => {

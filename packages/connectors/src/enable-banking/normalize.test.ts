@@ -85,6 +85,29 @@ describe("normalizeTransaction", () => {
     expect(credit.counterpartyName).toBe("Tenant Mietzahlung");
   });
 
+  it("exposes the booking status for downstream gating", () => {
+    const pending = normalizeTransaction("acc", {
+      transaction_amount: { amount: "5.00", currency: "EUR" },
+      credit_debit_indicator: "DBIT",
+      status: "PDNG",
+      entry_reference: "e1",
+    });
+    expect(pending.status).toBe("PDNG");
+  });
+
+  it("disambiguates identical hash-fallback transactions by index", () => {
+    const tx: EbTransaction = {
+      transaction_amount: { amount: "9.99", currency: "EUR" },
+      credit_debit_indicator: "DBIT",
+      booking_date: "2026-01-10",
+    };
+    const first = normalizeTransaction("acc", tx, { index: 0 });
+    const second = normalizeTransaction("acc", tx, { index: 1 });
+    expect(first.externalId).not.toBe(second.externalId);
+    // Same index is stable across runs.
+    expect(normalizeTransaction("acc", tx, { index: 0 }).externalId).toBe(first.externalId);
+  });
+
   it("derives a stable hash id when entry_reference is missing", () => {
     const tx: EbTransaction = {
       transaction_amount: { amount: "5.00", currency: "EUR" },

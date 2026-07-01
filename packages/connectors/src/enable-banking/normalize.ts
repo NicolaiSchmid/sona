@@ -96,13 +96,27 @@ function transactionIdentity(transaction: EbTransaction): JsonValue {
   });
 }
 
+export interface NormalizeTransactionOptions {
+  /**
+   * Position of the transaction within the account's sync. When an ASPSP omits
+   * `entry_reference` the fallback id is a content hash, and two legitimately
+   * identical same-day movements (e.g. two equal card charges) would otherwise
+   * collapse to one id. The index disambiguates them so neither is dropped by an
+   * idempotent store.
+   */
+  index?: number;
+}
+
 export function normalizeTransaction(
   accountExternalId: string,
   transaction: EbTransaction,
+  options: NormalizeTransactionOptions = {},
 ): NormalizedTransaction {
   const raw = asJson(transaction);
+  const suffix = options.index !== undefined ? `_${options.index}` : "";
   const externalId =
-    transaction.entry_reference ?? `eb_${stableJsonHash(transactionIdentity(transaction))}`;
+    transaction.entry_reference ??
+    `eb_${stableJsonHash(transactionIdentity(transaction))}${suffix}`;
   const remittance = transaction.remittance_information;
   return {
     accountExternalId,
@@ -111,6 +125,7 @@ export function normalizeTransaction(
     valueDate: transaction.value_date,
     amount: signedAmount(transaction),
     currency: transaction.transaction_amount.currency,
+    status: transaction.status,
     counterpartyName: counterpartyName(transaction),
     remittanceInfo: remittance && remittance.length > 0 ? remittance.join(" ").trim() : undefined,
     raw,

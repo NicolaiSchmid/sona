@@ -45,10 +45,15 @@ export interface RawRecordStore {
   append(record: RawSourceRecord): Promise<void>;
 }
 
+/** Link from a normalized bank record back to the raw source record it came from. */
+export interface RawLink {
+  rawRecordId: string;
+}
+
 export interface BankRecordStore {
-  saveAccount(account: NormalizedAccount): Promise<void>;
-  saveBalance(balance: NormalizedBalance): Promise<void>;
-  saveTransaction(transaction: NormalizedTransaction): Promise<void>;
+  saveAccount(account: NormalizedAccount, link: RawLink): Promise<void>;
+  saveBalance(balance: NormalizedBalance, link: RawLink): Promise<void>;
+  saveTransaction(transaction: NormalizedTransaction, link: RawLink): Promise<void>;
 }
 
 export interface SyncEnv {
@@ -117,11 +122,12 @@ export async function runEnableBankingSync(input: RunEnableBankingSyncInput): Pr
     externalId: string,
     context: { accountExternalId: string; kind: string; page?: number },
     payload: JsonValue,
-  ): Promise<void> => {
+  ): Promise<string> => {
+    const id = env.ids();
     const at = env.nowIso();
     await rawStore.append(
       createRawSourceRecord({
-        id: env.ids(),
+        id,
         workspaceId,
         sourceId,
         externalId,
@@ -131,6 +137,7 @@ export async function runEnableBankingSync(input: RunEnableBankingSyncInput): Pr
         createdAt: at,
       }),
     );
+    return id;
   };
 
   let accountUids: string[];
@@ -157,24 +164,24 @@ export async function runEnableBankingSync(input: RunEnableBankingSyncInput): Pr
       const details = await client.getAccountDetails({ accountUid });
       const account = normalizeAccount(details);
       const ext = account.externalId;
-      await appendRaw(
+      const accountRawId = await appendRaw(
         "bank_account",
         ext,
         { accountExternalId: ext, kind: "account" },
         account.raw,
       );
-      await bankStore.saveAccount(account);
+      await bankStore.saveAccount(account, { rawRecordId: accountRawId });
       summary.accountsSynced += 1;
 
       const balances = await client.getBalances({ accountUid });
-      await appendRaw(
+      const balancesRawId = await appendRaw(
         "bank_balance",
         `${ext}:balances`,
         { accountExternalId: ext, kind: "balances" },
         toJson(balances),
       );
       for (const balance of balances.balances) {
-        await bankStore.saveBalance(normalizeBalance(ext, balance));
+        await bankStore.saveBalance(normalizeBalance(ext, balance), { rawRecordId: balancesRawId });
         summary.balancesSynced += 1;
       }
 
@@ -183,6 +190,7 @@ export async function runEnableBankingSync(input: RunEnableBankingSyncInput): Pr
       // the final page, so normalize null to undefined before deciding to stop.
       let continuationKey: string | undefined;
       let page = 0;
+      let txIndex = 0;
       do {
         const transactions = await client.getTransactions({
           accountUid,
@@ -190,14 +198,20 @@ export async function runEnableBankingSync(input: RunEnableBankingSyncInput): Pr
           // Date/strategy apply to the initial page only.
           ...(page === 0 ? transactionQuery : {}),
         });
-        await appendRaw(
+        const pageRawId = await appendRaw(
           "bank_transaction",
           `${ext}:transactions:${page}`,
           { accountExternalId: ext, kind: "transactions", page },
           toJson(transactions),
         );
         for (const transaction of transactions.transactions) {
-          await bankStore.saveTransaction(normalizeTransaction(ext, transaction));
+          await bankStore.saveTransaction(
+            normalizeTransaction(ext, transaction, { index: txIndex }),
+            {
+              rawRecordId: pageRawId,
+            },
+          );
+          txIndex += 1;
           summary.transactionsSynced += 1;
         }
         continuationKey = transactions.continuation_key ?? undefined;
