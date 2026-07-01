@@ -5,6 +5,7 @@
     { "path": "./packages/db" },
     { "path": "./packages/connectors" },
     { "path": "./packages/receipts" },
+    { "path": "./packages/agents" },
     { "path": "./packages/tax-de" },
     { "path": "./packages/mcp" },
     { "path": "./apps/worker" },

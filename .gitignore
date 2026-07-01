@@ -30,3 +30,6 @@ coverage/
 .tmp/
 .cache/
 .DS_Store
+
+# local agent harness state
+.claude/

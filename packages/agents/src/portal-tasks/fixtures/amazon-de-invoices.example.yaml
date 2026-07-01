@@ -1,0 +1,23 @@
+# Example portal task definition. Contains NO credentials or sessions — those
+# are supplied separately (encrypted, scoped to the connection) at run time.
+id: amazon-de-invoices
+name: Amazon Germany invoice fetcher
+version: 1
+risk: read_only_document_fetch
+domains:
+  - amazon.de
+requires:
+  - authenticated_session_or_credentials
+allowedActions:
+  - navigate
+  - click
+  - search_orders
+  - download_invoice_pdf
+forbiddenActions:
+  - purchase
+  - cancel_order
+  - change_payment_method
+  - change_address
+outputs:
+  - document_file
+  - provenance_json
