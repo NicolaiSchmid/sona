@@ -21,15 +21,30 @@ const FORBIDDEN_TOKENS = new Set([
   "remove",
   "subscribe",
   "unsubscribe",
+  "update",
+  "edit",
+  "modify",
+  "add",
+  "create",
+  "submit",
+  "send",
+  "place",
+  "initiate",
+  "reset",
+  "post",
+  "upload",
+  "confirm",
 ]);
 
 /**
  * Multi-word forbidden concepts matched against the normalized action. Kept as
  * phrases so benign actions like `search_orders` are not tripped by a bare
- * `order` token.
+ * `order` token. Covers payment/address/password/profile changes under any verb
+ * (e.g. `update_payment_method`, `add_payment_method`, `edit_address`).
  */
 const FORBIDDEN_PHRASES = [
   "place_order",
+  "payment_method",
   "change_payment",
   "change_address",
   "change_password",

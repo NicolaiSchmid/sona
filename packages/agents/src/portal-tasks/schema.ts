@@ -11,14 +11,21 @@ export const PORTAL_TASK_RISKS = ["read_only_document_fetch"] as const;
 
 export const PORTAL_TASK_OUTPUTS = ["document_file", "provenance_json"] as const;
 
+/**
+ * A bare hostname: dot-separated labels, no scheme, path, port, userinfo, or
+ * wildcard. Runners enforce the allowlist as the navigation boundary, so a `*`
+ * or a full URL must not be accepted here.
+ */
+const HOSTNAME_RE = /^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$/i;
+
 export const portalTaskSchema = z
   .object({
     id: z.string().min(1),
     name: z.string().min(1),
     version: z.number().int().positive(),
     risk: z.enum(PORTAL_TASK_RISKS),
-    /** Domain allowlist — at least one; the runner must not navigate elsewhere. */
-    domains: z.array(z.string().min(1)).min(1),
+    /** Domain allowlist of bare hostnames; the runner must not navigate elsewhere. */
+    domains: z.array(z.string().regex(HOSTNAME_RE, "must be a bare hostname")).min(1),
     requires: z.array(z.string().min(1)).default([]),
     allowedActions: z.array(z.string().min(1)).min(1),
     forbiddenActions: z.array(z.string().min(1)).default([]),

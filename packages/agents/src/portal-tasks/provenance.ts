@@ -38,12 +38,24 @@ export interface FetchedDocumentProvenance {
   extractionStatus: ExtractionStatus;
 }
 
+/**
+ * The fetched bytes, carried so a real runner can hand them to document storage.
+ * `bytes` inlines small payloads; `path` points at a temp file; `objectRef`
+ * references an already-uploaded object.
+ */
+export type FetchedContent =
+  | { kind: "bytes"; bytes: Uint8Array }
+  | { kind: "path"; path: string }
+  | { kind: "objectRef"; uri: string };
+
 /** A document fetched by a portal task, before it is stored. */
 export interface FetchedDocument {
   filename: string;
   mimeType: string;
   contentHash: string;
   sourceUrl: string | undefined;
+  /** The payload to persist (bytes, temp path, or an object reference). */
+  content: FetchedContent;
   provenance: FetchedDocumentProvenance;
 }
 
@@ -64,6 +76,10 @@ export interface ToStoredDocumentInput {
 export function toStoredDocument(input: ToStoredDocumentInput): StoredDocument {
   const { document, id, storageUri, createdAt } = input;
   const provenance = document.provenance;
+  // The dedup hash and the provenance hash must agree, or one record is wrong.
+  if (document.contentHash !== provenance.contentHash) {
+    throw new Error("content hash mismatch between fetched document and its provenance");
+  }
   return {
     id,
     workspaceId: provenance.workspaceId,
@@ -78,13 +94,31 @@ export function toStoredDocument(input: ToStoredDocumentInput): StoredDocument {
   };
 }
 
+/**
+ * Drops query strings and fragments from a URL before persisting it, since
+ * authenticated invoice URLs often carry session ids / signed params that must
+ * not land in stored metadata, exports, or MCP output. Returns null if the URL
+ * can't be parsed.
+ */
+function sanitizeUrl(raw: string | undefined): string | null {
+  if (raw === undefined) {
+    return null;
+  }
+  try {
+    const url = new URL(raw);
+    return `${url.protocol}//${url.host}${url.pathname}`;
+  } catch {
+    return null;
+  }
+}
+
 function provenanceToJson(provenance: FetchedDocumentProvenance): JsonValue {
   return {
     sourcePortal: provenance.sourcePortal,
     taskId: provenance.taskId,
     taskVersion: provenance.taskVersion,
     runId: provenance.runId,
-    sourceUrl: provenance.sourceUrl ?? null,
+    sourceUrl: sanitizeUrl(provenance.sourceUrl),
     downloadedFilename: provenance.downloadedFilename,
     contentHash: provenance.contentHash,
     fetchedAt: provenance.fetchedAt,

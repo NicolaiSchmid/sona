@@ -36,6 +36,8 @@ describe("FakePortalTaskRunner", () => {
     expect(doc?.provenance.taskId).toBe("amazon-de-invoices");
     expect(doc?.provenance.browserProvider).toBe("fake");
     expect(result.provenance.portalDomain).toBe("amazon.de");
+    // The payload bytes are carried so storage can persist the original file.
+    expect(doc?.content.kind).toBe("bytes");
   });
 
   it("refuses to run a task that declares a mutating action", async () => {

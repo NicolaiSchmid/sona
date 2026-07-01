@@ -17,6 +17,7 @@ export {
 } from "./portal-tasks/policy.js";
 export {
   type ExtractionStatus,
+  type FetchedContent,
   type FetchedDocument,
   type FetchedDocumentProvenance,
   type TaskRunProvenance,

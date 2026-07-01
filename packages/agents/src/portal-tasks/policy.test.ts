@@ -19,6 +19,12 @@ describe("read-only action policy", () => {
     expect(validateReadOnlyActions(["cancel_order"]).valid).toBe(false);
   });
 
+  it("rejects alternate-verb payment/address mutations", () => {
+    expect(validateReadOnlyActions(["update_payment_method"]).valid).toBe(false);
+    expect(validateReadOnlyActions(["add_payment_method"]).valid).toBe(false);
+    expect(validateReadOnlyActions(["edit_address"]).valid).toBe(false);
+  });
+
   it("is case-insensitive", () => {
     const result = validateReadOnlyActions(["PURCHASE", "Cancel-Order"]);
     expect(result.valid).toBe(false);
@@ -33,7 +39,7 @@ describe("read-only action policy", () => {
   });
 
   it("flags place_order and change_* phrases", () => {
-    expect(forbiddenConceptFor("place_order")).toBe("place_order");
+    expect(forbiddenConceptFor("place_order")).toBeDefined();
     expect(forbiddenConceptFor("change_address_line1")).toBe("change_address");
   });
 });

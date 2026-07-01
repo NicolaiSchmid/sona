@@ -77,8 +77,10 @@ export class FakePortalTaskRunner implements PortalTaskRunner {
     }
 
     const domain = input.task.domains[0] ?? "unknown";
-    const bytes = `%PDF-1.4 fake invoice for ${input.task.id} run ${input.runId}`;
-    const contentHash = sha256Hex(bytes);
+    const payload = new TextEncoder().encode(
+      `%PDF-1.4 fake invoice for ${input.task.id} run ${input.runId}`,
+    );
+    const contentHash = sha256Hex(payload);
     const filename = `${input.task.id}-invoice.pdf`;
 
     const document: FetchedDocument = {
@@ -86,6 +88,7 @@ export class FakePortalTaskRunner implements PortalTaskRunner {
       mimeType: "application/pdf",
       contentHash,
       sourceUrl: `https://${domain}/invoices/demo`,
+      content: { kind: "bytes", bytes: payload },
       provenance: {
         sourcePortal: domain,
         taskId: input.task.id,
