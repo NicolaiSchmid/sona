@@ -32,6 +32,9 @@ export {
   type DecideMatchInput,
   decideMatch,
   type MatchDecisionResult,
+  type MatchSetItem,
+  type ResolvedMatch,
+  reconcileMatchSet,
 } from "./reconciliation/policies.js";
 export {
   DEFAULT_MAX_DATE_DISTANCE_DAYS,

@@ -15,6 +15,12 @@ const WEIGHT_REFERENCE = 0.1;
 /** Default window (days) within which booking/document dates are "close". */
 export const DEFAULT_MAX_DATE_DISTANCE_DAYS = 5;
 
+/** Below this extraction confidence a match is flagged for review. */
+const MIN_CONFIDENCE = 0.6;
+
+/** Minimum normalized length for an invoice/reference to count as a signal. */
+const MIN_REFERENCE_LENGTH = 6;
+
 /** Common legal-form tokens dropped from vendor comparison. */
 const LEGAL_FORM_TOKENS = new Set([
   "gmbh",
@@ -53,8 +59,24 @@ function parseIsoDay(value: string | undefined): number | undefined {
     return undefined;
   }
   const [, y, m, d] = match;
-  const ms = Date.UTC(Number(y), Number(m) - 1, Number(d));
-  return Number.isNaN(ms) ? undefined : Math.floor(ms / 86_400_000);
+  const year = Number(y);
+  const month = Number(m);
+  const day = Number(d);
+  const ms = Date.UTC(year, month - 1, day);
+  if (Number.isNaN(ms)) {
+    return undefined;
+  }
+  // Reject shape-valid but non-calendar dates (e.g. 2026-02-31), which Date.UTC
+  // would otherwise silently roll forward and could fake an in-window match.
+  const roundTrip = new Date(ms);
+  if (
+    roundTrip.getUTCFullYear() !== year ||
+    roundTrip.getUTCMonth() !== month - 1 ||
+    roundTrip.getUTCDate() !== day
+  ) {
+    return undefined;
+  }
+  return Math.floor(ms / 86_400_000);
 }
 
 function dateDistanceDays(a: string | undefined, b: string | undefined): number | undefined {
@@ -106,7 +128,7 @@ function referenceInRemittance(doc: MatchableDocument, tx: MatchableTransaction)
   for (const ref of [doc.invoiceNumber, doc.paymentReference]) {
     if (ref !== undefined) {
       const needle = normalizeRef(ref);
-      if (needle.length >= 4 && haystack.includes(needle)) {
+      if (needle.length >= MIN_REFERENCE_LENGTH && haystack.includes(needle)) {
         return true;
       }
     }
@@ -126,6 +148,7 @@ export function scoreMatch(
   const maxDate = options.maxDateDistanceDays ?? DEFAULT_MAX_DATE_DISTANCE_DAYS;
   const reasons: string[] = [];
   const blockers: string[] = [];
+  const warnings: string[] = [];
   const dateDistance = dateDistanceDays(transaction.bookedOn, document.documentDate);
 
   // Currency mismatch is a hard blocker.
@@ -135,7 +158,27 @@ export function scoreMatch(
     transaction.currency !== document.currency
   ) {
     blockers.push("currency mismatch");
-    return { score: 0, exactAmount: false, dateDistanceDays: dateDistance, reasons, blockers };
+    return {
+      score: 0,
+      exactAmount: false,
+      dateDistanceDays: dateDistance,
+      reasons,
+      blockers,
+      warnings,
+    };
+  }
+
+  // Soft signals that must not auto-match without a human, even at score 1.0.
+  if (transaction.currency === undefined || document.currency === undefined) {
+    warnings.push("unknown currency");
+  }
+  if (document.confidence !== undefined && document.confidence < MIN_CONFIDENCE) {
+    warnings.push("low extraction confidence");
+  }
+  // A receipt substantiates an outflow; a positive (non-zero) amount is an
+  // inflow/refund and should not silently attach purchase evidence.
+  if (!transaction.amount.startsWith("-") && !isZeroDecimal(transaction.amount)) {
+    warnings.push("transaction is an inflow/refund");
   }
 
   let score = 0;
@@ -176,5 +219,6 @@ export function scoreMatch(
     dateDistanceDays: dateDistance,
     reasons,
     blockers,
+    warnings,
   };
 }
