@@ -144,4 +144,20 @@ describe("reconcileMatchSet", () => {
     ]);
     expect(resolved.map((r) => r.outcome)).toEqual(["auto_match", "auto_match"]);
   });
+
+  it("holds an auto-match when a competing merely-plausible receipt exists", () => {
+    const resolved = reconcileMatchSet([
+      // Strong exact match -> would auto-apply on its own.
+      { transactionId: "t1", documentId: "d1", score: strongScore(), transaction: tx() },
+      // Second receipt for the same transaction: plausible but review-level.
+      {
+        transactionId: "t1",
+        documentId: "d2",
+        score: strongScore({ warnings: ["low extraction confidence"] }),
+        transaction: tx(),
+      },
+    ]);
+    // The strong one must not silently auto-apply while a competitor is plausible.
+    expect(resolved.find((r) => r.documentId === "d1")?.outcome).toBe("review");
+  });
 });

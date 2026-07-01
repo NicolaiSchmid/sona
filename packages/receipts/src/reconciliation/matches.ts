@@ -64,10 +64,18 @@ export interface MatchCandidate {
   id: string;
   workspaceId: string;
   transactionId: string;
+  /** Account the transaction reference is scoped to (provider ids repeat across accounts). */
+  transactionAccountId: string;
   documentId: string;
+  /** The specific extraction row used to compute the score, if any. */
+  extractionId: string | undefined;
+  /** Version of the scorer that produced this candidate. */
+  scorerVersion: string;
   score: number;
   reasons: JsonValue;
   blockers: JsonValue;
+  /** Soft review-forcing warnings, persisted alongside reasons/blockers. */
+  warnings: JsonValue;
   outcome: MatchOutcome;
   createdAt: string;
 }
