@@ -87,7 +87,8 @@ export interface EbTransaction {
 
 export interface EbTransactionsResponse {
   transactions: EbTransaction[];
-  continuation_key?: string;
+  /** Present while more pages remain; `null`/absent on the final page. */
+  continuation_key?: string | null;
 }
 
 // --- Sona normalized records ------------------------------------------------

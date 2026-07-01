@@ -48,6 +48,13 @@ describe("normalizeAccount", () => {
     expect(a.externalId).toBe(b.externalId);
     expect(a.externalId.startsWith("eb_")).toBe(true);
   });
+
+  it("excludes the session uid from the fallback hash", () => {
+    // Same account re-authorized in a new session (new uid) must keep its id.
+    const a = normalizeAccount({ name: "X", currency: "EUR", uid: "session_1" });
+    const b = normalizeAccount({ name: "X", currency: "EUR", uid: "session_2" });
+    expect(a.externalId).toBe(b.externalId);
+  });
 });
 
 describe("normalizeBalance", () => {
@@ -87,5 +94,17 @@ describe("normalizeTransaction", () => {
     const b = normalizeTransaction("acc_demo_1", tx);
     expect(a.externalId).toBe(b.externalId);
     expect(a.externalId.startsWith("eb_")).toBe(true);
+  });
+
+  it("excludes volatile provider fields from the fallback hash", () => {
+    const base: EbTransaction = {
+      transaction_amount: { amount: "5.00", currency: "EUR" },
+      credit_debit_indicator: "DBIT",
+      booking_date: "2026-01-01",
+    };
+    const withVolatile = { ...base, transaction_id: "detail_only_999" } as EbTransaction;
+    expect(normalizeTransaction("acc", base).externalId).toBe(
+      normalizeTransaction("acc", withVolatile).externalId,
+    );
   });
 });
