@@ -23,12 +23,14 @@ export {
 } from "./jwt.js";
 export {
   accountUidsFromSession,
+  type NormalizeTransactionOptions,
   normalizeAccount,
   normalizeBalance,
   normalizeTransaction,
 } from "./normalize.js";
 export {
   type BankRecordStore,
+  type RawLink,
   type RawRecordStore,
   type RunEnableBankingSyncInput,
   runEnableBankingSync,
