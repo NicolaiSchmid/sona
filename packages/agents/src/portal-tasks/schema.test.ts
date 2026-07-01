@@ -37,4 +37,12 @@ describe("portalTaskSchema", () => {
     const raw = loadFixture() as Record<string, unknown>;
     expect(safeParsePortalTask({ ...raw, outputs: ["screenshot"] }).success).toBe(false);
   });
+
+  it("rejects domain entries that are not bare hostnames", () => {
+    const raw = loadFixture() as Record<string, unknown>;
+    expect(safeParsePortalTask({ ...raw, domains: ["*"] }).success).toBe(false);
+    expect(safeParsePortalTask({ ...raw, domains: ["https://amazon.de"] }).success).toBe(false);
+    expect(safeParsePortalTask({ ...raw, domains: ["amazon.de/orders"] }).success).toBe(false);
+    expect(safeParsePortalTask({ ...raw, domains: ["user@amazon.de"] }).success).toBe(false);
+  });
 });
