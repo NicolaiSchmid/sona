@@ -201,10 +201,14 @@ export interface MatchCandidateRow {
   id: string;
   workspace_id: string;
   document_id: string;
+  extraction_id: string | null;
+  transaction_account_ref: string;
   transaction_ref: string;
+  scorer_version: string;
   score: string;
   reasons_json: string;
   blockers_json: string;
+  warnings_json: string;
   outcome: MatchOutcome;
   created_at: string;
 }

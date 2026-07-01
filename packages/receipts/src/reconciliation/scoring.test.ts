@@ -87,6 +87,19 @@ describe("scoreMatch", () => {
     );
   });
 
+  it("compares currency codes case-insensitively", () => {
+    const result = scoreMatch(tx({ currency: "eur" }), doc({ currency: "EUR" }));
+    expect(result.blockers).toEqual([]);
+    expect(result.exactAmount).toBe(true);
+    expect(result.warnings).not.toContain("unknown currency");
+  });
+
+  it("warns on low source reliability", () => {
+    expect(scoreMatch(tx({ sourceReliability: 0.1 }), doc()).warnings).toContain(
+      "low source reliability",
+    );
+  });
+
   it("treats a shape-valid but non-calendar date as no date", () => {
     const result = scoreMatch(tx({ bookedOn: "2026-02-15" }), doc({ documentDate: "2026-02-31" }));
     expect(result.dateDistanceDays).toBeUndefined();

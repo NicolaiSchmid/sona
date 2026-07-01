@@ -29,8 +29,14 @@ export const DEFAULT_AUTO_APPLY_POLICY: AutoApplyPolicy = {
   requireExactAmount: true,
   maxDateDistanceDays: 5,
   reviewRequiredAccounts: [
-    "Expenses:RealEstate:Improvements",
+    // Real estate: all expense subaccounts are tax-sensitive (interest,
+    // maintenance, depreciation, improvements).
+    "Expenses:RealEstate",
+    "Expenses:RealEstate:*",
+    // Medical / legal / insurance / tax advice — base paths and children.
+    "Expenses:Medical",
     "Expenses:Medical:*",
+    "Expenses:Legal",
     "Expenses:Legal:*",
     "Expenses:Insurance",
     "Expenses:Insurance:*",
@@ -89,12 +95,9 @@ export function decideMatch(input: DecideMatchInput): MatchDecisionResult {
     return { outcome: "no_match", reasons: [...score.blockers] };
   }
 
-  if (score.score < policy.candidateThreshold) {
-    reasons.push(`score ${score.score} below candidate threshold ${policy.candidateThreshold}`);
-    return { outcome: "candidate", reasons };
-  }
-
-  // Conditions that force review even for a strong score.
+  // Conditions that force review are evaluated first, so a low score can never
+  // hide a warning, a sensitive account, or a high-value amount as a silent
+  // weak "candidate".
   let forcedReview = false;
   if (score.warnings.length > 0) {
     forcedReview = true;
@@ -115,12 +118,20 @@ export function decideMatch(input: DecideMatchInput): MatchDecisionResult {
     reasons.push(`amount exceeds ${policy.reviewAboveAmount}`);
   }
 
+  if (forcedReview) {
+    return { outcome: "review", reasons };
+  }
+
+  if (score.score < policy.candidateThreshold) {
+    reasons.push(`score ${score.score} below candidate threshold ${policy.candidateThreshold}`);
+    return { outcome: "candidate", reasons };
+  }
+
   const dateOk =
     score.dateDistanceDays !== undefined && score.dateDistanceDays <= policy.maxDateDistanceDays;
 
   const canAutoApply =
     policy.enabled &&
-    !forcedReview &&
     score.score >= policy.minScore &&
     (!policy.requireExactAmount || score.exactAmount) &&
     dateOk;
@@ -130,9 +141,7 @@ export function decideMatch(input: DecideMatchInput): MatchDecisionResult {
     return { outcome: "auto_match", reasons };
   }
 
-  if (!forcedReview) {
-    reasons.push(`score ${score.score} needs review`);
-  }
+  reasons.push(`score ${score.score} needs review`);
   return { outcome: "review", reasons };
 }
 
@@ -153,10 +162,12 @@ export interface ResolvedMatch {
 }
 
 /**
- * Decides a whole candidate set with one-to-one uniqueness enforced: if a single
- * transaction or document would auto-match more than one counterpart, all of its
- * auto-matches are downgraded to review (multiple plausible matches must be
- * resolved by a human, per docs/receipt-reconciliation.md).
+ * Decides a whole candidate set with one-to-one uniqueness enforced: an
+ * auto-match is only kept if its transaction and document have no OTHER
+ * plausible counterpart in the set. A plausible counterpart is any candidate
+ * that resolved to `auto_match` or `review` — so a strong 0.99 match is held for
+ * review when a second, merely-plausible receipt also targets that transaction
+ * (multiple plausible matches must be resolved by a human).
  */
 export function reconcileMatchSet(items: readonly MatchSetItem[]): ResolvedMatch[] {
   const decided = items.map((item) => ({
@@ -169,20 +180,23 @@ export function reconcileMatchSet(items: readonly MatchSetItem[]): ResolvedMatch
     }),
   }));
 
-  const txAutoCount = new Map<string, number>();
-  const docAutoCount = new Map<string, number>();
+  const isPlausible = (outcome: MatchOutcome): boolean =>
+    outcome === "auto_match" || outcome === "review";
+
+  const txPlausible = new Map<string, number>();
+  const docPlausible = new Map<string, number>();
   for (const { item, result } of decided) {
-    if (result.outcome === "auto_match") {
-      txAutoCount.set(item.transactionId, (txAutoCount.get(item.transactionId) ?? 0) + 1);
-      docAutoCount.set(item.documentId, (docAutoCount.get(item.documentId) ?? 0) + 1);
+    if (isPlausible(result.outcome)) {
+      txPlausible.set(item.transactionId, (txPlausible.get(item.transactionId) ?? 0) + 1);
+      docPlausible.set(item.documentId, (docPlausible.get(item.documentId) ?? 0) + 1);
     }
   }
 
   return decided.map(({ item, result }) => {
     const contested =
       result.outcome === "auto_match" &&
-      ((txAutoCount.get(item.transactionId) ?? 0) > 1 ||
-        (docAutoCount.get(item.documentId) ?? 0) > 1);
+      ((txPlausible.get(item.transactionId) ?? 0) > 1 ||
+        (docPlausible.get(item.documentId) ?? 0) > 1);
     if (contested) {
       return {
         transactionId: item.transactionId,

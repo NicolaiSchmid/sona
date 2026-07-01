@@ -38,29 +38,40 @@ CREATE TABLE IF NOT EXISTS document_extractions (
   confidence         TEXT NOT NULL,
   extractor_version  TEXT NOT NULL,
   created_at         TEXT NOT NULL,
+  UNIQUE (workspace_id, id),
   FOREIGN KEY (workspace_id, document_id) REFERENCES documents(workspace_id, id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_extractions_document ON document_extractions(document_id);
 
 CREATE TABLE IF NOT EXISTS match_candidates (
-  id               TEXT PRIMARY KEY,
-  workspace_id     TEXT NOT NULL REFERENCES workspaces(id),
-  document_id      TEXT NOT NULL,
-  -- Opaque reference to a normalized bank transaction (external id), not FK'd
+  id                        TEXT PRIMARY KEY,
+  workspace_id              TEXT NOT NULL REFERENCES workspaces(id),
+  document_id               TEXT NOT NULL,
+  -- The specific extraction the score was computed from (nullable; e.g. a
+  -- deterministic Stage-1 match), so re-running OCR doesn't lose provenance.
+  extraction_id             TEXT,
+  -- Reference to a normalized bank transaction. Provider external ids are only
+  -- stable within an account, so the account is stored alongside. Not FK'd
   -- because bank transactions are not yet a first-class table.
-  transaction_ref  TEXT NOT NULL,
-  score            TEXT NOT NULL,
-  reasons_json     TEXT NOT NULL,
-  blockers_json    TEXT NOT NULL,
-  outcome          TEXT NOT NULL,
-  created_at       TEXT NOT NULL,
+  transaction_account_ref   TEXT NOT NULL,
+  transaction_ref           TEXT NOT NULL,
+  -- Version of the scorer that produced this candidate (audit/reproducibility).
+  scorer_version            TEXT NOT NULL,
+  score                     TEXT NOT NULL,
+  reasons_json              TEXT NOT NULL,
+  blockers_json             TEXT NOT NULL,
+  warnings_json             TEXT NOT NULL,
+  outcome                   TEXT NOT NULL,
+  created_at                TEXT NOT NULL,
   UNIQUE (workspace_id, id),
-  FOREIGN KEY (workspace_id, document_id) REFERENCES documents(workspace_id, id)
+  FOREIGN KEY (workspace_id, document_id) REFERENCES documents(workspace_id, id),
+  FOREIGN KEY (workspace_id, extraction_id) REFERENCES document_extractions(workspace_id, id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_candidates_document ON match_candidates(document_id);
-CREATE INDEX IF NOT EXISTS idx_candidates_txn ON match_candidates(workspace_id, transaction_ref);
+CREATE INDEX IF NOT EXISTS idx_candidates_txn
+  ON match_candidates(workspace_id, transaction_account_ref, transaction_ref);
 
 CREATE TABLE IF NOT EXISTS match_decisions (
   id            TEXT PRIMARY KEY,

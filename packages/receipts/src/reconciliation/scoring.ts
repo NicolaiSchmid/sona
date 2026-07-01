@@ -18,6 +18,13 @@ export const DEFAULT_MAX_DATE_DISTANCE_DAYS = 5;
 /** Below this extraction confidence a match is flagged for review. */
 const MIN_CONFIDENCE = 0.6;
 
+/** Below this source reliability a match is flagged for review. */
+const MIN_SOURCE_RELIABILITY = 0.5;
+
+function normalizeCurrency(code: string | undefined): string | undefined {
+  return code?.trim().toUpperCase();
+}
+
 /** Minimum normalized length for an invoice/reference to count as a signal. */
 const MIN_REFERENCE_LENGTH = 6;
 
@@ -150,13 +157,12 @@ export function scoreMatch(
   const blockers: string[] = [];
   const warnings: string[] = [];
   const dateDistance = dateDistanceDays(transaction.bookedOn, document.documentDate);
+  const txCurrency = normalizeCurrency(transaction.currency);
+  const docCurrency = normalizeCurrency(document.currency);
 
-  // Currency mismatch is a hard blocker.
-  if (
-    transaction.currency !== undefined &&
-    document.currency !== undefined &&
-    transaction.currency !== document.currency
-  ) {
+  // Currency mismatch is a hard blocker. Codes are normalized first so "eur"
+  // from OCR and "EUR" from the bank are not treated as different.
+  if (txCurrency !== undefined && docCurrency !== undefined && txCurrency !== docCurrency) {
     blockers.push("currency mismatch");
     return {
       score: 0,
@@ -169,11 +175,19 @@ export function scoreMatch(
   }
 
   // Soft signals that must not auto-match without a human, even at score 1.0.
-  if (transaction.currency === undefined || document.currency === undefined) {
+  if (txCurrency === undefined || docCurrency === undefined) {
     warnings.push("unknown currency");
   }
   if (document.confidence !== undefined && document.confidence < MIN_CONFIDENCE) {
     warnings.push("low extraction confidence");
+  }
+  if (
+    (document.sourceReliability !== undefined &&
+      document.sourceReliability < MIN_SOURCE_RELIABILITY) ||
+    (transaction.sourceReliability !== undefined &&
+      transaction.sourceReliability < MIN_SOURCE_RELIABILITY)
+  ) {
+    warnings.push("low source reliability");
   }
   // A receipt substantiates an outflow; a positive (non-zero) amount is an
   // inflow/refund and should not silently attach purchase evidence.
