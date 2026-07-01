@@ -1,0 +1,73 @@
+/**
+ * Synthetic ledger postings for tax export tests. No real financial data.
+ */
+import type { TaxPostingInput } from "./types.js";
+
+export const SAMPLE_POSTINGS: TaxPostingInput[] = [
+  {
+    postingId: "p_maint",
+    transactionId: "t_maint",
+    date: "2026-03-10",
+    description: "Roof repair rental unit",
+    amount: "-500.00",
+    commodity: "EUR",
+    account: "Expenses:RealEstate:Maintenance",
+    reviewState: "user_reviewed",
+    evidenceDocumentIds: [],
+  },
+  {
+    postingId: "p_taxadvice",
+    transactionId: "t_taxadvice",
+    date: "2026-04-01",
+    description: "Steuerberater fee",
+    amount: "-200.00",
+    commodity: "EUR",
+    account: "Expenses:TaxAdvice",
+    reviewState: "user_reviewed",
+    evidenceDocumentIds: ["doc_1"],
+  },
+  {
+    postingId: "p_depr",
+    transactionId: "t_depr",
+    date: "2026-12-31",
+    description: "Annual building depreciation",
+    amount: "-1000.00",
+    commodity: "EUR",
+    account: "Expenses:RealEstate:Depreciation",
+    reviewState: "user_reviewed",
+    evidenceDocumentIds: ["doc_2"],
+  },
+  {
+    postingId: "p_groceries",
+    transactionId: "t_groceries",
+    date: "2026-05-05",
+    description: "Supermarket",
+    amount: "-42.00",
+    commodity: "EUR",
+    account: "Expenses:Groceries",
+    reviewState: "suggested",
+    evidenceDocumentIds: [],
+  },
+  {
+    postingId: "p_donation",
+    transactionId: "t_donation",
+    date: "2026-06-15",
+    description: "Charity donation",
+    amount: "-100.00",
+    commodity: "EUR",
+    account: "Expenses:Donations",
+    reviewState: "suggested",
+    evidenceDocumentIds: [],
+  },
+  {
+    postingId: "p_draft",
+    transactionId: "t_draft",
+    date: "2026-07-20",
+    description: "Unreviewed work expense",
+    amount: "-80.00",
+    commodity: "EUR",
+    account: "Expenses:WorkRelated",
+    reviewState: "draft",
+    evidenceDocumentIds: [],
+  },
+];
