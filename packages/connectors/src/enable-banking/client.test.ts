@@ -131,6 +131,34 @@ describe("EnableBankingClient", () => {
     expect(headers["X-Evil"]).toBeUndefined();
   });
 
+  it("does not retry non-idempotent POST requests", async () => {
+    // A retried exchangeCode could resubmit a one-use code.
+    const { fetch, calls } = recordingFetch([
+      jsonResponse(503, {}),
+      jsonResponse(200, { session_id: "s" }),
+    ]);
+    const client = createEnableBankingClient({ ...baseConfig, fetch });
+
+    await expect(client.exchangeCode({ code: "one_time" })).rejects.toBeInstanceOf(
+      EnableBankingApiError,
+    );
+    expect(calls).toHaveLength(1);
+  });
+
+  it("passes the history strategy through on transaction reads", async () => {
+    const { fetch, calls } = recordingFetch([jsonResponse(200, { transactions: [] })]);
+    const client = createEnableBankingClient({ ...baseConfig, fetch });
+
+    await client.getTransactions({
+      accountUid: "acc_1",
+      strategy: "longest",
+      dateFrom: "2025-01-01",
+    });
+
+    expect(calls[0]?.url).toContain("strategy=longest");
+    expect(calls[0]?.url).toContain("date_from=2025-01-01");
+  });
+
   it("gives up after exhausting retries on persistent 503", async () => {
     const { fetch, calls } = recordingFetch([
       jsonResponse(503, {}),

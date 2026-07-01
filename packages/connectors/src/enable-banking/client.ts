@@ -100,7 +100,8 @@ export interface EnableBankingClient {
     name: string;
     redirectUrl: string;
     validUntil: string;
-    state?: string;
+    /** Required by Enable Banking; echoed on the redirect for CSRF correlation. */
+    state: string;
     psuType?: string;
   }): Promise<EbAuthResponse>;
   exchangeCode(input: { code: string }): Promise<EbSession>;
@@ -116,6 +117,11 @@ export interface EnableBankingClient {
   getTransactions(input: {
     accountUid: string;
     continuationKey?: string;
+    /** ISO date; start of the requested window (initial page only). */
+    dateFrom?: string;
+    dateTo?: string;
+    /** Enable Banking fetch strategy, e.g. "default" or "longest" for history. */
+    strategy?: string;
     psuHeaders?: Record<string, string>;
   }): Promise<EbTransactionsResponse>;
 }
@@ -168,6 +174,10 @@ export function createEnableBankingClient(config: EnableBankingConfig): EnableBa
       ...(options.body !== undefined ? { body: JSON.stringify(options.body) } : {}),
     };
 
+    // Only idempotent reads are retried. Retrying a POST (exchangeCode/startAuth)
+    // could resubmit a one-use authorization code or create a duplicate session.
+    const retryable = method === "GET";
+
     let lastError: unknown;
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
       if (attempt > 0) {
@@ -177,15 +187,18 @@ export function createEnableBankingClient(config: EnableBankingConfig): EnableBa
       try {
         response = await doFetch(url, init);
       } catch (error) {
-        lastError = error; // network/timeout error: retry
-        continue;
+        lastError = error; // network/timeout error
+        if (retryable && attempt < maxRetries) {
+          continue;
+        }
+        throw error;
       }
 
       if (response.ok) {
         return (await response.json()) as T;
       }
 
-      if (RETRYABLE_STATUS.has(response.status) && attempt < maxRetries) {
+      if (RETRYABLE_STATUS.has(response.status) && retryable && attempt < maxRetries) {
         lastError = new EnableBankingApiError(response.status, method, path, "");
         continue;
       }
@@ -229,9 +242,14 @@ export function createEnableBankingClient(config: EnableBankingConfig): EnableBa
       request("GET", `/accounts/${encodeURIComponent(accountUid)}/balances`, {
         psuHeaders: { ...config.psuHeaders, ...psuHeaders },
       }),
-    getTransactions: ({ accountUid, continuationKey, psuHeaders }) =>
+    getTransactions: ({ accountUid, continuationKey, dateFrom, dateTo, strategy, psuHeaders }) =>
       request("GET", `/accounts/${encodeURIComponent(accountUid)}/transactions`, {
-        query: { continuation_key: continuationKey },
+        query: {
+          continuation_key: continuationKey,
+          date_from: dateFrom,
+          date_to: dateTo,
+          strategy,
+        },
         psuHeaders: { ...config.psuHeaders, ...psuHeaders },
       }),
   };

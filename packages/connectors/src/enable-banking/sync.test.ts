@@ -170,6 +170,33 @@ describe("runEnableBankingSync", () => {
     expect(h.raws.filter((r) => r.recordType === "bank_transaction")).toHaveLength(2);
   });
 
+  it("stops paginating on a null continuation key", async () => {
+    const h = harness();
+    h.client.getSession = async () => ({
+      session_id: "s",
+      status: "AUTHORIZED",
+      accounts: [{ uid: "acc_one" }],
+    });
+    let call = 0;
+    h.client.getTransactions = async () => {
+      call += 1;
+      return { transactions: [], continuation_key: null };
+    };
+
+    const summary = await runEnableBankingSync({ ...baseInput, ...h });
+    expect(call).toBe(1);
+    expect(summary.errors).toEqual([]);
+  });
+
+  it("fails the run for a non-authorized session", async () => {
+    const h = harness();
+    h.client.getSession = async () => ({ session_id: "s", status: "EXPIRED", accounts: [] });
+
+    await expect(runEnableBankingSync({ ...baseInput, ...h })).rejects.toThrow(/not authorized/);
+    const finish = h.runEvents.find(([kind]) => kind === "finish");
+    expect((finish?.[1] as { status: string }).status).toBe("failed");
+  });
+
   it("finishes the run as failed when the session fetch throws", async () => {
     const h = harness();
     h.client.getSession = async () => {

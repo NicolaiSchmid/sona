@@ -24,16 +24,26 @@ export function accountUidsFromSession(session: EbSession): string[] {
   return session.accounts.map((account) => (typeof account === "string" ? account : account.uid));
 }
 
+/** Stable identity fields for the account hash fallback — never the session uid. */
+function accountIdentity(details: EbAccountDetails): JsonValue {
+  return asJson({
+    name: details.name,
+    product: details.product,
+    currency: details.currency,
+    account_id: details.account_id,
+  });
+}
+
 export function normalizeAccount(details: EbAccountDetails): NormalizedAccount {
   const raw = asJson(details);
   // Enable Banking's `uid` is only valid for the current authorized session, so
-  // prefer the stable identification hash; fall back to IBAN, then a content
-  // hash. The session `uid` is intentionally not used as the durable id.
+  // prefer the stable identification hash; fall back to IBAN, then a hash of the
+  // stable identity fields. The session `uid` is never part of the durable id.
   const externalId =
     details.identification_hash ??
     details.identification_hashes?.[0] ??
     details.account_id?.iban ??
-    `eb_${stableJsonHash(raw)}`;
+    `eb_${stableJsonHash(accountIdentity(details))}`;
   return {
     externalId,
     name: details.name,
@@ -69,12 +79,30 @@ function counterpartyName(transaction: EbTransaction): string | undefined {
   return primary ?? creditor?.name ?? debtor?.name;
 }
 
+/**
+ * Stable identity fields for the transaction hash fallback. Excludes volatile,
+ * detail-fetch-only fields (e.g. `transaction_id`) that can change between list
+ * retrievals and would otherwise make the same booked movement look new.
+ */
+function transactionIdentity(transaction: EbTransaction): JsonValue {
+  return asJson({
+    transaction_amount: transaction.transaction_amount,
+    credit_debit_indicator: transaction.credit_debit_indicator,
+    booking_date: transaction.booking_date,
+    value_date: transaction.value_date,
+    creditor: transaction.creditor,
+    debtor: transaction.debtor,
+    remittance_information: transaction.remittance_information,
+  });
+}
+
 export function normalizeTransaction(
   accountExternalId: string,
   transaction: EbTransaction,
 ): NormalizedTransaction {
   const raw = asJson(transaction);
-  const externalId = transaction.entry_reference ?? `eb_${stableJsonHash(raw)}`;
+  const externalId =
+    transaction.entry_reference ?? `eb_${stableJsonHash(transactionIdentity(transaction))}`;
   const remittance = transaction.remittance_information;
   return {
     accountExternalId,

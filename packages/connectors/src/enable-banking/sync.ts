@@ -80,6 +80,12 @@ export interface RunEnableBankingSyncInput {
   rawStore: RawRecordStore;
   bankStore: BankRecordStore;
   env: SyncEnv;
+  /**
+   * History window / strategy for the first transactions page. Use e.g.
+   * `strategy: "longest"` on an initial sync to pull older tax-year history
+   * before ASPSPs restrict it.
+   */
+  transactionQuery?: { dateFrom?: string; dateTo?: string; strategy?: string };
 }
 
 function errorMessage(error: unknown): string {
@@ -88,6 +94,7 @@ function errorMessage(error: unknown): string {
 
 export async function runEnableBankingSync(input: RunEnableBankingSyncInput): Promise<SyncSummary> {
   const { workspaceId, sourceId, sessionId, client, runStore, rawStore, bankStore, env } = input;
+  const transactionQuery = input.transactionQuery ?? {};
 
   const runId = env.ids();
   const startedAt = env.nowIso();
@@ -101,9 +108,14 @@ export async function runEnableBankingSync(input: RunEnableBankingSyncInput): Pr
     errors: [],
   };
 
+  // Raw payloads are wrapped with their fetch context (account id + kind + page)
+  // so two accounts returning identical provider payloads (e.g. equal balances)
+  // still hash distinctly and each keeps its own raw source-record trail under
+  // the `uq_raw_records_dedup` (workspace, source, payload_hash) index.
   const appendRaw = async (
     recordType: RawSourceRecord["recordType"],
     externalId: string,
+    context: { accountExternalId: string; kind: string; page?: number },
     payload: JsonValue,
   ): Promise<void> => {
     const at = env.nowIso();
@@ -114,7 +126,7 @@ export async function runEnableBankingSync(input: RunEnableBankingSyncInput): Pr
         sourceId,
         externalId,
         recordType,
-        payloadJson: payload,
+        payloadJson: { ...context, payload },
         observedAt: at,
         createdAt: at,
       }),
@@ -124,6 +136,11 @@ export async function runEnableBankingSync(input: RunEnableBankingSyncInput): Pr
   let accountUids: string[];
   try {
     const session = await client.getSession({ sessionId });
+    if (session.status !== undefined && session.status !== "AUTHORIZED") {
+      // Non-authorized (EXPIRED/REVOKED/PENDING_AUTHORIZATION) consent is a
+      // failure, not an empty successful sync.
+      throw new Error(`Enable Banking session is not authorized (status: ${session.status})`);
+    }
     accountUids = accountUidsFromSession(session);
   } catch (error) {
     // A session-level failure (revoked/expired consent, endpoint down) must
@@ -139,33 +156,51 @@ export async function runEnableBankingSync(input: RunEnableBankingSyncInput): Pr
     try {
       const details = await client.getAccountDetails({ accountUid });
       const account = normalizeAccount(details);
-      await appendRaw("bank_account", account.externalId, account.raw);
+      const ext = account.externalId;
+      await appendRaw(
+        "bank_account",
+        ext,
+        { accountExternalId: ext, kind: "account" },
+        account.raw,
+      );
       await bankStore.saveAccount(account);
       summary.accountsSynced += 1;
 
       const balances = await client.getBalances({ accountUid });
-      await appendRaw("bank_balance", `${account.externalId}:balances`, toJson(balances));
+      await appendRaw(
+        "bank_balance",
+        `${ext}:balances`,
+        { accountExternalId: ext, kind: "balances" },
+        toJson(balances),
+      );
       for (const balance of balances.balances) {
-        await bankStore.saveBalance(normalizeBalance(account.externalId, balance));
+        await bankStore.saveBalance(normalizeBalance(ext, balance));
         summary.balancesSynced += 1;
       }
 
       // Follow continuation keys so accounts with many transactions are fully
-      // imported, not just the first page.
+      // imported, not just the first page. `continuation_key` is null/absent on
+      // the final page, so normalize null to undefined before deciding to stop.
       let continuationKey: string | undefined;
       let page = 0;
       do {
-        const transactions = await client.getTransactions({ accountUid, continuationKey });
+        const transactions = await client.getTransactions({
+          accountUid,
+          continuationKey,
+          // Date/strategy apply to the initial page only.
+          ...(page === 0 ? transactionQuery : {}),
+        });
         await appendRaw(
           "bank_transaction",
-          `${account.externalId}:transactions:${page}`,
+          `${ext}:transactions:${page}`,
+          { accountExternalId: ext, kind: "transactions", page },
           toJson(transactions),
         );
         for (const transaction of transactions.transactions) {
-          await bankStore.saveTransaction(normalizeTransaction(account.externalId, transaction));
+          await bankStore.saveTransaction(normalizeTransaction(ext, transaction));
           summary.transactionsSynced += 1;
         }
-        continuationKey = transactions.continuation_key;
+        continuationKey = transactions.continuation_key ?? undefined;
         page += 1;
       } while (continuationKey !== undefined);
     } catch (error) {
