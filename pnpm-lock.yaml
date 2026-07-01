@@ -49,6 +49,9 @@ importers:
       '@sona/core':
         specifier: workspace:*
         version: link:../core
+      '@sona/receipts':
+        specifier: workspace:*
+        version: link:../receipts
 
   packages/mcp:
     dependencies:
@@ -56,7 +59,11 @@ importers:
         specifier: ^3.24.0
         version: 3.25.76
 
-  packages/receipts: {}
+  packages/receipts:
+    dependencies:
+      '@sona/core':
+        specifier: workspace:*
+        version: link:../core
 
   packages/tax-de: {}
 

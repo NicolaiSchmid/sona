@@ -2,7 +2,7 @@ import { createRequire } from "node:module";
 import { describe, expect, it } from "vitest";
 import { CORE_MIGRATIONS } from "./migrations/index";
 import { applyMigrations } from "./runner";
-import { CORE_TABLES } from "./schema";
+import { CORE_TABLES, RECEIPT_TABLES } from "./schema";
 
 // node:sqlite is a newer built-in the bundled Vite version does not recognize as
 // external, so a static `import ... from "node:sqlite"` gets bundled and fails.
@@ -24,9 +24,28 @@ describe("core migrations", () => {
     try {
       applyMigrations(db, CORE_MIGRATIONS);
       const names = tableNames(db);
-      for (const table of CORE_TABLES) {
+      for (const table of [...CORE_TABLES, ...RECEIPT_TABLES]) {
         expect(names.has(table), `missing table ${table}`).toBe(true);
       }
+    } finally {
+      db.close();
+    }
+  });
+
+  it("enforces the document content-hash dedup index", () => {
+    const db = new DatabaseSync(":memory:");
+    try {
+      applyMigrations(db, CORE_MIGRATIONS);
+      db.exec(
+        "INSERT INTO workspaces (id, name, created_at) VALUES ('ws_1', 'A', '2026-01-01T00:00:00Z')",
+      );
+      const insertDoc = (id: string) =>
+        db.exec(
+          "INSERT INTO documents (id, workspace_id, content_hash, mime_type, original_filename, storage_uri, source_kind, retention_state, created_at)" +
+            ` VALUES ('${id}', 'ws_1', 'hash_same', 'application/pdf', 'r.pdf', 's3://x', 'upload', 'active', '2026-01-01T00:00:00Z')`,
+        );
+      insertDoc("doc_1");
+      expect(() => insertDoc("doc_2")).toThrow(/UNIQUE constraint failed/i);
     } finally {
       db.close();
     }
