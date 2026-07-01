@@ -50,6 +50,11 @@ export interface MatchScore {
   reasons: string[];
   /** Hard reasons this pair cannot match (e.g. currency mismatch). */
   blockers: string[];
+  /**
+   * Soft signals that force human review even at a high score (unknown
+   * currency, low extraction confidence, refund/inflow, etc.).
+   */
+  warnings: string[];
 }
 
 /** How a scored candidate resolved. Mirrors docs/receipt-reconciliation output states. */

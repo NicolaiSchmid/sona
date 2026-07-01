@@ -66,6 +66,39 @@ describe("scoreMatch", () => {
     expect(result.exactAmount).toBe(false);
     expect(result.reasons).not.toContain("exact amount");
   });
+
+  it("has no warnings for a clean outflow with known currency and good confidence", () => {
+    expect(scoreMatch(tx(), doc()).warnings).toEqual([]);
+  });
+
+  it("warns when currency is unknown on either side", () => {
+    expect(scoreMatch(tx(), doc({ currency: undefined })).warnings).toContain("unknown currency");
+  });
+
+  it("warns on low extraction confidence", () => {
+    expect(scoreMatch(tx(), doc({ confidence: 0.2 })).warnings).toContain(
+      "low extraction confidence",
+    );
+  });
+
+  it("warns when the transaction is an inflow/refund", () => {
+    expect(scoreMatch(tx({ amount: "84.23" }), doc()).warnings).toContain(
+      "transaction is an inflow/refund",
+    );
+  });
+
+  it("treats a shape-valid but non-calendar date as no date", () => {
+    const result = scoreMatch(tx({ bookedOn: "2026-02-15" }), doc({ documentDate: "2026-02-31" }));
+    expect(result.dateDistanceDays).toBeUndefined();
+  });
+
+  it("ignores short invoice references that could match by coincidence", () => {
+    const result = scoreMatch(
+      tx({ remittanceInfo: "Payment 2026 ref 1234" }),
+      doc({ invoiceNumber: "2026", totalAmount: undefined, vendorName: undefined }),
+    );
+    expect(result.reasons).not.toContain("reference in remittance");
+  });
 });
 
 describe("vendorSimilarity", () => {

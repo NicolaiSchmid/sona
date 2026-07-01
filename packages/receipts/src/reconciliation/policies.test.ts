@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 import type { MatchableTransaction, MatchScore } from "./matches.js";
-import { accountMatchesPattern, DEFAULT_AUTO_APPLY_POLICY, decideMatch } from "./policies.js";
+import {
+  accountMatchesPattern,
+  DEFAULT_AUTO_APPLY_POLICY,
+  decideMatch,
+  reconcileMatchSet,
+} from "./policies.js";
 
 function strongScore(overrides: Partial<MatchScore> = {}): MatchScore {
   return {
@@ -9,6 +14,7 @@ function strongScore(overrides: Partial<MatchScore> = {}): MatchScore {
     dateDistanceDays: 1,
     reasons: ["exact amount"],
     blockers: [],
+    warnings: [],
     ...overrides,
   };
 }
@@ -93,5 +99,49 @@ describe("decideMatch", () => {
       transaction: tx(),
     });
     expect(result.outcome).toBe("review");
+  });
+
+  it("forces review when the score carries a warning", () => {
+    const result = decideMatch({
+      score: strongScore({ warnings: ["low extraction confidence"] }),
+      transaction: tx(),
+    });
+    expect(result.outcome).toBe("review");
+    expect(result.reasons).toContain("low extraction confidence");
+  });
+
+  it("forces review for tax-advice and insurance accounts", () => {
+    expect(
+      decideMatch({ score: strongScore(), transaction: tx({ account: "Expenses:TaxAdvice" }) })
+        .outcome,
+    ).toBe("review");
+    expect(
+      decideMatch({ score: strongScore(), transaction: tx({ account: "Expenses:Insurance" }) })
+        .outcome,
+    ).toBe("review");
+  });
+});
+
+describe("reconcileMatchSet", () => {
+  it("downgrades to review when two documents auto-match the same transaction", () => {
+    const resolved = reconcileMatchSet([
+      { transactionId: "t1", documentId: "d1", score: strongScore(), transaction: tx() },
+      { transactionId: "t1", documentId: "d2", score: strongScore(), transaction: tx() },
+    ]);
+    expect(resolved.map((r) => r.outcome)).toEqual(["review", "review"]);
+    expect(resolved[0]?.reasons.join(" ")).toContain("multiple plausible");
+  });
+
+  it("keeps a clean one-to-one auto-match", () => {
+    const resolved = reconcileMatchSet([
+      { transactionId: "t1", documentId: "d1", score: strongScore(), transaction: tx() },
+      {
+        transactionId: "t2",
+        documentId: "d2",
+        score: strongScore(),
+        transaction: tx({ id: "tx_2" }),
+      },
+    ]);
+    expect(resolved.map((r) => r.outcome)).toEqual(["auto_match", "auto_match"]);
   });
 });

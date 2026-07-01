@@ -28,7 +28,15 @@ export const DEFAULT_AUTO_APPLY_POLICY: AutoApplyPolicy = {
   minScore: 0.97,
   requireExactAmount: true,
   maxDateDistanceDays: 5,
-  reviewRequiredAccounts: ["Expenses:RealEstate:Improvements", "Expenses:Medical:*"],
+  reviewRequiredAccounts: [
+    "Expenses:RealEstate:Improvements",
+    "Expenses:Medical:*",
+    "Expenses:Legal:*",
+    "Expenses:Insurance",
+    "Expenses:Insurance:*",
+    "Expenses:TaxAdvice",
+    "Expenses:TaxAdvice:*",
+  ],
   reviewAboveAmount: "1000",
   candidateThreshold: 0.5,
 };
@@ -88,6 +96,10 @@ export function decideMatch(input: DecideMatchInput): MatchDecisionResult {
 
   // Conditions that force review even for a strong score.
   let forcedReview = false;
+  if (score.warnings.length > 0) {
+    forcedReview = true;
+    reasons.push(...score.warnings);
+  }
   if (account !== undefined) {
     const matched = policy.reviewRequiredAccounts.find((p) => accountMatchesPattern(account, p));
     if (matched) {
@@ -122,4 +134,68 @@ export function decideMatch(input: DecideMatchInput): MatchDecisionResult {
     reasons.push(`score ${score.score} needs review`);
   }
   return { outcome: "review", reasons };
+}
+
+export interface MatchSetItem {
+  transactionId: string;
+  documentId: string;
+  score: MatchScore;
+  transaction: MatchableTransaction;
+  account?: string;
+  policy?: AutoApplyPolicy;
+}
+
+export interface ResolvedMatch {
+  transactionId: string;
+  documentId: string;
+  outcome: MatchOutcome;
+  reasons: string[];
+}
+
+/**
+ * Decides a whole candidate set with one-to-one uniqueness enforced: if a single
+ * transaction or document would auto-match more than one counterpart, all of its
+ * auto-matches are downgraded to review (multiple plausible matches must be
+ * resolved by a human, per docs/receipt-reconciliation.md).
+ */
+export function reconcileMatchSet(items: readonly MatchSetItem[]): ResolvedMatch[] {
+  const decided = items.map((item) => ({
+    item,
+    result: decideMatch({
+      score: item.score,
+      transaction: item.transaction,
+      account: item.account,
+      policy: item.policy,
+    }),
+  }));
+
+  const txAutoCount = new Map<string, number>();
+  const docAutoCount = new Map<string, number>();
+  for (const { item, result } of decided) {
+    if (result.outcome === "auto_match") {
+      txAutoCount.set(item.transactionId, (txAutoCount.get(item.transactionId) ?? 0) + 1);
+      docAutoCount.set(item.documentId, (docAutoCount.get(item.documentId) ?? 0) + 1);
+    }
+  }
+
+  return decided.map(({ item, result }) => {
+    const contested =
+      result.outcome === "auto_match" &&
+      ((txAutoCount.get(item.transactionId) ?? 0) > 1 ||
+        (docAutoCount.get(item.documentId) ?? 0) > 1);
+    if (contested) {
+      return {
+        transactionId: item.transactionId,
+        documentId: item.documentId,
+        outcome: "review",
+        reasons: [...result.reasons, "multiple plausible matches; needs review"],
+      };
+    }
+    return {
+      transactionId: item.transactionId,
+      documentId: item.documentId,
+      outcome: result.outcome,
+      reasons: result.reasons,
+    };
+  });
 }
