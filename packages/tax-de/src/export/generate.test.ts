@@ -15,6 +15,12 @@ describe("sectionForAccount", () => {
     expect(sectionForAccount(T, "Expenses:RealEstate:Depreciation").id).toBe("depreciation");
   });
 
+  it("maps per-property depreciation subaccounts to depreciation, not rental", () => {
+    expect(sectionForAccount(T, "Expenses:RealEstate:Depreciation:Building").id).toBe(
+      "depreciation",
+    );
+  });
+
   it("falls back to uncategorized for an unrecognized account", () => {
     expect(sectionForAccount(T, "Expenses:Groceries").id).toBe(T.uncategorizedSectionId);
   });

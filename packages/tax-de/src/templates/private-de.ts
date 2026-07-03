@@ -22,7 +22,11 @@ const SECTIONS: TaxSection[] = [
     id: "depreciation",
     title: "Depreciation schedules (AfA preparation)",
     description: "Configured depreciation postings for real estate and assets.",
-    accountPatterns: ["Expenses:RealEstate:Depreciation", "Expenses:Depreciation:*"],
+    accountPatterns: [
+      "Expenses:RealEstate:Depreciation",
+      "Expenses:RealEstate:Depreciation:*",
+      "Expenses:Depreciation:*",
+    ],
     receiptRequired: true,
   },
   {
