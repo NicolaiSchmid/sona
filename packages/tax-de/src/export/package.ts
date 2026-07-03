@@ -35,11 +35,28 @@ export const PACKAGE_FILES = [
   "evidence-links.json",
 ] as const;
 
-function csvField(value: string): string {
-  if (/[",\n]/.test(value)) {
-    return `"${value.replace(/"/g, '""')}"`;
+/**
+ * Neutralizes spreadsheet formula injection: a field starting with `=`, `+`,
+ * `@`, or a non-numeric `-` would execute as a formula when the CSV is opened
+ * in Excel/LibreOffice. A leading apostrophe forces text interpretation.
+ * Signed decimal amounts (e.g. "-84.23") are left intact.
+ */
+function escapeFormula(value: string): string {
+  if (/^[=+@]/.test(value)) {
+    return `'${value}`;
+  }
+  if (value.startsWith("-") && !/^-\d/.test(value)) {
+    return `'${value}`;
   }
   return value;
+}
+
+function csvField(value: string): string {
+  const safe = escapeFormula(value);
+  if (/[",\n]/.test(safe)) {
+    return `"${safe.replace(/"/g, '""')}"`;
+  }
+  return safe;
 }
 
 function csv(header: readonly string[], rows: readonly string[][]): string {
@@ -48,7 +65,19 @@ function csv(header: readonly string[], rows: readonly string[][]): string {
 
 function taxCategoriesCsv(lines: readonly TaxExportLine[]): string {
   return csv(
-    ["date", "description", "amount", "currency", "account", "section", "reviewState", "notes"],
+    [
+      "date",
+      "description",
+      "amount",
+      "currency",
+      "account",
+      "section",
+      "reviewState",
+      "postingId",
+      "transactionId",
+      "evidenceDocumentIds",
+      "notes",
+    ],
     lines.map((l) => [
       l.date,
       l.description,
@@ -57,6 +86,9 @@ function taxCategoriesCsv(lines: readonly TaxExportLine[]): string {
       l.account,
       l.sectionId,
       l.reviewState,
+      l.sourcePostingId,
+      l.sourceTransactionId,
+      l.evidenceDocumentIds.join(";"),
       l.notes ?? "",
     ]),
   );
@@ -112,8 +144,18 @@ function summaryMd(
 }
 
 export function generateExportPackage(input: GeneratePackageInput): TaxExportPackage {
-  const { lines } = generateExportLines(input.postings, input.template, { mode: input.mode });
-  const missing = generateMissingEvidenceReport(input.postings, input.template);
+  // A package is for exactly one tax year: postings from other years must not
+  // leak into its files even if the caller passes a mixed set.
+  const yearPrefix = `${input.year}-`;
+  const postings = input.postings.filter((p) => p.date.startsWith(yearPrefix));
+
+  const { lines } = generateExportLines(postings, input.template, { mode: input.mode });
+
+  // The missing-evidence report honors the same review gate as the export:
+  // a final package only reports gaps for postings that are actually in it.
+  const includedIds = new Set(lines.map((l) => l.sourcePostingId));
+  const gatedPostings = postings.filter((p) => includedIds.has(p.postingId));
+  const missing = generateMissingEvidenceReport(gatedPostings, input.template);
 
   const files: ExportFile[] = [
     { path: "summary.md", content: summaryMd(input, lines, missing.length) },
