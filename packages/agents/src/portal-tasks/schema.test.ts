@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { parse } from "yaml";
+import { syntheticReferencePortalTask } from "./definitions/synthetic-reference-portal.js";
 import { parsePortalTask, safeParsePortalTask } from "./schema.js";
 
 function loadFixture(): unknown {
@@ -44,5 +45,24 @@ describe("portalTaskSchema", () => {
     expect(safeParsePortalTask({ ...raw, domains: ["https://amazon.de"] }).success).toBe(false);
     expect(safeParsePortalTask({ ...raw, domains: ["amazon.de/orders"] }).success).toBe(false);
     expect(safeParsePortalTask({ ...raw, domains: ["user@amazon.de"] }).success).toBe(false);
+  });
+
+  it("accepts the synthetic executable reference task definition", () => {
+    expect(parsePortalTask(syntheticReferencePortalTask).steps).toHaveLength(6);
+  });
+
+  it("rejects selectors with destructive intent", () => {
+    const raw = loadFixture() as Record<string, unknown>;
+    const result = safeParsePortalTask({
+      ...raw,
+      steps: [
+        {
+          kind: "click",
+          selector: "button[aria-label='Cancel order']",
+        },
+      ],
+    });
+
+    expect(result.success).toBe(false);
   });
 });

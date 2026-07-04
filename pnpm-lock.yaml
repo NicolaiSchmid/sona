@@ -30,7 +30,14 @@ importers:
 
   apps/web: {}
 
-  apps/worker: {}
+  apps/worker:
+    dependencies:
+      '@sona/agents':
+        specifier: workspace:*
+        version: link:../../packages/agents
+      '@sona/core':
+        specifier: workspace:*
+        version: link:../../packages/core
 
   packages/agents:
     dependencies:

@@ -54,6 +54,15 @@ const FORBIDDEN_PHRASES = [
   "send_message",
 ] as const;
 
+const FORBIDDEN_SELECTOR_PHRASES = [
+  ...FORBIDDEN_PHRASES,
+  "buy_now",
+  "delete_account",
+  "cancel_order",
+  "cancel_subscription",
+  "change_payment_method",
+] as const;
+
 function normalize(action: string): string {
   return action
     .toLowerCase()
@@ -93,4 +102,16 @@ export function validateReadOnlyActions(actions: readonly string[]): ReadOnlyPol
     }
   }
   return { valid: violations.length === 0, violations };
+}
+
+/** Returns the destructive concept a selector implies, or `undefined` if safe. */
+export function destructiveSelectorConceptFor(selector: string): string | undefined {
+  const normalized = normalize(selector);
+  const tokens = normalized.split("_");
+  for (const token of tokens) {
+    if (FORBIDDEN_TOKENS.has(token)) {
+      return token;
+    }
+  }
+  return FORBIDDEN_SELECTOR_PHRASES.find((phrase) => normalized.includes(phrase));
 }

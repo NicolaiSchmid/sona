@@ -12,6 +12,8 @@ const safeTask: PortalTask = {
   allowedActions: ["navigate", "search_orders", "download_invoice_pdf"],
   forbiddenActions: ["purchase"],
   outputs: ["document_file", "provenance_json"],
+  httpMethodExceptions: [],
+  steps: [],
 };
 
 function input(task: PortalTask): RunPortalTaskInput {

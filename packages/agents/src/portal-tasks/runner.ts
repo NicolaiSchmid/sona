@@ -10,6 +10,8 @@
  * Every runner MUST enforce the domain allowlist and the read-only policy at
  * execution time — the definition-time schema check is not sufficient on its own.
  */
+
+import type { StoredDocument } from "@sona/core";
 import { sha256Hex } from "@sona/core";
 import { validateReadOnlyActions } from "./policy.js";
 import type { FetchedDocument, TaskRunProvenance } from "./provenance.js";
@@ -25,10 +27,12 @@ export interface RunPortalTaskInput {
 }
 
 export interface RunPortalTaskResult {
+  status: PortalTaskRunStatus;
   runId: string;
   taskId: string;
   taskVersion: number;
   documents: FetchedDocument[];
+  storedDocuments: StoredDocument[];
   provenance: TaskRunProvenance;
   warnings: string[];
   errors: string[];
@@ -38,13 +42,22 @@ export interface PortalTaskRunner {
   runTask(input: RunPortalTaskInput): Promise<RunPortalTaskResult>;
 }
 
+export type PortalTaskRunStatus =
+  | "completed"
+  | "policy_refused"
+  | "blocked"
+  | "selector_missing"
+  | "failed";
+
 function baseResult(input: RunPortalTaskInput, provider: string): RunPortalTaskResult {
   const domain = input.task.domains[0] ?? "unknown";
   return {
+    status: "completed",
     runId: input.runId,
     taskId: input.task.id,
     taskVersion: input.task.version,
     documents: [],
+    storedDocuments: [],
     provenance: {
       runId: input.runId,
       taskId: input.task.id,
@@ -73,6 +86,7 @@ export class FakePortalTaskRunner implements PortalTaskRunner {
       for (const violation of policy.violations) {
         result.errors.push(`refused: action "${violation.action}" implies ${violation.concept}`);
       }
+      result.status = "policy_refused";
       return result;
     }
 
