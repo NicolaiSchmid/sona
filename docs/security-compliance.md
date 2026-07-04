@@ -30,6 +30,19 @@ High-sensitivity data includes:
 - Retention policy.
 - No plaintext secrets in logs/errors/MCP responses.
 
+## Local secret key handling
+
+Local and self-hosted encrypted secret storage uses AES-256-GCM with a 32-byte
+key supplied through `SONA_SECRET_KEY` or an explicitly configured key file. The
+runtime config may point to the encrypted secret file and key file path, but it
+must not contain the key material itself. Key files must stay outside source
+control and outside exported support bundles.
+
+Secret values returned by the core runtime are redacted during string, JSON, and
+Node inspection coercion. Plaintext is available only through an explicit
+`reveal()` call at the boundary that needs to authenticate to an external
+service.
+
 ## GDPR
 
 Likely required areas:

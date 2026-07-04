@@ -14,6 +14,11 @@ storage:
   database:
     provider: sqlite
     path: ./data/sona.sqlite
+  secrets:
+    provider: local_encrypted_file
+    path: ./data/secrets.json
+    # Encryption key material must come from SONA_SECRET_KEY or a separate
+    # keyFile outside source control; do not put key material in this config.
 policies:
   aiCan:
     suggestClassifications: true

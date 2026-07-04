@@ -57,6 +57,14 @@ const envSecretBackendConfigSchema = z
   })
   .strict();
 
+const localEncryptedFileSecretBackendConfigSchema = z
+  .object({
+    provider: z.literal("local_encrypted_file"),
+    path: nonEmptyString,
+    keyFile: nonEmptyString.optional(),
+  })
+  .strict();
+
 const plaintextFileSecretBackendConfigSchema = z
   .object({
     provider: z.literal("plaintext_file"),
@@ -74,6 +82,7 @@ const managedVaultSecretBackendConfigSchema = z
 
 export const secretBackendConfigSchema = z.discriminatedUnion("provider", [
   envSecretBackendConfigSchema,
+  localEncryptedFileSecretBackendConfigSchema,
   plaintextFileSecretBackendConfigSchema,
   managedVaultSecretBackendConfigSchema,
 ]);
@@ -184,7 +193,10 @@ function defaultSecretBackendForRuntime(mode: RuntimeMode): SecretBackendConfig 
   switch (mode) {
     case "local_dev":
     case "self_hosted":
-      return { provider: "env" };
+      return {
+        provider: "local_encrypted_file",
+        path: "./data/secrets.json",
+      };
     case "hosted_cloud":
       return { provider: "env" };
   }
