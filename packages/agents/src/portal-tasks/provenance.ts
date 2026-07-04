@@ -18,6 +18,32 @@ export interface TaskRunProvenance {
   workspaceId: string;
   /** ISO timestamp of the run. */
   fetchedAt: string;
+  blockedRequests?: BlockedPortalRequest[];
+  allowedNonIdempotentRequests?: AllowedNonIdempotentPortalRequest[];
+  consoleMessages?: CapturedPortalConsoleMessage[];
+}
+
+export type BlockedPortalRequestReason = "off_allowlist" | "non_idempotent_method";
+
+export interface BlockedPortalRequest {
+  url: string;
+  method: string;
+  resourceType: string;
+  reason: BlockedPortalRequestReason;
+}
+
+export type AllowedNonIdempotentRequestReason = "login" | "search";
+
+export interface AllowedNonIdempotentPortalRequest {
+  url: string;
+  method: string;
+  reason: AllowedNonIdempotentRequestReason;
+  justification: string;
+}
+
+export interface CapturedPortalConsoleMessage {
+  type: string;
+  text: string;
 }
 
 export type ExtractionStatus = "pending" | "extracted" | "failed";

@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { forbiddenConceptFor, validateReadOnlyActions } from "./policy.js";
+import {
+  destructiveSelectorConceptFor,
+  forbiddenConceptFor,
+  validateReadOnlyActions,
+} from "./policy.js";
 
 describe("read-only action policy", () => {
   it("allows read-only fetch actions", () => {
@@ -41,5 +45,11 @@ describe("read-only action policy", () => {
   it("flags place_order and change_* phrases", () => {
     expect(forbiddenConceptFor("place_order")).toBeDefined();
     expect(forbiddenConceptFor("change_address_line1")).toBe("change_address");
+  });
+
+  it("flags destructive selector text and attributes", () => {
+    expect(destructiveSelectorConceptFor("button[aria-label='Cancel order']")).toBe("cancel");
+    expect(destructiveSelectorConceptFor("#delete-account")).toBe("delete");
+    expect(destructiveSelectorConceptFor("button.invoice-download")).toBeUndefined();
   });
 });

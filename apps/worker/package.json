@@ -14,5 +14,9 @@
   "scripts": {
     "build": "tsc -b",
     "typecheck": "tsc -b"
+  },
+  "dependencies": {
+    "@sona/agents": "workspace:*",
+    "@sona/core": "workspace:*"
   }
 }
