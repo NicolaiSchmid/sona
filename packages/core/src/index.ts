@@ -18,5 +18,8 @@ export * from "./ledger/types";
 export * from "./money/decimal";
 export * from "./money/types";
 export * from "./review/types";
+export * from "./runtime/config";
+export * from "./runtime/storage";
+export * from "./runtime/tenancy";
 export * from "./source/types";
 export * from "./util/hash";

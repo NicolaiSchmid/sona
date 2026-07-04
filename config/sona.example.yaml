@@ -1,0 +1,25 @@
+# Example Sona runtime config for local/self-hosted deployments.
+# This file is documentation only: @sona/core accepts already-decoded JSON/object
+# input and intentionally does not add a YAML parser dependency.
+# Do not put secrets, OAuth tokens, bank sessions, private keys, portal
+# credentials, real receipts, real bank data, or user exports in this file.
+
+runtime: self_hosted
+locale: de-DE
+currency: EUR
+storage:
+  documents:
+    provider: filesystem
+    path: ./data/documents
+  database:
+    provider: sqlite
+    path: ./data/sona.sqlite
+policies:
+  aiCan:
+    suggestClassifications: true
+    submitTaxReturns: false
+    initiatePayments: false
+  receipts:
+    requireFor:
+      - Expenses:RealEstate:*
+      - Expenses:TaxAdvice
