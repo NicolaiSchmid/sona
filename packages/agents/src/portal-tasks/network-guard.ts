@@ -69,10 +69,15 @@ export class NetworkGuard {
   }
 
   private isAllowedUrl(rawUrl: string): boolean {
-    let hostname: string;
+    let url: URL;
     try {
-      hostname = new URL(rawUrl).hostname.toLowerCase();
+      url = new URL(rawUrl);
     } catch {
+      return false;
+    }
+
+    const hostname = url.hostname.toLowerCase();
+    if (url.protocol !== "https:" && !isLocalhost(hostname)) {
       return false;
     }
 
@@ -83,9 +88,10 @@ export class NetworkGuard {
   }
 
   private matchException(method: string, rawUrl: string): PortalHttpMethodException | undefined {
+    const sanitizedUrl = sanitizeRequestUrl(rawUrl);
     return this.#task.httpMethodExceptions.find(
       (exception) =>
-        exception.method === method && sanitizeRequestUrl(rawUrl).startsWith(exception.urlPattern),
+        exception.method === method && sanitizedUrl === sanitizeRequestUrl(exception.urlPattern),
     );
   }
 
@@ -111,4 +117,8 @@ function sanitizeRequestUrl(rawUrl: string): string {
   } catch {
     return rawUrl;
   }
+}
+
+function isLocalhost(hostname: string): boolean {
+  return hostname === "localhost";
 }

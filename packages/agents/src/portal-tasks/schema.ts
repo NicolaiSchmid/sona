@@ -30,7 +30,7 @@ export const PORTAL_TASK_STEP_KINDS = [
  */
 const HOSTNAME_RE = /^(localhost|(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,})$/i;
 
-const URL_PATTERN_RE = /^(https:\/\/[^/?#\s]+[^\s]*|http:\/\/localhost(:[0-9]+)?[^\s]*)$/i;
+const SAFE_PORTAL_URL_RE = /^(https:\/\/[^/?#\s]+[^\s]*|http:\/\/localhost(:[0-9]+)?[^\s]*)$/i;
 
 const baseStepSchema = z.object({
   sensitive: z.boolean().optional(),
@@ -43,7 +43,7 @@ const selectorStepSchema = baseStepSchema.extend({
 export const portalTaskStepSchema = z.discriminatedUnion("kind", [
   baseStepSchema.extend({
     kind: z.literal("navigate"),
-    url: z.string().url(),
+    url: z.string().url().regex(SAFE_PORTAL_URL_RE, "must be an https URL or localhost URL"),
   }),
   selectorStepSchema.extend({
     kind: z.literal("fill"),
@@ -67,7 +67,7 @@ export const portalTaskStepSchema = z.discriminatedUnion("kind", [
 export const portalHttpMethodExceptionSchema = z
   .object({
     method: z.enum(NON_IDEMPOTENT_HTTP_METHODS),
-    urlPattern: z.string().regex(URL_PATTERN_RE, "must be an https URL or URL prefix"),
+    urlPattern: z.string().url().regex(SAFE_PORTAL_URL_RE, "must be an https URL or localhost URL"),
     reason: z.enum(ALLOWED_NON_IDEMPOTENT_REASONS),
     justification: z.string().trim().min(12),
   })

@@ -20,5 +20,13 @@
     "@sona/receipts": "workspace:*",
     "yaml": "^2.6.0",
     "zod": "^3.24.0"
+  },
+  "peerDependencies": {
+    "playwright": "^1.49.0"
+  },
+  "peerDependenciesMeta": {
+    "playwright": {
+      "optional": true
+    }
   }
 }

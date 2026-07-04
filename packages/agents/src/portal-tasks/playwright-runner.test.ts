@@ -7,6 +7,8 @@ import {
   type PortalBrowserPage,
   type PortalBrowserProvider,
   type PortalBrowserSession,
+  type PortalDownloadRequestOptions,
+  type PortalDownloadResponse,
   type PortalElementHandle,
 } from "./playwright-runner.js";
 import type { RunPortalTaskInput } from "./runner.js";
@@ -94,6 +96,7 @@ describe("LocalPlaywrightPortalTaskRunner", () => {
 
     expect(first.status).toBe("completed");
     expect(first.documents).toHaveLength(2);
+    expect(first.documents[0]?.content.kind).toBe("objectRef");
     expect(first.storedDocuments).toHaveLength(2);
     expect(first.storedDocuments[0]?.metadata["portal.runId"]).toBe("run_1");
     expect(first.storedDocuments[0]?.metadata["portal.taskId"]).toBe("synthetic-reference-portal");
@@ -123,7 +126,7 @@ describe("LocalPlaywrightPortalTaskRunner", () => {
     });
 
     expect(serialized).not.toContain(secretMarker);
-    expect(serialized).toContain("[REDACTED_SECRET]");
+    expect(result.provenance.consoleMessages).toBeUndefined();
     expect(page.screenshotCount).toBe(0);
   });
 
@@ -140,6 +143,18 @@ describe("LocalPlaywrightPortalTaskRunner", () => {
     expect(page.waitCounts.get("[data-testid='invoice-list']")).toBe(1);
   });
 
+  it("converts selector timeout errors to selector_missing", async () => {
+    const page = new FixturePortalPage({
+      timeoutSelectors: new Set(["[data-testid='invoice-list']"]),
+    });
+    const runner = await makeRunner({ page });
+
+    const result = await runner.runTask(input());
+
+    expect(result.status).toBe("selector_missing");
+    expect(result.errors).toContain("selector_missing: [data-testid='invoice-list']");
+  });
+
   it("re-checks the read-only policy at execution time", async () => {
     const runner = await makeRunner({ page: new FixturePortalPage() });
     const unsafe: PortalTask = {
@@ -151,6 +166,94 @@ describe("LocalPlaywrightPortalTaskRunner", () => {
 
     expect(result.status).toBe("policy_refused");
     expect(result.errors.join(" ")).toContain("cancel");
+  });
+
+  it("executes the parsed task so schema defaults are applied", async () => {
+    const { steps: _steps, httpMethodExceptions: _exceptions, ...rawTask } = task;
+    const runner = await makeRunner({ page: new FixturePortalPage() });
+
+    const result = await runner.runTask(input({ task: rawTask as unknown as PortalTask }));
+
+    expect(result.status).toBe("completed");
+    expect(result.documents).toEqual([]);
+  });
+
+  it("returns a failed result when browser startup fails", async () => {
+    const runner = await makeRunner({
+      page: new FixturePortalPage(),
+      providerFailure: new Error("browser startup failed for synthetic-password"),
+    });
+
+    const result = await runner.runTask(input());
+
+    expect(result.status).toBe("failed");
+    expect(result.errors.join(" ")).toContain("browser startup failed");
+    expect(result.errors.join(" ")).not.toContain("synthetic-password");
+  });
+
+  it("blocks redirected downloads whose final target leaves the allowlist", async () => {
+    const storage = new CountingDocumentStorage();
+    const page = new FixturePortalPage({
+      download: (_url, options) => {
+        if (!options.onRedirect("https://evil.test/invoice.pdf")) {
+          throw new Error("download redirect blocked by portal network policy");
+        }
+        throw new Error("unexpected allowed redirect");
+      },
+    });
+    const runner = await makeRunner({ page, storage });
+
+    const result = await runner.runTask(input());
+
+    expect(result.status).toBe("blocked");
+    expect(result.storedDocuments).toEqual([]);
+    expect(storage.putCount).toBe(0);
+    expect(result.provenance.blockedRequests?.[0]).toMatchObject({
+      url: "https://evil.test/invoice.pdf",
+      reason: "off_allowlist",
+    });
+  });
+
+  it("rejects failed and non-document download responses before storage", async () => {
+    const storage = new CountingDocumentStorage();
+    const page = new FixturePortalPage({
+      download: (url) => ({
+        bytes: new TextEncoder().encode("<html>expired session</html>"),
+        mimeType: "text/html",
+        finalUrl: url,
+        status: 200,
+      }),
+    });
+    const runner = await makeRunner({ page, storage });
+
+    const result = await runner.runTask(input());
+
+    expect(result.status).toBe("failed");
+    expect(result.errors.join(" ")).toContain("unexpected content type");
+    expect(storage.putCount).toBe(0);
+  });
+
+  it("limits download candidates before buffering portal responses", async () => {
+    let requestCount = 0;
+    const page = new FixturePortalPage({
+      linkCount: 55,
+      download: (url) => {
+        requestCount += 1;
+        return {
+          bytes: new TextEncoder().encode(`%PDF-1.4 synthetic invoice ${url}`),
+          mimeType: "application/pdf",
+          finalUrl: url,
+          status: 200,
+        };
+      },
+    });
+    const runner = await makeRunner({ page });
+
+    const result = await runner.runTask(input());
+
+    expect(result.status).toBe("completed");
+    expect(requestCount).toBe(50);
+    expect(result.warnings).toContain("download link count limited to 50 documents");
   });
 });
 
@@ -175,6 +278,7 @@ interface MakeRunnerInput {
   storage?: CountingDocumentStorage;
   registry?: InMemoryPortalDocumentRegistry;
   password?: string;
+  providerFailure?: Error;
 }
 
 async function makeRunner(inputValue: MakeRunnerInput): Promise<LocalPlaywrightPortalTaskRunner> {
@@ -202,7 +306,7 @@ async function makeRunner(inputValue: MakeRunnerInput): Promise<LocalPlaywrightP
   ]);
 
   return new LocalPlaywrightPortalTaskRunner({
-    browserProvider: new FixtureBrowserProvider(inputValue.page),
+    browserProvider: new FixtureBrowserProvider(inputValue.page, inputValue.providerFailure),
     documentStorage: inputValue.storage ?? new CountingDocumentStorage(),
     documentRegistry: inputValue.registry ?? new InMemoryPortalDocumentRegistry(),
     secretStore,
@@ -213,14 +317,22 @@ async function makeRunner(inputValue: MakeRunnerInput): Promise<LocalPlaywrightP
 class FixtureBrowserProvider implements PortalBrowserProvider {
   readonly providerName = "local-playwright";
   readonly #page: FixturePortalPage;
+  readonly #failure: Error | undefined;
 
-  constructor(page: FixturePortalPage) {
+  constructor(page: FixturePortalPage, failure: Error | undefined) {
     this.#page = page;
+    this.#failure = failure;
   }
 
   async createSession(): Promise<PortalBrowserSession> {
+    if (this.#failure !== undefined) {
+      throw this.#failure;
+    }
     return {
       page: this.#page,
+      route: async (pattern, handler) => {
+        await this.#page.route(pattern, handler);
+      },
       close: async () => undefined,
     };
   }
@@ -228,14 +340,22 @@ class FixtureBrowserProvider implements PortalBrowserProvider {
 
 interface FixturePortalPageOptions {
   missingSelectors?: ReadonlySet<string>;
+  timeoutSelectors?: ReadonlySet<string>;
   consoleMessages?: readonly string[];
+  download?: (url: string, options: PortalDownloadRequestOptions) => PortalDownloadResponse;
+  linkCount?: number;
 }
 
 class FixturePortalPage implements PortalBrowserPage {
   readonly waitCounts = new Map<string, number>();
   screenshotCount = 0;
   readonly #missingSelectors: ReadonlySet<string>;
+  readonly #timeoutSelectors: ReadonlySet<string>;
   readonly #consoleMessages: readonly string[];
+  readonly #download:
+    | ((url: string, options: PortalDownloadRequestOptions) => PortalDownloadResponse)
+    | undefined;
+  readonly #linkCount: number;
   #routeHandler:
     | ((request: { url: string; method: string; resourceType: string }) => void)
     | undefined;
@@ -244,7 +364,10 @@ class FixturePortalPage implements PortalBrowserPage {
 
   constructor(options: FixturePortalPageOptions = {}) {
     this.#missingSelectors = options.missingSelectors ?? new Set();
+    this.#timeoutSelectors = options.timeoutSelectors ?? new Set();
     this.#consoleMessages = options.consoleMessages ?? [];
+    this.#download = options.download;
+    this.#linkCount = options.linkCount ?? 2;
   }
 
   async route(
@@ -280,6 +403,9 @@ class FixturePortalPage implements PortalBrowserPage {
 
   async waitForSelector(selector: string): Promise<boolean> {
     this.waitCounts.set(selector, (this.waitCounts.get(selector) ?? 0) + 1);
+    if (this.#timeoutSelectors.has(selector)) {
+      throw new Error("Timeout 30000ms exceeded");
+    }
     return !this.#missingSelectors.has(selector);
   }
 
@@ -287,20 +413,28 @@ class FixturePortalPage implements PortalBrowserPage {
     if (selector !== "a.invoice-download") {
       return [];
     }
-    return [
-      new FixtureElement("https://portal.test/invoices/2026-01.pdf", "2026-01.pdf"),
-      new FixtureElement("https://portal.test/invoices/2026-02.pdf", "2026-02.pdf"),
-    ];
+    return Array.from({ length: this.#linkCount }, (_value, index) => {
+      const invoice = String(index + 1).padStart(2, "0");
+      return new FixtureElement(
+        `https://portal.test/invoices/2026-${invoice}.pdf`,
+        `2026-${invoice}.pdf`,
+      );
+    });
   }
 
   async requestBytes(
     url: string,
-  ): Promise<{ bytes: Uint8Array; mimeType: string; finalUrl: string }> {
+    options: PortalDownloadRequestOptions,
+  ): Promise<PortalDownloadResponse> {
     this.#routeHandler?.({ url, method: "GET", resourceType: "document" });
+    if (this.#download !== undefined) {
+      return this.#download(url, options);
+    }
     return {
       bytes: new TextEncoder().encode(`%PDF-1.4 synthetic invoice ${url}`),
       mimeType: "application/pdf",
       finalUrl: url,
+      status: 200,
     };
   }
 

@@ -65,4 +65,33 @@ describe("portalTaskSchema", () => {
 
     expect(result.success).toBe(false);
   });
+
+  it("rejects plaintext non-local navigation and exception URLs", () => {
+    const raw = loadFixture() as Record<string, unknown>;
+    const plaintextNavigate = safeParsePortalTask({
+      ...raw,
+      steps: [{ kind: "navigate", url: "http://amazon.de/login" }],
+    });
+    const plaintextException = safeParsePortalTask({
+      ...raw,
+      httpMethodExceptions: [
+        {
+          method: "POST",
+          urlPattern: "http://amazon.de/login",
+          reason: "login",
+          justification: "Portal login requires POST before read-only invoice access.",
+        },
+      ],
+    });
+
+    expect(plaintextNavigate.success).toBe(false);
+    expect(plaintextException.success).toBe(false);
+    expect(
+      safeParsePortalTask({
+        ...raw,
+        domains: ["localhost"],
+        steps: [{ kind: "navigate", url: "http://localhost:3000/login" }],
+      }).success,
+    ).toBe(true);
+  });
 });
