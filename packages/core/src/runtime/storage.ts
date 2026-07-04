@@ -1,3 +1,4 @@
+import { inspect } from "node:util";
 import { sha256Hex } from "../util/hash";
 import { requireWorkspaceContext, type WorkspaceContext } from "./tenancy";
 
@@ -110,6 +111,10 @@ export class SecretValue {
   }
 
   [Symbol.toPrimitive](): string {
+    return redactedSecretValue;
+  }
+
+  [inspect.custom](): string {
     return redactedSecretValue;
   }
 }

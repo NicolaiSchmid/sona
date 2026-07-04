@@ -38,8 +38,28 @@ describe("runtime config parser", () => {
     expect(parsed.runtime).toBe("self_hosted");
     expect(parsed.storage.documents.provider).toBe("filesystem");
     expect(parsed.storage.database.provider).toBe("sqlite");
-    expect(parsed.storage.secrets.provider).toBe("env");
+    expect(parsed.storage.secrets.provider).toBe("local_encrypted_file");
     expect(parsed.policies.aiCan.suggestClassifications).toBe(true);
+  });
+
+  it("parses an explicit local encrypted secret backend", () => {
+    const parsed = parseSonaRuntimeConfig({
+      ...selfHostedConfig,
+      storage: {
+        ...selfHostedConfig.storage,
+        secrets: {
+          provider: "local_encrypted_file",
+          path: "./data/secrets.json",
+          keyFile: "./data/secrets.key",
+        },
+      },
+    });
+
+    expect(parsed.storage.secrets).toEqual({
+      provider: "local_encrypted_file",
+      path: "./data/secrets.json",
+      keyFile: "./data/secrets.key",
+    });
   });
 
   it("rejects automatic tax-return submission because no feature flag exists yet", () => {
