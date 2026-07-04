@@ -88,4 +88,36 @@ describe("createNetworkGuard", () => {
       },
     ]);
   });
+
+  it("blocks plaintext non-local allowlisted requests", () => {
+    const guard = createNetworkGuard({ task });
+
+    const decision = guard.evaluateRequest({
+      url: "http://portal.test/login",
+      method: "GET",
+      resourceType: "document",
+    });
+
+    expect(decision.action).toBe("abort");
+    expect(guard.snapshot().blockedRequests[0]).toMatchObject({
+      url: "http://portal.test/login",
+      reason: "off_allowlist",
+    });
+  });
+
+  it("matches non-idempotent exceptions only to the exact sanitized endpoint", () => {
+    const guard = createNetworkGuard({ task });
+
+    const decision = guard.evaluateRequest({
+      url: "https://portal.test/login/delete-account",
+      method: "POST",
+      resourceType: "xhr",
+    });
+
+    expect(decision.action).toBe("abort");
+    expect(guard.snapshot().blockedRequests[0]).toMatchObject({
+      url: "https://portal.test/login/delete-account",
+      reason: "non_idempotent_method",
+    });
+  });
 });
