@@ -1,5 +1,35 @@
 import type { Migration } from "./migrations/index";
 
+export type DbValue = string | number | bigint | Uint8Array | null;
+
+export interface DbStatement {
+  run(...params: DbValue[]): unknown;
+  get(...params: DbValue[]): unknown;
+  all(...params: DbValue[]): unknown[];
+}
+
+export interface DbClient extends SqlExecutor {
+  prepare(sql: string): DbStatement;
+}
+
+export interface SqliteStatement {
+  run(...params: DbValue[]): unknown;
+  get(...params: DbValue[]): unknown;
+  all(...params: DbValue[]): unknown[];
+}
+
+export interface SqliteDatabase extends SqlExecutor {
+  prepare(sql: string): SqliteStatement;
+  close(): void;
+}
+
+export function createSqliteDbClient(db: SqliteDatabase): DbClient {
+  return {
+    exec: (sql) => db.exec(sql),
+    prepare: (sql) => db.prepare(sql),
+  };
+}
+
 /**
  * Minimal executor a database driver must provide to run migrations. Both
  * `node:sqlite`'s `DatabaseSync` and a thin Postgres wrapper satisfy this with

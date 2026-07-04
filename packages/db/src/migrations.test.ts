@@ -2,7 +2,7 @@ import { createRequire } from "node:module";
 import { describe, expect, it } from "vitest";
 import { CORE_MIGRATIONS } from "./migrations/index";
 import { applyMigrations } from "./runner";
-import { CORE_TABLES, RECEIPT_TABLES } from "./schema";
+import { CORE_TABLES, RECEIPT_TABLES, REPOSITORY_TABLES } from "./schema";
 
 // node:sqlite is a newer built-in the bundled Vite version does not recognize as
 // external, so a static `import ... from "node:sqlite"` gets bundled and fails.
@@ -24,7 +24,7 @@ describe("core migrations", () => {
     try {
       applyMigrations(db, CORE_MIGRATIONS);
       const names = tableNames(db);
-      for (const table of [...CORE_TABLES, ...RECEIPT_TABLES]) {
+      for (const table of [...CORE_TABLES, ...RECEIPT_TABLES, ...REPOSITORY_TABLES]) {
         expect(names.has(table), `missing table ${table}`).toBe(true);
       }
     } finally {

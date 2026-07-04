@@ -10,6 +10,7 @@
 import type {
   AccountKind,
   EvidenceLinkKind,
+  JsonValue,
   RawSourceRecordType,
   ReviewState,
   SourceKind,
@@ -232,3 +233,93 @@ export const RECEIPT_TABLES = [
 ] as const;
 
 export type ReceiptTableName = (typeof RECEIPT_TABLES)[number];
+
+// --- Repository extension schema (migrations/0003_repositories.sql) ---------
+
+export interface BankAccountRow {
+  id: string;
+  workspace_id: string;
+  source_id: string;
+  external_id: string;
+  name: string | null;
+  iban: string | null;
+  currency: string | null;
+  product: string | null;
+  raw_json: string;
+  raw_record_id: string;
+  updated_at: string;
+}
+
+export interface BankBalanceRow {
+  id: string;
+  workspace_id: string;
+  source_id: string;
+  account_external_id: string;
+  balance_type: string;
+  amount: string;
+  currency: string;
+  reference_date: string;
+  raw_json: string;
+  raw_record_id: string;
+  updated_at: string;
+}
+
+export interface BankTransactionRow {
+  id: string;
+  workspace_id: string;
+  source_id: string;
+  account_external_id: string;
+  external_id: string;
+  booked_on: string | null;
+  value_date: string | null;
+  amount: string;
+  currency: string;
+  status: string | null;
+  counterparty_name: string | null;
+  remittance_info: string | null;
+  raw_json: string;
+  raw_record_id: string;
+  updated_at: string;
+}
+
+export interface ReviewItemRow {
+  id: string;
+  workspace_id: string;
+  target_type: string;
+  target_id: string;
+  state: ReviewState;
+  reason_json: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PortalTaskRunRow {
+  run_id: string;
+  workspace_id: string;
+  task_id: string;
+  task_version: number;
+  portal_domain: string;
+  browser_provider: string;
+  fetched_at: string;
+}
+
+export const REPOSITORY_TABLES = [
+  "bank_accounts",
+  "bank_balances",
+  "bank_transactions",
+  "review_items",
+  "portal_task_runs",
+] as const;
+
+export type RepositoryTableName = (typeof REPOSITORY_TABLES)[number];
+
+export interface ReviewItem {
+  id: string;
+  workspaceId: string;
+  targetType: string;
+  targetId: string;
+  state: ReviewState;
+  reason: JsonValue;
+  createdAt: string;
+  updatedAt: string;
+}

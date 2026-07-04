@@ -25,4 +25,5 @@ function load(file: string): string {
 export const CORE_MIGRATIONS: readonly Migration[] = [
   { id: "0001_core", sql: load("./0001_core.sql") },
   { id: "0002_receipts", sql: load("./0002_receipts.sql") },
+  { id: "0003_repositories", sql: load("./0003_repositories.sql") },
 ];
