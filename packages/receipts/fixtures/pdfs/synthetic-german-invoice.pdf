@@ -1,0 +1,42 @@
+%PDF-1.4
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>
+endobj
+4 0 obj
+<< /Length 260 >>
+stream
+BT
+/F1 12 Tf
+72 780 Td
+(Sona Testbedarf GmbH) Tj
+T*
+(Musterstrasse 1) Tj
+T*
+(10115 Berlin) Tj
+T*
+(Rechnung RE-2026-0042) Tj
+T*
+(Rechnungsdatum: 15.01.2026) Tj
+T*
+(Leistungszeitraum Januar 2026) Tj
+T*
+(Zwischensumme: 70,78 EUR) Tj
+T*
+(MwSt 19%: 13,45 EUR) Tj
+T*
+(Gesamtbetrag: 84,23 EUR) Tj
+ET
+endstream
+endobj
+5 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+trailer
+<< /Root 1 0 R >>
+%%EOF

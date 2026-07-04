@@ -15,7 +15,35 @@ export {
   isDuplicateContent,
 } from "./documents/hash.js";
 export type { DocumentSourceKind, RetentionState, StoredDocument } from "./documents/types.js";
-export type { DocumentExtraction } from "./extraction/types.js";
+export { FakeExtractionProvider } from "./extraction/fake.js";
+export type {
+  LlmFetch,
+  LlmFetchInit,
+  LlmFetchResponse,
+  LlmStructuringProviderConfig,
+} from "./extraction/llm.js";
+export { LlmStructuringProvider } from "./extraction/llm.js";
+export { extractPdfTextLayer, PdfTextExtractionProvider } from "./extraction/pdf-text.js";
+export type {
+  ExtractionDocumentMetadata,
+  ExtractionProvider,
+  ExtractionProviderInput,
+  ProviderExtractionValidationResult,
+} from "./extraction/provider.js";
+export {
+  assertProviderExtractionResult,
+  documentExtractionSchema,
+  extractionToMatchableDocument,
+  validateProviderExtractionResult,
+} from "./extraction/provider.js";
+export type {
+  DocumentExtraction,
+  ExtractedField,
+  ExtractionEvidence,
+  ExtractionFieldEvidence,
+  ExtractionFieldName,
+  ExtractionStatus,
+} from "./extraction/types.js";
 export type {
   MatchableDocument,
   MatchableTransaction,
