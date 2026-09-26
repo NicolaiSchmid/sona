@@ -5,8 +5,11 @@ import {
   assetEventSchema,
   assetSchema,
   type DepreciationScheduleConfig,
+  decimalsEqual,
   depreciationScheduleConfigSchema,
   type MoneyAmount,
+  type RecordedDepreciationEntry,
+  recordedDepreciationEntrySchema,
 } from "@sona/core";
 import type { DbClient } from "../runner.js";
 import {
@@ -19,22 +22,7 @@ import {
   rows,
 } from "./helpers.js";
 
-/**
- * A generated depreciation transaction recorded for one asset-year. The
- * persistence-layer counterpart of core's `RecordedDepreciation`; callers add
- * the ledger transaction's review state before planning.
- */
-export interface RecordedDepreciationEntry {
-  id: string;
-  workspaceId: string;
-  assetId: string;
-  /** Schedule configuration the transaction was generated from. */
-  configId: string;
-  year: number;
-  transactionId: string;
-  amount: MoneyAmount;
-  createdAt: string;
-}
+export type { RecordedDepreciationEntry } from "@sona/core";
 
 /**
  * Workspace-scoped persistence for assets, their append-only history,
@@ -106,7 +94,7 @@ export class SqliteAssetRepository {
     ).map((r) => this.#assetFromRow(r));
   }
 
-  /** Appends an improvement or disposal. Events are never updated or deleted. */
+  /** Appends an improvement, disposal, or retraction. Events are never updated or deleted. */
   async appendEvent(input: AssetEvent): Promise<void> {
     const event = assetEventSchema.parse(input);
     const asset = await this.#requireAsset(event.workspaceId, event.assetId);
@@ -115,6 +103,23 @@ export class SqliteAssetRepository {
       !asset.components.some((component) => component.id === event.componentId)
     ) {
       throw new Error(`component ${event.componentId} does not belong to asset ${asset.id}`);
+    }
+    if (event.kind === "retraction") {
+      // A mis-targeted retraction would make every later schedule computation
+      // fail, and history is append-only, so refuse it here as core would.
+      const target = row(
+        this.#db
+          .prepare(
+            "SELECT kind FROM asset_events WHERE workspace_id = ? AND asset_id = ? AND id = ?",
+          )
+          .get(event.workspaceId, event.assetId, event.retractsEventId),
+      );
+      if (target === undefined) {
+        throw new Error(`event ${event.retractsEventId} does not belong to asset ${asset.id}`);
+      }
+      if (requiredString(target, "kind") === "retraction") {
+        throw new Error("a retraction cannot retract another retraction");
+      }
     }
     const existing = row(
       this.#db
@@ -232,8 +237,9 @@ export class SqliteAssetRepository {
    * the ledger's review state says which is live.
    */
   async recordDepreciationEntry(
-    entry: RecordedDepreciationEntry,
+    input: RecordedDepreciationEntry,
   ): Promise<RecordedDepreciationEntry> {
+    const entry = recordedDepreciationEntrySchema.parse(input);
     // ON CONFLICT keeps concurrent retries atomic: whoever loses the race
     // reads back the winner's row instead of failing on the unique index.
     this.#db
@@ -257,6 +263,19 @@ export class SqliteAssetRepository {
     );
     if (stored === undefined) {
       throw new Error("depreciation entry was not persisted");
+    }
+    // A retry of the same transaction must describe the same asset-year; a
+    // different payload under a known transaction id is a caller bug, not a retry.
+    if (
+      stored.assetId !== entry.assetId ||
+      stored.configId !== entry.configId ||
+      stored.year !== entry.year ||
+      stored.amount.commodity !== entry.amount.commodity ||
+      !decimalsEqual(stored.amount.amount, entry.amount.amount)
+    ) {
+      throw new Error(
+        `transaction ${entry.transactionId} is already recorded with a different asset-year or amount`,
+      );
     }
     return stored;
   }
@@ -390,8 +409,10 @@ function eventFromRow(source: Record<string, unknown>): AssetEvent {
         kind,
         retractsEventId: requiredString(source, "retracts_event_id"),
       });
-    default:
+    case "disposal":
       return assetEventSchema.parse({ ...base, kind, proceeds: money });
+    default:
+      throw new Error(`database column kind had unexpected value ${JSON.stringify(kind)}`);
   }
 }
 

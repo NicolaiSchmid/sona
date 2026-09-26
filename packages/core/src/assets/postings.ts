@@ -25,9 +25,11 @@ import {
 } from "./schedule";
 import { type Asset, DepreciationError, type DepreciationScheduleConfig } from "./types";
 
-/** Evidence-graph record type names used for asset-related links. */
+/**
+ * Evidence-graph record type names used for asset-related links. The schedule
+ * config type is named after its table, `asset_depreciation_schedules`.
+ */
 export const ASSET_RECORD_TYPES = {
-  asset: "asset",
   scheduleConfig: "asset_depreciation_schedule",
   document: "document",
   ledgerTransaction: "ledger_transaction",
@@ -165,7 +167,9 @@ export function buildDepreciationDraft(input: BuildDepreciationDraftInput): Depr
 
 /**
  * A depreciation transaction already recorded for an asset-year, with the
- * review state read from the ledger. Produced by the persistence layer.
+ * review state read from the ledger. Assembled by the caller from the
+ * persistence layer's `RecordedDepreciationEntry` plus the ledger
+ * transaction's current review state.
  */
 export interface RecordedDepreciation {
   year: number;

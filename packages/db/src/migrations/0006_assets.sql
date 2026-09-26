@@ -62,10 +62,13 @@ CREATE TABLE IF NOT EXISTS asset_events (
   evidence_document_ids_json  TEXT NOT NULL,
   created_at                  TEXT NOT NULL,
   UNIQUE (workspace_id, id),
+  UNIQUE (workspace_id, asset_id, id),
   FOREIGN KEY (workspace_id, asset_id) REFERENCES assets(workspace_id, id),
   FOREIGN KEY (workspace_id, asset_id, component_id)
     REFERENCES asset_components(workspace_id, asset_id, id),
-  FOREIGN KEY (workspace_id, retracts_event_id) REFERENCES asset_events(workspace_id, id)
+  -- A retraction may only target an event of the same asset.
+  FOREIGN KEY (workspace_id, asset_id, retracts_event_id)
+    REFERENCES asset_events(workspace_id, asset_id, id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_asset_events_asset

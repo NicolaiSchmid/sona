@@ -16,6 +16,7 @@ export {
   type DepreciationSectionOptions,
   type DepreciationSectionResult,
   type DepreciationTransactionRef,
+  type ExcludedDepreciationYear,
   generateDepreciationSection,
 } from "./export/depreciation.js";
 export {

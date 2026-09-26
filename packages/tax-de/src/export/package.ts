@@ -258,10 +258,10 @@ export function generateExportPackage(input: GeneratePackageInput): TaxExportPac
     mode: input.mode,
   });
   // A depreciation posting already in the ledger export reports its gap once.
-  const reportedPostingIds = new Set(postingMissing.map((m) => m.postingId));
+  const reportedTransactionIds = new Set(postingMissing.map((m) => m.transactionId));
   const missing: MissingEvidenceRow[] = [
     ...postingMissing,
-    ...depreciation.missingEvidence.filter((m) => !reportedPostingIds.has(m.postingId)),
+    ...depreciation.missingEvidence.filter((m) => !reportedTransactionIds.has(m.transactionId)),
   ];
   const evidence = evidenceBearing(lines, depreciation.rows);
 

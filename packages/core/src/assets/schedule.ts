@@ -356,7 +356,9 @@ function validateEvents(
  *
  * Improvements raise the basis of their component from their year onward as
  * a full-year amount; earlier rows are unaffected. An improvement after the
- * asset is fully depreciated re-opens the schedule and is flagged.
+ * asset is fully depreciated re-opens the schedule and is flagged. Retracted
+ * events are ignored entirely. Each row lists the events applied so far, the
+ * documents substantiating it, and every contributor still lacking evidence.
  */
 export function computeDepreciationSchedule(
   input: ComputeDepreciationScheduleInput,
