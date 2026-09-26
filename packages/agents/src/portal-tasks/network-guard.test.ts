@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { createNetworkGuard, type PortalRequest } from "./network-guard.js";
+import { createNetworkGuard, isMaterialBlock, type PortalRequest } from "./network-guard.js";
+import type { BlockedPortalRequest } from "./provenance.js";
 import type { PortalHttpMethodException, PortalTask } from "./schema.js";
 
 /** A reviewed POST exception; the login form fields are the default body review. */
@@ -803,5 +804,131 @@ describe("NetworkGuard snapshot", () => {
     });
     expect(JSON.stringify(snapshot)).not.toContain("t0k3n");
     expect(JSON.stringify(snapshot)).not.toContain("abc123");
+  });
+});
+
+describe("isMaterialBlock", () => {
+  const blocked = (
+    resourceType: BlockedPortalRequest["resourceType"],
+    reason: BlockedPortalRequest["reason"],
+  ): BlockedPortalRequest => ({ url: "https://x.test/", method: "GET", resourceType, reason });
+
+  it("treats a refused navigation or download as material even when only off the allowlist", () => {
+    expect(isMaterialBlock(blocked("document", "off_allowlist"))).toBe(true);
+  });
+
+  it("treats off-allowlist subresources and refused WebSockets as incidental", () => {
+    expect(isMaterialBlock(blocked("image", "off_allowlist"))).toBe(false);
+    expect(isMaterialBlock(blocked("font", "off_allowlist"))).toBe(false);
+    expect(isMaterialBlock(blocked("xhr", "off_allowlist"))).toBe(false);
+    expect(isMaterialBlock(blocked("websocket", "websocket"))).toBe(false);
+    expect(isMaterialBlock(blocked("websocket", "off_allowlist"))).toBe(false);
+  });
+
+  it("treats every mutation attempt as material whatever the resource type", () => {
+    for (const resourceType of ["image", "xhr", "fetch", "script", "other"] as const) {
+      for (const reason of [
+        "destructive_url",
+        "non_idempotent_method",
+        "unreviewed_body",
+      ] as const) {
+        expect(isMaterialBlock(blocked(resourceType, reason)), `${resourceType} ${reason}`).toBe(
+          true,
+        );
+      }
+    }
+  });
+});
+
+describe("NetworkGuard static asset exemption edges", () => {
+  const get = (url: string) =>
+    createNetworkGuard({ task }).evaluateRequest({ url, method: "GET", resourceType: "other" });
+
+  it("matches asset extensions case-insensitively and ignores the fragment", () => {
+    expect(get("https://portal.test/js/remove.JS")).toEqual({ action: "allow" });
+    expect(get("https://portal.test/img/remove.svg#top")).toEqual({ action: "allow" });
+  });
+
+  it("does not exempt an asset name followed by a query, a directory slash, or an unknown suffix", () => {
+    expect(get("https://portal.test/img/remove.svg?v=1")).toEqual({
+      action: "abort",
+      reason: "destructive_url",
+    });
+    expect(get("https://portal.test/remove/")).toEqual({
+      action: "abort",
+      reason: "destructive_url",
+    });
+    expect(get("https://portal.test/remove.svg.bak")).toEqual({
+      action: "abort",
+      reason: "destructive_url",
+    });
+  });
+});
+
+describe("NetworkGuard pinned and credential body values", () => {
+  const pinnedTask: PortalTask = {
+    ...task,
+    httpMethodExceptions: [
+      postException({
+        urlPattern: "https://portal.test/api",
+        reason: "login",
+        justification: "Multiplexed login endpoint dispatches on the action field.",
+        allowedBodyFields: ["action", "email", "password"],
+        pinnedBodyValues: { action: ["login"] },
+      }),
+    ],
+  };
+  const post = (
+    postData: string,
+    guardTask: PortalTask = pinnedTask,
+    url = "https://portal.test/api",
+  ) =>
+    createNetworkGuard({ task: guardTask }).evaluateRequest({
+      url,
+      method: "POST",
+      resourceType: "xhr",
+      postData,
+    });
+
+  it("requires a pinned value to match exactly, including case and whitespace", () => {
+    expect(post("action=login")).toEqual({ action: "allow" });
+    expect(post("action=Login")).toEqual({ action: "abort", reason: "unreviewed_body" });
+    expect(post("action=login%20")).toEqual({ action: "abort", reason: "unreviewed_body" });
+    expect(post("action=%20login")).toEqual({ action: "abort", reason: "unreviewed_body" });
+  });
+
+  it("refuses a repeated pinned key when any occurrence is off the reviewed list", () => {
+    expect(post("action=login&action=login")).toEqual({ action: "allow" });
+    expect(post("action=login&action=delete")).toEqual({
+      action: "abort",
+      reason: "unreviewed_body",
+    });
+    expect(post("action=delete&action=login")).toEqual({
+      action: "abort",
+      reason: "unreviewed_body",
+    });
+  });
+
+  it("never screens a credential value, even one that names a forbidden operation", () => {
+    expect(post("action=login&email=a%40b.test&password=cancel-refund-delete")).toEqual({
+      action: "allow",
+    });
+    expect(post("action=login&password=%7B%22op%22%3A%22delete%22%7D")).toEqual({
+      action: "allow",
+    });
+  });
+
+  it("skips a credential field whose JSON value is an object but screens the same value elsewhere", () => {
+    const login = "https://portal.test/login";
+
+    expect(post('{"email":"a@b.test","password":{"op":"delete"}}', task, login)).toEqual({
+      action: "allow",
+    });
+    expect(
+      post('{"email":"a@b.test","password":"x","action":{"op":"delete"}}', task, login),
+    ).toEqual({
+      action: "abort",
+      reason: "unreviewed_body",
+    });
   });
 });

@@ -26,7 +26,9 @@ import {
   LocalPlaywrightPortalTaskRunner,
   type PortalConnection,
   type PortalConnectionRepository,
+  type SavePortalEvidenceInput,
 } from "./playwright-runner.js";
+import { STORED_DOCUMENT_URI_SCHEME } from "./provenance.js";
 import type { RunPortalTaskInput } from "./runner.js";
 import { type PortalTask, parsePortalTask, portalTaskDigest } from "./schema.js";
 
@@ -1297,5 +1299,136 @@ class FixtureElement implements PortalElementHandle {
 
   async textContent(): Promise<string | null> {
     return this.#filename;
+  }
+}
+
+describe("LocalPlaywrightPortalTaskRunner evidence and warnings", () => {
+  it("registers each stored file as portal evidence whose metadata traces back to the run", async () => {
+    const evidence = new InMemoryPortalEvidenceRepository();
+    const runner = await makeRunner({ page: new FixturePortalPage(), evidence });
+
+    const result = await runner.runTask(input());
+
+    const stored = result.storedDocuments[0];
+    const fetched = result.documents[0];
+    if (stored === undefined || fetched === undefined) {
+      throw new Error("expected the first fixture invoice to be stored");
+    }
+    expect(stored.id).toBe(`portal_conn_1_${fetched.contentHash.slice(0, 16)}`);
+    expect(fetched.content).toEqual({
+      kind: "objectRef",
+      uri: `${STORED_DOCUMENT_URI_SCHEME}${stored.id}`,
+    });
+    expect(evidence.listDocuments(context)[0]).toEqual({
+      id: stored.id,
+      workspaceId: "ws_1",
+      contentHash: fetched.contentHash,
+      mimeType: "application/pdf",
+      originalFilename: "2026-01.pdf",
+      storageUri: `${STORED_DOCUMENT_URI_SCHEME}${stored.id}`,
+      sourceKind: "portal",
+      sourceMetadata: {
+        sourcePortal: "portal.test",
+        taskId: "synthetic-reference-portal",
+        taskVersion: 1,
+        runId: "run_1",
+        sourceUrl: "https://portal.test/invoices/2026-01.pdf",
+        downloadedFilename: "2026-01.pdf",
+        contentHash: fetched.contentHash,
+        fetchedAt: now,
+        browserProvider: "local-playwright",
+        extractionStatus: "pending",
+      },
+      retentionState: "active",
+      createdAt: now,
+    });
+  });
+
+  it("does not register evidence for a document whose storage failed", async () => {
+    const evidence = new InMemoryPortalEvidenceRepository();
+    const storage = new CountingDocumentStorage();
+    storage.failNextPut = new Error("disk full");
+    const runner = await makeRunner({ page: new FixturePortalPage(), evidence, storage });
+
+    const failed = await runner.runTask(input());
+    const retried = await runner.runTask(input({ runId: "run_2" }));
+
+    expect(failed.status).toBe("failed");
+    expect(failed.storedDocuments).toEqual([]);
+    expect(retried.status).toBe("completed");
+    expect(evidence.listDocuments(context).map((record) => record.sourceMetadata)).toEqual([
+      expect.objectContaining({ runId: "run_2" }),
+      expect.objectContaining({ runId: "run_2" }),
+    ]);
+  });
+
+  it("fails the run and releases the content hash when evidence registration fails", async () => {
+    const evidence = new FailingOnceEvidenceRepository(new Error("evidence store down"));
+    const registry = new InMemoryPortalDocumentRegistry();
+    const runner = await makeRunner({ page: new FixturePortalPage(), evidence, registry });
+
+    const failed = await runner.runTask(input());
+    const retried = await runner.runTask(input({ runId: "run_2" }));
+
+    expect(failed.status).toBe("failed");
+    expect(failed.errors).toEqual(["evidence store down"]);
+    expect(failed.storedDocuments).toEqual([]);
+    expect(failed.documents).toEqual([]);
+    expect(retried.status).toBe("completed");
+    expect(retried.documents).toHaveLength(2);
+    expect(evidence.listDocuments(context)).toHaveLength(2);
+  });
+
+  it("counts every incidental block in a single warning", async () => {
+    const page = new FixturePortalPage({
+      subresources: [
+        { url: "https://tracking.example/pixel.gif", resourceType: "image" },
+        { url: "https://fonts.example/inter.woff2", resourceType: "font" },
+        { url: "wss://portal.test/live", resourceType: "websocket" },
+      ],
+    });
+    const runner = await makeRunner({ page });
+
+    const result = await runner.runTask(input());
+
+    expect(result.status).toBe("completed");
+    expect(result.warnings).toEqual(["3 incidental request(s) blocked; see provenance"]);
+    expect(result.provenance.blockedRequests.map((blocked) => blocked.reason)).toEqual([
+      "off_allowlist",
+      "off_allowlist",
+      "websocket",
+    ]);
+  });
+
+  it("warns only about the incidental blocks when a material block ends the run", async () => {
+    const page = new FixturePortalPage({
+      subresources: [{ url: "https://tracking.example/pixel.gif", resourceType: "image" }],
+    });
+    const noException: PortalTask = { ...task, httpMethodExceptions: [] };
+    const runner = await makeRunner({ page, connectionTask: noException });
+
+    const result = await runner.runTask(input({ task: noException }));
+
+    expect(result.status).toBe("blocked");
+    expect(result.warnings).toEqual(["1 incidental request(s) blocked; see provenance"]);
+    expect(result.provenance.blockedRequests).toHaveLength(2);
+  });
+});
+
+class FailingOnceEvidenceRepository extends InMemoryPortalEvidenceRepository {
+  #failure: Error | undefined;
+
+  constructor(failure: Error) {
+    super();
+    this.#failure = failure;
+  }
+
+  override async saveDocument(inputValue: SavePortalEvidenceInput): Promise<void> {
+    if (this.#failure !== undefined) {
+      const failure = this.#failure;
+      this.#failure = undefined;
+      throw failure;
+    }
+    await super.saveDocument(inputValue);
   }
 }

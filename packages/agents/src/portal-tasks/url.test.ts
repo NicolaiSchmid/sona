@@ -116,3 +116,57 @@ describe("decodedPathAndQuery", () => {
     expect(redactUrl("not a url")).toBeUndefined();
   });
 });
+
+describe("redactUrl thresholds", () => {
+  it("keeps a segment with seven digits and redacts one with eight, even when interleaved", () => {
+    expect(redactUrl("https://portal.test/inv-1234567.pdf")).toBe(
+      "https://portal.test/inv-1234567.pdf",
+    );
+    expect(redactUrl("https://portal.test/inv-12345678.pdf")).toBe(
+      "https://portal.test/[REDACTED_SEGMENT]",
+    );
+    expect(redactUrl("https://portal.test/a1b2c3d4e5f6g7h8")).toBe(
+      "https://portal.test/[REDACTED_SEGMENT]",
+    );
+  });
+
+  it("keeps a 19-character token-shaped segment and redacts one of 20", () => {
+    expect(redactUrl("https://portal.test/abcdefghijklmnopqrs")).toBe(
+      "https://portal.test/abcdefghijklmnopqrs",
+    );
+    expect(redactUrl("https://portal.test/abcdefghijklmnopqrst")).toBe(
+      "https://portal.test/[REDACTED_SEGMENT]",
+    );
+  });
+
+  it("keeps a long segment that carries a file extension", () => {
+    expect(redactUrl("https://portal.test/rechnung-februar-zwanzigsechsundzwanzig.pdf")).toBe(
+      "https://portal.test/rechnung-februar-zwanzigsechsundzwanzig.pdf",
+    );
+  });
+
+  it("redacts e-mail-like segments whether the @ is raw or percent-encoded", () => {
+    expect(redactUrl("https://portal.test/u/a@b.test/x")).toBe(
+      "https://portal.test/u/[REDACTED_SEGMENT]/x",
+    );
+    expect(redactUrl("https://portal.test/u/a%40b.test/x")).toBe(
+      "https://portal.test/u/[REDACTED_SEGMENT]/x",
+    );
+  });
+});
+
+describe("redactUrlsInText with several URLs", () => {
+  it("redacts each URL independently and keeps punctuation that follows a query-less URL", () => {
+    expect(redactUrlsInText("see https://a.test/x, then https://b.test/y.")).toBe(
+      "see https://a.test/x, then https://b.test/y.",
+    );
+  });
+
+  it("drops the query of every URL, taking trailing punctuation that was glued to it", () => {
+    const redacted = redactUrlsInText("failed: https://a.test/x?s=1, retry https://b.test/y?t=2.");
+
+    expect(redacted).toBe("failed: https://a.test/x retry https://b.test/y");
+    expect(redacted).not.toContain("s=1");
+    expect(redacted).not.toContain("t=2");
+  });
+});

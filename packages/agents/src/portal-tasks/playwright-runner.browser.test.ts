@@ -100,6 +100,43 @@ describe.skipIf(!runBrowserTests)("LocalPlaywrightPortalTaskRunner browser fixtu
     expect(hits.has("POST /account/close")).toBe(false);
   });
 
+  it("follows a method-preserving redirect onto a reviewed endpoint in place with the body intact", async () => {
+    let origin = "";
+    const { result, hits, headersSeen, bodiesSeen } = await runFixtureWithServer((serverOrigin) => {
+      origin = serverOrigin;
+      return makeTask(origin, [
+        { kind: "navigate", url: `${origin}/login` },
+        { kind: "click", selector: "button.login-307" },
+        { kind: "waitForSelector", selector: "[data-testid='invoice-list']", timeoutMs: 5_000 },
+        {
+          kind: "downloadLinks",
+          selector: "a.invoice-download",
+          hrefAttribute: "href",
+          filenameAttribute: "data-filename",
+          mimeType: "application/pdf",
+        },
+      ]);
+    });
+
+    expect(result.errors).toEqual([]);
+    expect(result.status).toBe("completed");
+    expect(hits.get("POST /login-307")).toBe(1);
+    expect(hits.get("POST /login-hop")).toBe(1);
+    expect(headersSeen.get("POST /login-hop")?.["content-type"]).toBe(
+      "application/x-www-form-urlencoded",
+    );
+    expect(bodiesSeen.get("POST /login-hop")).toBe(
+      "email=fixture-user%40example.test&password=fixture-password",
+    );
+    expect(result.provenance.allowedNonIdempotentRequests.map((entry) => entry.url)).toEqual([
+      `${origin}/login-307`,
+      `${origin}/login-hop`,
+    ]);
+    expect(result.provenance.blockedRequests).toEqual([]);
+    // The session cookie set by the in-place hop reached the context jar.
+    expect(result.documents).toHaveLength(2);
+  });
+
   it("aborts an off-allowlist redirect hop without contacting the target", async () => {
     const { result, hits } = await runFixtureWithServer((origin) =>
       makeTask(origin, [
@@ -258,6 +295,8 @@ interface FixtureRun {
   hits: ReadonlyMap<string, number>;
   /** Selected request headers of the last request per `METHOD /path`. */
   headersSeen: ReadonlyMap<string, Record<string, string | undefined>>;
+  /** Raw body of the last non-empty request per `METHOD /path`. */
+  bodiesSeen: ReadonlyMap<string, string>;
 }
 
 async function runFixtureWithServer(
@@ -306,7 +345,12 @@ async function runFixtureWithServer(
       workspaceId: context.workspaceId,
       now: "2026-02-01T00:00:00Z",
     });
-    return { result, hits: server.hits, headersSeen: server.headersSeen };
+    return {
+      result,
+      hits: server.hits,
+      headersSeen: server.headersSeen,
+      bodiesSeen: server.bodiesSeen,
+    };
   } finally {
     await server.close();
   }
@@ -316,12 +360,14 @@ interface FixtureServer {
   origin: string;
   hits: ReadonlyMap<string, number>;
   headersSeen: ReadonlyMap<string, Record<string, string | undefined>>;
+  bodiesSeen: ReadonlyMap<string, string>;
   close(): Promise<void>;
 }
 
 async function startFixtureServer(): Promise<FixtureServer> {
   const hits = new Map<string, number>();
   const headersSeen = new Map<string, Record<string, string | undefined>>();
+  const bodiesSeen = new Map<string, string>();
   const server = createServer((request, response) => {
     const key = `${request.method} ${new URL(request.url ?? "/", "http://localhost").pathname}`;
     hits.set(key, (hits.get(key) ?? 0) + 1);
@@ -330,7 +376,12 @@ async function startFixtureServer(): Promise<FixtureServer> {
       "content-length": headerValue(request.headers["content-length"]),
       cookie: headerValue(request.headers.cookie),
     });
-    handleFixtureRequest(request, response);
+    void readRequestBody(request).then((body) => {
+      if (body.length > 0) {
+        bodiesSeen.set(key, body);
+      }
+      handleFixtureRequest(request, response, body);
+    });
   });
   await new Promise<void>((resolve) => {
     server.listen(0, "127.0.0.1", resolve);
@@ -343,6 +394,7 @@ async function startFixtureServer(): Promise<FixtureServer> {
     origin: `http://localhost:${address.port}`,
     hits,
     headersSeen,
+    bodiesSeen,
     close: async () => {
       server.closeAllConnections();
       await new Promise<void>((resolve, reject) => {
@@ -362,7 +414,20 @@ function headerValue(value: string | string[] | undefined): string | undefined {
   return Array.isArray(value) ? value.join(", ") : value;
 }
 
-function handleFixtureRequest(request: IncomingMessage, response: ServerResponse): void {
+function readRequestBody(request: IncomingMessage): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    request.on("data", (chunk: Buffer) => chunks.push(chunk));
+    request.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+    request.on("error", reject);
+  });
+}
+
+function handleFixtureRequest(
+  request: IncomingMessage,
+  response: ServerResponse,
+  body: string,
+): void {
   const url = new URL(request.url ?? "/", "http://localhost");
   if (url.pathname === "/xhr-login" && request.method === "GET") {
     response.writeHead(200, { "content-type": "text/html" });
@@ -403,7 +468,29 @@ function handleFixtureRequest(request: IncomingMessage, response: ServerResponse
         <input name="email" value="fixture-user@example.test">
         <input name="password" value="fixture-password">
         <button class="login-redirect" type="submit">Sign in (redirecting)</button>
+      </form>
+      <form method="post" action="/login-307">
+        <input name="email" value="fixture-user@example.test">
+        <input name="password" value="fixture-password">
+        <button class="login-307" type="submit">Sign in (307 to reviewed hop)</button>
       </form>`);
+    return;
+  }
+  if (url.pathname === "/login-307" && request.method === "POST") {
+    // A method-preserving redirect onto a second reviewed login endpoint.
+    response.writeHead(307, { location: "/login-hop" });
+    response.end();
+    return;
+  }
+  if (url.pathname === "/login-hop" && request.method === "POST") {
+    const fields = new URLSearchParams(body);
+    if (fields.get("email") === null || fields.get("password") === null) {
+      response.writeHead(400, { "content-type": "text/plain" });
+      response.end("login hop received no credentials");
+      return;
+    }
+    response.writeHead(303, { location: "/invoices", "set-cookie": `${SESSION_COOKIE}; Path=/` });
+    response.end();
     return;
   }
   if (url.pathname === "/redirect-out" && request.method === "GET") {
@@ -553,6 +640,24 @@ function makeTask(origin: string, steps?: readonly PortalTaskStep[]): PortalTask
         urlPattern: `${origin}/login-redirect`,
         reason: "login",
         justification: "Fixture variant whose login endpoint redirects with the method preserved.",
+        allowedBodyFields: ["email", "password"],
+        credentialBodyFields: ["email", "password"],
+        pinnedBodyValues: {},
+      },
+      {
+        method: "POST",
+        urlPattern: `${origin}/login-307`,
+        reason: "login",
+        justification: "Fixture login endpoint that 307-redirects onto the reviewed login hop.",
+        allowedBodyFields: ["email", "password"],
+        credentialBodyFields: ["email", "password"],
+        pinnedBodyValues: {},
+      },
+      {
+        method: "POST",
+        urlPattern: `${origin}/login-hop`,
+        reason: "login",
+        justification: "Second hop of the fixture 307 login chain; same reviewed form fields.",
         allowedBodyFields: ["email", "password"],
         credentialBodyFields: ["email", "password"],
         pinnedBodyValues: {},
