@@ -19,6 +19,7 @@ import {
   meetsReviewState,
   type ReviewState,
 } from "@sona/core";
+import { REQUIRED_STATE } from "./generate.js";
 import type { MissingEvidenceRow } from "./missing-evidence.js";
 import type { ExportMode } from "./types.js";
 
@@ -77,12 +78,19 @@ export interface DepreciationSectionResult {
   missingEvidence: MissingEvidenceRow[];
 }
 
-/** Minimum status a row must reach to appear in a final export. */
-const FINAL_REQUIRED_STATE: ReviewState = "user_reviewed";
-
-/** Reference used in reports for a scheduled year that has no transaction yet. */
-function scheduleReference(configId: string, year: number): string {
-  return `schedule:${configId}:${year}`;
+/**
+ * Why a scheduled year is not yet final-export ready, or `undefined` if its
+ * generated transaction meets the final review gate.
+ */
+function reviewGap(transaction: DepreciationTransactionRef | undefined): string | undefined {
+  const required = REQUIRED_STATE.final;
+  if (transaction === undefined) {
+    return "no depreciation transaction generated yet";
+  }
+  if (!meetsReviewState(transaction.reviewState, required)) {
+    return `review state "${transaction.reviewState}" below required "${required}"`;
+  }
+  return undefined;
 }
 
 export function generateDepreciationSection(
@@ -101,35 +109,17 @@ export function generateDepreciationSection(
       (t) => t.year === options.year && t.reviewState !== "superseded",
     );
     const status: DepreciationRowStatus = transaction?.reviewState ?? "not_generated";
-
-    if (options.mode === "final") {
-      if (transaction === undefined) {
-        result.excluded.push({
-          assetId: input.assetId,
-          year: options.year,
-          reason: "no depreciation transaction generated yet",
-        });
-        continue;
-      }
-      if (!meetsReviewState(transaction.reviewState, FINAL_REQUIRED_STATE)) {
-        result.excluded.push({
-          assetId: input.assetId,
-          year: options.year,
-          reason: `review state "${transaction.reviewState}" below required "${FINAL_REQUIRED_STATE}"`,
-        });
-        continue;
-      }
+    const gap = reviewGap(transaction);
+    if (options.mode === "final" && gap !== undefined) {
+      result.excluded.push({ assetId: input.assetId, year: options.year, reason: gap });
+      continue;
     }
 
     const method = describeDepreciationMethod(schedule.method);
-    const reviewRequired = !meetsReviewState(
-      status === "not_generated" ? "draft" : status,
-      FINAL_REQUIRED_STATE,
-    );
     const missingEvidence = row.evidenceDocumentIds.length === 0;
     const notes = [
       `suggested amount from configured rule v${schedule.configVersion} (${method})`,
-      ...(reviewRequired ? ["review required"] : []),
+      ...(gap !== undefined ? ["review required"] : []),
       ...(missingEvidence ? ["missing evidence"] : []),
       ...row.notes.map((n) => n.replace(/_/g, " ")),
     ].join("; ");
@@ -156,7 +146,8 @@ export function generateDepreciationSection(
     });
 
     if (missingEvidence) {
-      const reference = scheduleReference(schedule.configId, row.year);
+      // Reference for a scheduled year that has no transaction yet.
+      const reference = `schedule:${schedule.configId}:${row.year}`;
       result.missingEvidence.push({
         postingId: transaction?.postingIds[0] ?? reference,
         transactionId: transaction?.transactionId ?? reference,

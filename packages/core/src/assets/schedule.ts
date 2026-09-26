@@ -196,9 +196,15 @@ function requireMoneyInCommodity(
   return toScaledBigInt(money.amount, scale);
 }
 
+interface ValidatedDisposal {
+  event: AssetDisposalEvent;
+  /** Parsed `event.occurredOn`. */
+  on: YearMonth;
+}
+
 interface ValidatedEvents {
-  improvements: AssetImprovementEvent[];
-  disposal: AssetDisposalEvent | undefined;
+  improvementsByYear: Map<number, AssetImprovementEvent[]>;
+  disposal: ValidatedDisposal | undefined;
 }
 
 function validateEvents(
@@ -207,8 +213,8 @@ function validateEvents(
   acquired: YearMonth,
 ): ValidatedEvents {
   const componentIds = new Set(asset.components.map((c) => c.id));
-  const improvements: AssetImprovementEvent[] = [];
-  let disposal: AssetDisposalEvent | undefined;
+  const improvementsByYear = new Map<number, AssetImprovementEvent[]>();
+  let disposal: ValidatedDisposal | undefined;
 
   for (const event of events) {
     if (event.assetId !== asset.id || event.workspaceId !== asset.workspaceId) {
@@ -226,28 +232,29 @@ function validateEvents(
           `Improvement ${event.id} references unknown component ${event.componentId}`,
         );
       }
-      improvements.push(event);
+      const bucket = improvementsByYear.get(occurred.year) ?? [];
+      bucket.push(event);
+      improvementsByYear.set(occurred.year, bucket);
     } else {
       if (disposal !== undefined) {
         throw new DepreciationScheduleError(`Asset ${asset.id} has more than one disposal event`);
       }
-      disposal = event;
+      disposal = { event, on: occurred };
     }
   }
 
   if (disposal !== undefined) {
-    const disposed = parseYearMonth(disposal.occurredOn, "Disposal occurredOn");
-    for (const improvement of improvements) {
-      const occurred = parseYearMonth(improvement.occurredOn, "Improvement occurredOn");
-      if (occurred.year > disposed.year) {
+    for (const [year, improvements] of improvementsByYear) {
+      if (year > disposal.on.year) {
+        const ids = improvements.map((i) => i.id).join(", ");
         throw new DepreciationScheduleError(
-          `Improvement ${improvement.id} occurred after disposal on ${disposal.occurredOn}`,
+          `Improvement ${ids} occurred after disposal on ${disposal.event.occurredOn}`,
         );
       }
     }
   }
 
-  return { improvements, disposal };
+  return { improvementsByYear, disposal };
 }
 
 /**
@@ -279,8 +286,7 @@ export function computeDepreciationSchedule(
   const scale = config.roundingScale ?? DEFAULT_DEPRECIATION_ROUNDING_SCALE;
   const allocation = allocateAcquisitionCosts(asset, scale);
   const acquired = parseYearMonth(asset.acquiredOn, "acquiredOn");
-  const { improvements, disposal } = validateEvents(asset, input.events ?? [], acquired);
-  const disposed = disposal === undefined ? undefined : parseYearMonth(disposal.occurredOn, "");
+  const { improvementsByYear, disposal } = validateEvents(asset, input.events ?? [], acquired);
 
   const residual =
     config.residualValue === undefined
@@ -300,13 +306,6 @@ export function computeDepreciationSchedule(
     ...asset.evidenceDocumentIds,
     ...asset.acquisitionSideCosts.flatMap((s) => s.evidenceDocumentIds),
   ]);
-  const improvementsByYear = new Map<number, AssetImprovementEvent[]>();
-  for (const improvement of improvements) {
-    const { year } = parseYearMonth(improvement.occurredOn, "");
-    const bucket = improvementsByYear.get(year) ?? [];
-    bucket.push(improvement);
-    improvementsByYear.set(year, bucket);
-  }
   const lastImprovementYear = Math.max(acquired.year - 1, ...improvementsByYear.keys());
 
   const rows: DepreciationScheduleRow[] = [];
@@ -337,7 +336,7 @@ export function computeDepreciationSchedule(
     }
 
     const remaining = basis - residual - accumulated;
-    const isDisposalYear = disposed !== undefined && year === disposed.year;
+    const isDisposalYear = disposal?.on.year === year;
     if (remaining <= 0n) {
       if (isDisposalYear || year >= lastImprovementYear) {
         break;
@@ -349,7 +348,7 @@ export function computeDepreciationSchedule(
     let months = 12;
     if (config.proRataTemporis) {
       const firstMonth = year === acquired.year ? acquired.month : 1;
-      const lastMonth = isDisposalYear && disposed !== undefined ? disposed.month : 12;
+      const lastMonth = disposal?.on.year === year ? disposal.on.month : 12;
       months = lastMonth - firstMonth + 1;
       if (months < 12) {
         notes.push("pro_rata");
@@ -409,7 +408,7 @@ export function computeDepreciationSchedule(
     residualValue: fromScaledBigInt(residual, scale),
     totalDepreciation: fromScaledBigInt(accumulated, scale),
     complete,
-    disposedOn: disposal?.occurredOn,
+    disposedOn: disposal?.event.occurredOn,
     rows,
   };
 }

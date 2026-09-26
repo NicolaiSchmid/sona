@@ -15,7 +15,7 @@ import type {
 } from "./types.js";
 
 /** Minimum review state a line must reach to appear in each export mode. */
-const REQUIRED_STATE: Record<ExportMode, ReviewState> = {
+export const REQUIRED_STATE: Record<ExportMode, ReviewState> = {
   draft: "suggested",
   final: "user_reviewed",
 };
