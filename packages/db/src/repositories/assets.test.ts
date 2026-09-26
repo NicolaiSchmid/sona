@@ -209,6 +209,51 @@ describe("SqliteAssetRepository", () => {
     }
   });
 
+  it("round-trips a retraction and rejects one that points outside the asset", async () => {
+    const { db, close } = createTestDatabase();
+    try {
+      const repo = new SqliteAssetRepository(db);
+      await repo.create(property());
+      await repo.appendEvent(improvement);
+      const retraction = {
+        kind: "retraction" as const,
+        id: "evt_retract",
+        workspaceId: "ws_1",
+        assetId: "asset_flat",
+        retractsEventId: "evt_bath",
+        occurredOn: "2026-04-01",
+        description: "Reclassified as maintenance",
+        evidenceDocumentIds: [],
+        createdAt: "2026-04-01T00:00:00Z",
+      };
+      await repo.appendEvent(retraction);
+      expect(await repo.listEvents("ws_1", "asset_flat")).toEqual([improvement, retraction]);
+      // The foreign key refuses a retraction of an event that does not exist in the workspace.
+      await expect(
+        repo.appendEvent({ ...retraction, id: "evt_dangling", retractsEventId: "evt_missing" }),
+      ).rejects.toThrow(/FOREIGN KEY/i);
+    } finally {
+      close();
+    }
+  });
+
+  it("refuses a depreciation entry whose config belongs to a different asset", async () => {
+    const { db, close } = createTestDatabase();
+    try {
+      const repo = new SqliteAssetRepository(db);
+      await repo.create(property());
+      await repo.create(property({ id: "asset_b", name: "B" }));
+      await repo.saveScheduleConfig(config());
+      await repo.saveScheduleConfig(config({ id: "cfg_b", assetId: "asset_b" }));
+      await expect(
+        repo.recordDepreciationEntry({ ...entry(2024), configId: "cfg_b" }),
+      ).rejects.toThrow(/FOREIGN KEY/i);
+      expect(await repo.listDepreciationEntries("ws_1", "asset_flat")).toEqual([]);
+    } finally {
+      close();
+    }
+  });
+
   it("appends schedule config versions and returns the latest", async () => {
     const { db, close } = createTestDatabase();
     try {

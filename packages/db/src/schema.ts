@@ -380,6 +380,7 @@ export interface AssetEventRow {
   asset_id: string;
   kind: AssetEventKind;
   component_id: string | null;
+  retracts_event_id: string | null;
   occurred_on: string;
   description: string;
   amount: string | null;

@@ -199,7 +199,11 @@ describe("generateDepreciationSection", () => {
       ...SAMPLE_DEPRECIATION,
       schedule: {
         ...schedule,
-        rows: schedule.rows.map((r) => ({ ...r, evidenceDocumentIds: [] })),
+        rows: schedule.rows.map((r) => ({
+          ...r,
+          evidenceDocumentIds: [],
+          missingEvidenceFor: ["asset:asset_flat", "side_cost:sc_notary"],
+        })),
       },
     };
     const reviewed = generateDepreciationSection([noEvidence], { year: 2026, mode: "final" });
@@ -221,6 +225,30 @@ describe("generateDepreciationSection", () => {
       postingId: "schedule:cfg_flat_v1:2027",
       transactionId: "schedule:cfg_flat_v1:2027",
     });
+  });
+
+  it("flags a row whose contract is evidenced but whose side cost is not", () => {
+    // Real gap: the purchase contract exists, the notary invoice does not.
+    const partial = {
+      ...SAMPLE_DEPRECIATION,
+      schedule: computeDepreciationSchedule({
+        asset: {
+          ...SAMPLE_ASSET,
+          acquisitionSideCosts: SAMPLE_ASSET.acquisitionSideCosts.map((s) => ({
+            ...s,
+            evidenceDocumentIds: [],
+          })),
+        },
+        config: SAMPLE_SCHEDULE_CONFIG,
+      }),
+    };
+    const { rows, missingEvidence } = generateDepreciationSection([partial], {
+      year: 2026,
+      mode: "final",
+    });
+    expect(rows[0]?.evidenceDocumentIds).toEqual(["doc_2"]);
+    expect(rows[0]?.notes).toContain("missing evidence for side_cost:sc_notary");
+    expect(missingEvidence).toHaveLength(1);
   });
 
   it("treats a year whose only transaction is superseded as not generated in a final export", () => {

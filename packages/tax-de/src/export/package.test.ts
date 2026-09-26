@@ -142,7 +142,11 @@ describe("generateExportPackage", () => {
       ...SAMPLE_DEPRECIATION,
       schedule: {
         ...schedule,
-        rows: schedule.rows.map((r) => ({ ...r, evidenceDocumentIds: [] })),
+        rows: schedule.rows.map((r) => ({
+          ...r,
+          evidenceDocumentIds: [],
+          missingEvidenceFor: ["asset:asset_flat", "side_cost:sc_notary"],
+        })),
       },
     };
     // p_depr is user_reviewed with evidence in the ledger fixture, so the ledger
@@ -225,6 +229,27 @@ describe("generateExportPackage", () => {
     expect(before.files.find((f) => f.path === "summary.md")?.content).toContain(
       "## Depreciation schedules: 0 row(s)",
     );
+  });
+
+  it("lists schedule evidence in the receipt manifest and evidence links", () => {
+    const p = generateExportPackage({
+      year: 2026,
+      postings: SAMPLE_POSTINGS,
+      template: PRIVATE_DE_TEMPLATE,
+      mode: "final",
+      depreciation: [SAMPLE_DEPRECIATION],
+    });
+    const manifest = p.files.find((f) => f.path === "receipt-manifest.csv")?.content ?? "";
+    // doc_notary is referenced only by the schedule row, never by a ledger line.
+    expect(manifest).toContain("doc_notary,p_depr,asset:asset_flat,depreciation");
+    const links = JSON.parse(
+      p.files.find((f) => f.path === "evidence-links.json")?.content ?? "[]",
+    ) as Array<{ postingId: string; transactionId: string; documentIds: string[] }>;
+    expect(links).toContainEqual({
+      postingId: "p_depr",
+      transactionId: "t_depr",
+      documentIds: ["doc_2", "doc_notary"],
+    });
   });
 
   it("neutralizes spreadsheet formula injection in text fields", () => {

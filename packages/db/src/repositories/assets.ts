@@ -124,10 +124,15 @@ export class SqliteAssetRepository {
     if (existing !== undefined) {
       throw new Error("asset events are append-only");
     }
-    const money = event.kind === "improvement" ? event.amount : event.proceeds;
+    const money =
+      event.kind === "improvement"
+        ? event.amount
+        : event.kind === "disposal"
+          ? event.proceeds
+          : undefined;
     this.#db
       .prepare(
-        "INSERT INTO asset_events (id, workspace_id, asset_id, kind, component_id, occurred_on, description, amount, commodity, evidence_document_ids_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO asset_events (id, workspace_id, asset_id, kind, component_id, retracts_event_id, occurred_on, description, amount, commodity, evidence_document_ids_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
       )
       .run(
         event.id,
@@ -135,6 +140,7 @@ export class SqliteAssetRepository {
         event.assetId,
         event.kind,
         event.kind === "improvement" ? event.componentId : null,
+        event.kind === "retraction" ? event.retractsEventId : null,
         event.occurredOn,
         event.description,
         money?.amount ?? null,
@@ -233,16 +239,11 @@ export class SqliteAssetRepository {
   async recordDepreciationEntry(
     entry: RecordedDepreciationEntry,
   ): Promise<RecordedDepreciationEntry> {
-    const existing = await this.getDepreciationEntryByTransaction(
-      entry.workspaceId,
-      entry.transactionId,
-    );
-    if (existing !== undefined) {
-      return existing;
-    }
+    // ON CONFLICT keeps concurrent retries atomic: whoever loses the race
+    // reads back the winner's row instead of failing on the unique index.
     this.#db
       .prepare(
-        "INSERT INTO asset_depreciation_entries (id, workspace_id, asset_id, config_id, year, transaction_id, amount, commodity, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO asset_depreciation_entries (id, workspace_id, asset_id, config_id, year, transaction_id, amount, commodity, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (workspace_id, transaction_id) DO NOTHING",
       )
       .run(
         entry.id,
@@ -255,7 +256,14 @@ export class SqliteAssetRepository {
         entry.amount.commodity,
         entry.createdAt,
       );
-    return entry;
+    const stored = await this.getDepreciationEntryByTransaction(
+      entry.workspaceId,
+      entry.transactionId,
+    );
+    if (stored === undefined) {
+      throw new Error("depreciation entry was not persisted");
+    }
+    return stored;
   }
 
   async getDepreciationEntryByTransaction(
@@ -361,15 +369,23 @@ function eventFromRow(source: Record<string, unknown>): AssetEvent {
   const commodity = optionalString(source, "commodity");
   const money = amount === undefined || commodity === undefined ? undefined : { amount, commodity };
   const kind = requiredString(source, "kind");
-  if (kind === "improvement") {
-    return assetEventSchema.parse({
-      ...base,
-      kind,
-      componentId: requiredString(source, "component_id"),
-      amount: money,
-    });
+  switch (kind) {
+    case "improvement":
+      return assetEventSchema.parse({
+        ...base,
+        kind,
+        componentId: requiredString(source, "component_id"),
+        amount: money,
+      });
+    case "retraction":
+      return assetEventSchema.parse({
+        ...base,
+        kind,
+        retractsEventId: requiredString(source, "retracts_event_id"),
+      });
+    default:
+      return assetEventSchema.parse({ ...base, kind, proceeds: money });
   }
-  return assetEventSchema.parse({ ...base, kind, proceeds: money });
 }
 
 function configFromRow(source: Record<string, unknown>): DepreciationScheduleConfig {

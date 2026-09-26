@@ -109,7 +109,7 @@ export interface DepreciationSectionOptions {
 export interface DepreciationSectionResult {
   rows: DepreciationExportRow[];
   excluded: ExcludedDepreciationYear[];
-  /** Rows with no evidence document, in the shape of the missing-evidence report. */
+  /** Rows with an unsubstantiated contributor, in the shape of the missing-evidence report. */
   missingEvidence: MissingEvidenceRow[];
 }
 
@@ -185,11 +185,12 @@ export function generateDepreciationSection(
     }
 
     const method = describeDepreciationMethod(schedule.method);
-    const missingEvidence = row.evidenceDocumentIds.length === 0;
+    // Every cost feeding the row must be substantiated, not just some of them.
+    const missingEvidence = row.missingEvidenceFor.length > 0;
     const notes = [
       `suggested amount from configured rule v${schedule.configVersion} (${method})`,
       ...(gap !== undefined ? [gap, "review required"] : []),
-      ...(missingEvidence ? ["missing evidence"] : []),
+      ...(missingEvidence ? [`missing evidence for ${row.missingEvidenceFor.join(", ")}`] : []),
       ...row.notes.map((n) => ROW_NOTE_LABELS[n]),
     ].join("; ");
 
