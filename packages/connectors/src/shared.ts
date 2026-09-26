@@ -1,6 +1,7 @@
 /**
  * Connector-neutral contracts shared by every source adapter.
  */
+import type { JsonValue, RawSourceRecord } from "@sona/core";
 
 /** Terminal status of a sync/import run. */
 export type SyncStatus = "succeeded" | "completed_with_errors" | "failed";
@@ -16,4 +17,23 @@ export interface SyncEnv {
   ids: () => string;
   /** Current time as an ISO-8601 string. */
   nowIso: () => string;
+}
+
+export interface RawRecordStore {
+  /**
+   * Appends a raw record. MUST be idempotent on the record's dedup key
+   * (workspace + source + payload hash): re-importing an unchanged provider
+   * payload must be a no-op, not an error, so repeated syncs don't fail on the
+   * `uq_raw_records_dedup` constraint.
+   */
+  append(record: RawSourceRecord): Promise<void>;
+}
+
+/**
+ * Deep-clones a provider payload into a `JsonValue`, dropping `undefined`
+ * fields the way JSON serialization does. Used for raw-vault payloads and the
+ * `raw` copy kept on normalized records.
+ */
+export function toJsonValue(value: unknown): JsonValue {
+  return JSON.parse(JSON.stringify(value)) as JsonValue;
 }

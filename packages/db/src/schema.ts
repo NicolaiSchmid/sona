@@ -509,3 +509,21 @@ export const PORTFOLIO_TABLES = [
 ] as const;
 
 export type PortfolioTableName = (typeof PORTFOLIO_TABLES)[number];
+
+// --- Email ingestion schema (migrations/0005_email_sources.sql) --------------
+
+export interface EmailSyncCursorRow {
+  run_id: string;
+  workspace_id: string;
+  source_id: string;
+  folder: string;
+  uid_validity: string;
+  last_uid: number;
+  policy_hash: string;
+  recorded_at: string;
+}
+
+/** Names of every table created by the email ingestion migration. */
+export const EMAIL_TABLES = ["email_sync_cursors"] as const;
+
+export type EmailTableName = (typeof EMAIL_TABLES)[number];

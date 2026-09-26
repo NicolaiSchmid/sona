@@ -22,7 +22,7 @@ Index and sequencing for all Sona implementation plans, from foundation to a com
 | 10 | `2026-07-03-10-document-storage-secret-store.md` | done |
 | 11 | `2026-07-03-11-worker-jobs-ingestion.md` | done |
 | 12 | `2026-07-03-12-receipt-extraction-pipeline.md` | done |
-| 13 | `2026-07-03-13-email-invoice-ingestion.md` | planned |
+| 13 | `2026-07-03-13-email-invoice-ingestion.md` | done |
 | 14 | `2026-07-03-14-browser-portal-runner.md` | done |
 | 15 | `2026-07-03-15-mcp-facade-wiring.md` | planned |
 | 16 | `2026-07-03-16-assets-depreciation.md` | done |

@@ -31,6 +31,8 @@ raw_source_records
 
 `raw_source_records` stores provider payloads or browser/email extraction results.
 
+`email_sync_cursors` records, per sync run, the IMAP folder, `UIDVALIDITY`, highest fully ingested UID, and a fingerprint of the ingestion policy for email sources, so the next run resumes without touching mailbox state and any change to the sender allowlist or MIME/size policy triggers a rescan (dedup absorbs the repeats). For email, the raw record is redacted message metadata (sender, subject, date, Message-ID, folder, UID, attachment hashes); the stored attachment is the evidence.
+
 Important fields:
 
 - `sourceId`

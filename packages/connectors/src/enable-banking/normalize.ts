@@ -4,6 +4,7 @@
  * `raw`, and uses a stable external id so repeated syncs are idempotent.
  */
 import { type JsonValue, stableJsonHash } from "@sona/core";
+import { toJsonValue } from "../shared.js";
 import type {
   EbAccountDetails,
   EbBalance,
@@ -14,11 +15,6 @@ import type {
   NormalizedTransaction,
 } from "./types.js";
 
-/** Deep-clones a JSON payload, stripping `undefined`, into a `JsonValue`. */
-function asJson(value: unknown): JsonValue {
-  return JSON.parse(JSON.stringify(value)) as JsonValue;
-}
-
 /** Extracts the account uids referenced by a session. */
 export function accountUidsFromSession(session: EbSession): string[] {
   return session.accounts.map((account) => (typeof account === "string" ? account : account.uid));
@@ -26,7 +22,7 @@ export function accountUidsFromSession(session: EbSession): string[] {
 
 /** Stable identity fields for the account hash fallback — never the session uid. */
 function accountIdentity(details: EbAccountDetails): JsonValue {
-  return asJson({
+  return toJsonValue({
     name: details.name,
     product: details.product,
     currency: details.currency,
@@ -35,7 +31,7 @@ function accountIdentity(details: EbAccountDetails): JsonValue {
 }
 
 export function normalizeAccount(details: EbAccountDetails): NormalizedAccount {
-  const raw = asJson(details);
+  const raw = toJsonValue(details);
   // Enable Banking's `uid` is only valid for the current authorized session, so
   // prefer the stable identification hash; fall back to IBAN, then a hash of the
   // stable identity fields. The session `uid` is never part of the durable id.
@@ -61,7 +57,7 @@ export function normalizeBalance(accountExternalId: string, balance: EbBalance):
     amount: balance.balance_amount.amount,
     currency: balance.balance_amount.currency,
     referenceDate: balance.reference_date,
-    raw: asJson(balance),
+    raw: toJsonValue(balance),
   };
 }
 
@@ -85,7 +81,7 @@ function counterpartyName(transaction: EbTransaction): string | undefined {
  * retrievals and would otherwise make the same booked movement look new.
  */
 function transactionIdentity(transaction: EbTransaction): JsonValue {
-  return asJson({
+  return toJsonValue({
     transaction_amount: transaction.transaction_amount,
     credit_debit_indicator: transaction.credit_debit_indicator,
     booking_date: transaction.booking_date,
@@ -112,7 +108,7 @@ export function normalizeTransaction(
   transaction: EbTransaction,
   options: NormalizeTransactionOptions = {},
 ): NormalizedTransaction {
-  const raw = asJson(transaction);
+  const raw = toJsonValue(transaction);
   const suffix = options.index !== undefined ? `_${options.index}` : "";
   const externalId =
     transaction.entry_reference ??

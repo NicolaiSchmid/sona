@@ -82,6 +82,19 @@ Human review is required for:
 7. Ambiguous matches appear in a review UI/MCP queue.
 8. User decisions create reusable matching/classification rules.
 
+## Email ingestion
+
+Email is the preferred invoice channel before browser automation. The email source polls one IMAP folder read-only (`EXAMINE`; mail is never flagged, moved, or deleted) and:
+
+- fetches envelopes and body structures only — message bodies are never read,
+- applies a per-source sender allowlist (addresses or domains); non-allowlisted mail is counted, never stored,
+- downloads only attachments of the configured types (by default PDF and common image types) that pass size rules (embedded signature images and tiny images are skipped) and whose bytes carry the declared type's signature,
+- stores attachments through the document storage boundary with content-hash dedup, so a forwarded copy of the same invoice is not stored twice,
+- writes redacted message metadata (sender, subject, date, Message-ID, folder, UID, attachment hashes) as the raw source record, deduplicated by Message-ID (falling back to folder + `UIDVALIDITY` + UID when the header is absent),
+- keeps the UID cursor on Sona's side per sync run; a run only advances past messages it fully ingested.
+
+Mailbox credentials live in the secret store and never in config or logs.
+
 ## Auto-apply policy
 
 Auto-apply should be configurable and conservative.

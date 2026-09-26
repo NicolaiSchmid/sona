@@ -30,6 +30,13 @@ export {
   type StoredDocumentExtraction,
 } from "./repositories/documents.js";
 export {
+  createWorkspaceEmailSyncRunStore,
+  type EmailSyncRunError,
+  type PersistedEmailSyncRun,
+  type PersistedEmailSyncRunStatus,
+  SqliteEmailSyncRunRepository,
+} from "./repositories/email-sync-runs.js";
+export {
   type LinkEvidenceResult,
   SqliteEvidenceLinkRepository,
 } from "./repositories/evidence-links.js";
@@ -77,6 +84,12 @@ export {
 } from "./repositories/sync-runs.js";
 export type {
   BankRecordStore,
+  EmailCursorResetReason,
+  EmailSyncCursor,
+  EmailSyncError,
+  EmailSyncRunStore,
+  EmailSyncStatus,
+  EmailSyncSummary,
   NormalizedAccount,
   NormalizedBalance,
   NormalizedTransaction,

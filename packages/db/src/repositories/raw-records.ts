@@ -55,6 +55,22 @@ export class SqliteRawRecordRepository {
     return result === undefined ? undefined : rawFromRow(result);
   }
 
+  /** Looks up a record by provider identity, e.g. an email Message-ID, for dedup before fetching. */
+  async findByExternalId(
+    workspaceId: string,
+    sourceId: string,
+    externalId: string,
+  ): Promise<RawSourceRecord | undefined> {
+    const result = row(
+      this.#db
+        .prepare(
+          "SELECT id, workspace_id, source_id, external_id, record_type, payload_json, observed_at, supersedes_record_id, created_at FROM raw_source_records WHERE workspace_id = ? AND source_id = ? AND external_id = ? ORDER BY created_at DESC, id DESC LIMIT 1",
+        )
+        .get(workspaceId, sourceId, externalId),
+    );
+    return result === undefined ? undefined : rawFromRow(result);
+  }
+
   async listForSource(workspaceId: string, sourceId: string): Promise<RawSourceRecord[]> {
     return rows(
       this.#db

@@ -118,3 +118,63 @@ export interface TaskRunProvenance {
   workspaceId: string;
   fetchedAt: string;
 }
+
+// --- Email (IMAP) ingestion ---------------------------------------------------
+// Structural twins of the `@sona/connectors` email sync store contracts.
+
+export interface EmailSyncCursor {
+  folder: string;
+  uidValidity: string;
+  lastUid: number;
+  policyHash: string;
+}
+
+export type EmailSyncStatus = "succeeded" | "completed_with_errors" | "failed";
+
+export type EmailCursorResetReason = "uid_validity_changed" | "policy_changed";
+
+export interface EmailSyncError {
+  uid: number | undefined;
+  message: string;
+}
+
+export interface EmailSyncSummary {
+  runId: string;
+  messagesSeen: number;
+  messagesIngested: number;
+  messagesSkippedNotAllowlisted: number;
+  messagesSkippedDuplicate: number;
+  messagesWithoutDocuments: number;
+  attachmentsStored: number;
+  attachmentsDeduplicated: number;
+  attachmentsSkipped: number;
+  cursorReset: EmailCursorResetReason | undefined;
+  cursor: EmailSyncCursor | undefined;
+  errors: EmailSyncError[];
+}
+
+export interface EmailSyncRunStore {
+  start(run: {
+    runId: string;
+    workspaceId: string;
+    sourceId: string;
+    startedAt: string;
+  }): Promise<void>;
+  recordError(error: {
+    runId: string;
+    uid: number | undefined;
+    message: string;
+    at: string;
+  }): Promise<void>;
+  finish(run: {
+    runId: string;
+    status: EmailSyncStatus;
+    finishedAt: string;
+    summary: EmailSyncSummary;
+  }): Promise<void>;
+  latestCursor(input: {
+    workspaceId: string;
+    sourceId: string;
+    folder: string;
+  }): Promise<EmailSyncCursor | undefined>;
+}
