@@ -9,7 +9,6 @@ import {
   type LoginFailureReason,
 } from "./audit.js";
 import {
-  assertCan,
   auditActor,
   can,
   createApiTokenAccess,
@@ -25,7 +24,7 @@ import {
   TOKEN_PREFIXES,
   type TokenKind,
 } from "./crypto.js";
-import { AuthError } from "./errors.js";
+import { AuthError, type AuthErrorCode } from "./errors.js";
 import {
   checkPasswordPolicy,
   DEFAULT_PASSWORD_POLICY,
@@ -41,6 +40,7 @@ import {
   generateRecoveryCodes,
   generateTotpSecret,
   normalizeRecoveryCode,
+  TOTP_STEP_UNUSED,
   totpProvisioningUri,
   verifyTotp,
 } from "./totp.js";
@@ -52,6 +52,7 @@ import {
   type AuthUser,
   isApiTokenScope,
   isWorkspaceRole,
+  type TotpEnrollment,
   type Workspace,
   type WorkspaceAction,
   type WorkspaceInvite,
@@ -81,7 +82,10 @@ export const DEFAULT_SESSION_POLICY = {
 export const DEFAULT_INVITE_TTL_MS = 7 * DAY_MS;
 export const DEFAULT_API_TOKEN_TTL_MS = 90 * DAY_MS;
 export const MAX_API_TOKEN_TTL_MS = 365 * DAY_MS;
+/** Write-coalescing for `last_used_at`, like `renewIntervalMs` for sessions. */
 const API_TOKEN_TOUCH_INTERVAL_MS = MINUTE_MS;
+const MAX_CLIENT_LABEL_LENGTH = 200;
+const MAX_API_TOKEN_NAME_LENGTH = 100;
 
 export const ID_KINDS = [
   "user",
@@ -122,9 +126,12 @@ export interface AuthServiceOptions {
   totpIssuer?: string;
   throttle?: AttemptThrottle;
   /**
-   * Workspace that additionally receives user-level security events, including
-   * login failures for unknown emails which have no workspace of their own.
-   * Hosted deployments point this at a platform-operations workspace.
+   * Workspace that receives user-level security events (logins, logouts,
+   * session and 2FA changes) for every user, including login failures for
+   * unknown emails which have no workspace of their own. Without it those
+   * events are only visible in workspaces the user owns. Hosted deployments
+   * point this at a platform-operations workspace; self-hosted deployments
+   * can use the bootstrap workspace. Must exist in the store.
    */
   systemAuditWorkspaceId?: string;
 }
@@ -143,11 +150,20 @@ export const LOGIN_METHODS = ["password", "password_totp", "password_recovery_co
 
 export type LoginMethod = (typeof LOGIN_METHODS)[number];
 
+export const SECOND_FACTOR_KINDS = ["totp", "recovery_code"] as const;
+
+export type SecondFactorKind = (typeof SECOND_FACTOR_KINDS)[number];
+
+export interface SecondFactor {
+  kind: SecondFactorKind;
+  code: string;
+}
+
 export interface LoginInput {
   email: string;
   password: string;
-  totpCode?: string;
-  recoveryCode?: string;
+  /** Required once the account has confirmed TOTP enrollment. */
+  secondFactor?: SecondFactor;
   /** Redacted device/browser label shown in the session list. */
   clientLabel?: string;
   /** Throttle key, e.g. the client address; the normalized email is always throttled too. */
@@ -178,12 +194,18 @@ export interface CreateInviteResult {
 export interface AcceptInviteInput {
   token: string;
   password: string;
-  throttleKey?: string;
+  /** Throttle key for the anonymous caller, e.g. the client address. */
+  throttleKey: string;
 }
 
 export interface AcceptInviteResult {
   user: AuthUser;
   membership: WorkspaceMembership;
+}
+
+export interface AcceptInviteAsUserInput {
+  token: string;
+  session: AuthenticatedSession;
 }
 
 export interface BootstrapOwnerInput {
@@ -199,6 +221,33 @@ export interface BootstrapOwnerResult {
   membership: WorkspaceMembership;
 }
 
+export interface WorkspaceListing {
+  workspace: Workspace;
+  membership: WorkspaceMembership;
+}
+
+export interface RevokeSessionInput {
+  session: AuthenticatedSession;
+  sessionId: string;
+}
+
+export interface ResolveWorkspaceAccessInput {
+  session: AuthenticatedSession;
+  workspaceId: string;
+  requestId?: string;
+}
+
+export interface ConfirmTotpEnrollmentInput {
+  session: AuthenticatedSession;
+  code: string;
+}
+
+export interface DisableTotpInput {
+  session: AuthenticatedSession;
+  /** Current password; re-verified so a hijacked session cannot weaken the account. */
+  password: string;
+}
+
 export interface CreateApiTokenInput {
   access: WorkspaceAccess;
   name: string;
@@ -207,9 +256,19 @@ export interface CreateApiTokenInput {
 }
 
 export interface CreateApiTokenResult {
-  token: ApiTokenView;
+  apiToken: ApiTokenView;
   /** Plaintext API token — show once. */
-  secret: string;
+  token: string;
+}
+
+export interface RevokeApiTokenInput {
+  access: WorkspaceAccess;
+  tokenId: string;
+}
+
+export interface RevokeInviteInput {
+  access: WorkspaceAccess;
+  inviteId: string;
 }
 
 export interface TotpEnrollmentStart {
@@ -228,12 +287,26 @@ const emailSchema = z.string().trim().toLowerCase().email().max(254);
 export function normalizeEmail(email: string): string {
   const parsed = emailSchema.safeParse(email);
   if (!parsed.success) {
-    throw new AuthError("invalid_credentials", ["invalid_email"]);
+    throw new AuthError("invalid_input", ["email"]);
   }
   return parsed.data;
 }
 
+/**
+ * Hashed once per service (fresh salt) and verified against for unknown
+ * emails. Its value is irrelevant — only the KDF timing matters.
+ */
 const DUMMY_PASSWORD = "sona-timing-equalizer-password";
+
+/** Public error per failure reason; credential and second-factor failures stay indistinguishable within their class. */
+const LOGIN_FAILURE_ERROR_CODE = {
+  unknown_email: "invalid_credentials",
+  invalid_password: "invalid_credentials",
+  totp_required: "totp_required",
+  invalid_totp: "invalid_totp",
+  invalid_recovery_code: "invalid_totp",
+  rate_limited: "rate_limited",
+} as const satisfies Record<LoginFailureReason, AuthErrorCode>;
 
 /**
  * Invite-only authentication, sessions, TOTP, workspace access, and scoped
@@ -254,6 +327,7 @@ export class AuthService {
   readonly #totpIssuer: string;
   readonly #throttle: AttemptThrottle;
   readonly #systemAuditWorkspaceId: string | undefined;
+  #systemWorkspaceChecked: Promise<void> | undefined;
   #dummyHash: Promise<string> | undefined;
 
   constructor(options: AuthServiceOptions) {
@@ -287,13 +361,14 @@ export class AuthService {
     }
     const email = normalizeEmail(input.email);
     this.#assertPasswordPolicy(input.password, email);
-    if (input.workspaceName.trim() === "") {
-      throw new Error("workspaceName is required");
+    const workspaceName = input.workspaceName.trim();
+    if (workspaceName === "") {
+      throw new AuthError("invalid_input", ["workspace_name"]);
     }
     const now = this.#timestamp();
     const workspace: Workspace = {
       id: input.workspaceId ?? this.#id("workspace"),
-      name: input.workspaceName.trim(),
+      name: workspaceName,
       createdAt: now,
     };
     const user: AuthUser = { id: this.#id("user"), email, createdAt: now };
@@ -320,13 +395,13 @@ export class AuthService {
   // --- Invites ----------------------------------------------------------------
 
   async createInvite(input: CreateInviteInput): Promise<CreateInviteResult> {
-    assertCan(input.access, "admin");
+    await this.authorize(input.access, "admin");
     if (!isWorkspaceRole(input.role)) {
-      throw new Error("Unknown workspace role");
+      throw new AuthError("invalid_input", ["role"]);
     }
     const email = normalizeEmail(input.email);
     const ttlMs = input.ttlMs ?? this.#inviteTtlMs;
-    assertPositive(ttlMs, "invite ttlMs");
+    assertTtl(ttlMs, Number.POSITIVE_INFINITY);
     const now = this.#now();
     const token = generateToken("invite");
     const invite: WorkspaceInvite = {
@@ -355,13 +430,13 @@ export class AuthService {
   }
 
   async listInvites(access: WorkspaceAccess): Promise<InviteView[]> {
-    assertCan(access, "admin");
+    await this.authorize(access, "admin");
     const invites = await this.#store.listInvites(access.context.workspaceId);
     return invites.map(stripHash);
   }
 
-  async revokeInvite(input: { access: WorkspaceAccess; inviteId: string }): Promise<void> {
-    assertCan(input.access, "admin");
+  async revokeInvite(input: RevokeInviteInput): Promise<void> {
+    await this.authorize(input.access, "admin");
     const workspaceId = input.access.context.workspaceId;
     const revoked = await this.#store.revokeInvite(workspaceId, input.inviteId, this.#timestamp());
     if (!revoked) {
@@ -379,11 +454,10 @@ export class AuthService {
   /** Signup: a new account for the invited email, joining the inviting workspace. */
   async acceptInvite(input: AcceptInviteInput): Promise<AcceptInviteResult> {
     const now = this.#now();
-    const throttleKey = input.throttleKey ?? "invite";
-    if (!this.#throttle.allows(throttleKey, now)) {
+    if (!this.#throttle.allows(input.throttleKey, now)) {
       throw new AuthError("rate_limited");
     }
-    const invite = await this.#openInvite(input.token, now, throttleKey);
+    const invite = await this.#openInvite(input.token, now, input.throttleKey);
     this.#assertPasswordPolicy(input.password, invite.email);
     if ((await this.#store.getUserByEmail(invite.email)) !== undefined) {
       throw new AuthError("email_taken");
@@ -398,15 +472,16 @@ export class AuthService {
     }
     await this.#store.createUser(user, { userId: user.id, passwordHash, updatedAt: timestamp });
     const membership = await this.#joinFromInvite(invite, user, timestamp);
-    this.#throttle.reset(throttleKey);
+    this.#throttle.reset(input.throttleKey);
     return { user, membership };
   }
 
-  /** An existing, signed-in user accepting an invite issued to their email. */
-  async acceptInviteAsUser(input: {
-    token: string;
-    session: AuthenticatedSession;
-  }): Promise<WorkspaceMembership> {
+  /**
+   * An existing, signed-in user accepting an invite issued to their email.
+   * Not throttled: the caller is already authenticated, so guessing is
+   * bounded by the session rather than anonymous.
+   */
+  async acceptInviteAsUser(input: AcceptInviteAsUserInput): Promise<WorkspaceMembership> {
     const now = this.#now();
     const invite = await this.#openInvite(input.token, now, undefined);
     if (!constantTimeEqual(invite.email, input.session.user.email)) {
@@ -484,10 +559,13 @@ export class AuthService {
       await this.#recordLoginFailure(undefined, "unknown_email");
       throw new AuthError("invalid_credentials");
     }
+    if (input.clientLabel !== undefined && input.clientLabel.length > MAX_CLIENT_LABEL_LENGTH) {
+      throw new AuthError("invalid_input", ["client_label"]);
+    }
     const throttleKeys = [`email:${email}`, ...(input.throttleKey ? [input.throttleKey] : [])];
     if (!throttleKeys.every((key) => this.#throttle.allows(key, now))) {
-      const user = await this.#store.getUserByEmail(email);
-      await this.#recordLoginFailure(user, "rate_limited");
+      // Locked out: no KDF, no lookup, and no audit row — the lockout itself
+      // was recorded when it began, so repeated attempts cannot flood the log.
       throw new AuthError("rate_limited");
     }
     const fail = async (user: AuthUser | undefined, reason: LoginFailureReason): Promise<never> => {
@@ -495,17 +573,15 @@ export class AuthService {
         this.#throttle.recordFailure(key, now);
       }
       await this.#recordLoginFailure(user, reason);
-      throw new AuthError(
-        reason === "unknown_email" || reason === "invalid_password"
-          ? "invalid_credentials"
-          : "invalid_totp",
-      );
+      if (!throttleKeys.every((key) => this.#throttle.allows(key, now))) {
+        await this.#recordLoginFailure(user, "rate_limited");
+      }
+      throw new AuthError(LOGIN_FAILURE_ERROR_CODE[reason]);
     };
 
     const user = await this.#store.getUserByEmail(email);
     const credential = user === undefined ? undefined : await this.#store.getCredential(user.id);
-    // Always run the KDF so unknown emails take as long as wrong passwords.
-    const passwordOk = await verifyPassword(
+    const passwordOk = await this.#verifyPasswordBounded(
       input.password,
       credential?.passwordHash ?? (await this.#dummyPasswordHash()),
     );
@@ -519,33 +595,16 @@ export class AuthService {
     let method: LoginMethod = "password";
     const enrollment = await this.#store.getTotpEnrollment(user.id);
     if (enrollment?.confirmedAt !== undefined) {
-      if (input.recoveryCode !== undefined) {
-        const codeHash = hashToken(normalizeRecoveryCode(input.recoveryCode));
-        if (!(await this.#store.consumeRecoveryCode(user.id, codeHash, now.toISOString()))) {
-          return fail(user, "invalid_recovery_code");
-        }
-        await this.#recordForUser(user.id, {
-          action: "auth.recovery_code.used",
-          actor: user.id,
-          targetType: "user",
-          targetId: user.id,
-          metadata: { remaining: await this.#store.countUnusedRecoveryCodes(user.id) },
-        });
-        method = "password_recovery_code";
-      } else if (input.totpCode !== undefined) {
-        const secret = this.#cipher.decrypt(enrollment.secretCiphertext);
-        const result = verifyTotp(secret, input.totpCode, now, {
-          window: this.#totpWindow,
-          afterStep: enrollment.lastUsedStep,
-        });
-        if (!result.ok || !(await this.#store.advanceTotpStep(user.id, result.step))) {
-          return fail(user, "invalid_totp");
-        }
-        method = "password_totp";
-      } else {
-        // Correct password, second factor pending: not a throttled failure.
+      if (input.secondFactor === undefined) {
+        // Correct password, second factor pending: recorded but not throttled.
         await this.#recordLoginFailure(user, "totp_required");
         throw new AuthError("totp_required");
+      }
+      const verified = await this.#verifySecondFactor(user, enrollment, input.secondFactor, now);
+      if (verified.ok) {
+        method = verified.method;
+      } else {
+        return fail(user, verified.reason);
       }
     }
 
@@ -560,7 +619,7 @@ export class AuthService {
       this.#throttle.reset(key);
     }
     const { session, token } = await this.#createSession(user.id, now, input.clientLabel);
-    await this.#recordForUser(user.id, {
+    await this.#recordAcrossUserWorkspaces(user.id, {
       action: "auth.login.succeeded",
       actor: user.id,
       targetType: "auth_session",
@@ -568,6 +627,46 @@ export class AuthService {
       metadata: { method },
     });
     return { user, session, token, method };
+  }
+
+  async #verifySecondFactor(
+    user: AuthUser,
+    enrollment: TotpEnrollment,
+    factor: SecondFactor,
+    now: Date,
+  ): Promise<{ ok: true; method: LoginMethod } | { ok: false; reason: LoginFailureReason }> {
+    switch (factor.kind) {
+      case "recovery_code": {
+        const codeHash = hashToken(normalizeRecoveryCode(factor.code));
+        if (!(await this.#store.consumeRecoveryCode(user.id, codeHash, now.toISOString()))) {
+          return { ok: false, reason: "invalid_recovery_code" };
+        }
+        await this.#recordAcrossUserWorkspaces(user.id, {
+          action: "auth.recovery_code.used",
+          actor: user.id,
+          targetType: "user",
+          targetId: user.id,
+          metadata: { remaining: await this.#store.countUnusedRecoveryCodes(user.id) },
+        });
+        return { ok: true, method: "password_recovery_code" };
+      }
+      case "totp": {
+        const result = verifyTotp(
+          this.#cipher.decrypt(enrollment.secretCiphertext),
+          factor.code,
+          now,
+          {
+            window: this.#totpWindow,
+            afterStep: enrollment.lastUsedStep,
+          },
+        );
+        // Advance the replay floor before issuing anything; a lost race means a retry, not a replay.
+        if (!result.ok || !(await this.#store.advanceTotpStep(user.id, result.step))) {
+          return { ok: false, reason: "invalid_totp" };
+        }
+        return { ok: true, method: "password_totp" };
+      }
+    }
   }
 
   async #createSession(
@@ -623,7 +722,7 @@ export class AuthService {
       return;
     }
     if (await this.#store.revokeSession(session.userId, session.id, this.#timestamp())) {
-      await this.#recordForUser(session.userId, {
+      await this.#recordAcrossUserWorkspaces(session.userId, {
         action: "auth.logout",
         actor: session.userId,
         targetType: "auth_session",
@@ -639,12 +738,12 @@ export class AuthService {
     return sessions.filter((entry) => isSessionActive(entry, now)).map(stripHash);
   }
 
-  async revokeSession(input: { session: AuthenticatedSession; sessionId: string }): Promise<void> {
+  async revokeSession(input: RevokeSessionInput): Promise<void> {
     const userId = input.session.user.id;
     if (!(await this.#store.revokeSession(userId, input.sessionId, this.#timestamp()))) {
       throw new AuthError("not_found");
     }
-    await this.#recordForUser(userId, {
+    await this.#recordAcrossUserWorkspaces(userId, {
       action: "auth.session.revoked",
       actor: userId,
       targetType: "auth_session",
@@ -655,7 +754,7 @@ export class AuthService {
   async revokeAllSessions(session: AuthenticatedSession): Promise<number> {
     const userId = session.user.id;
     const count = await this.#store.revokeAllSessions(userId, this.#timestamp());
-    await this.#recordForUser(userId, {
+    await this.#recordAcrossUserWorkspaces(userId, {
       action: "auth.sessions.revoked_all",
       actor: userId,
       targetType: "user",
@@ -668,11 +767,7 @@ export class AuthService {
   // --- Workspace access -------------------------------------------------------
 
   /** Binds a session to one workspace; non-members are denied without revealing whether it exists. */
-  async resolveWorkspaceAccess(input: {
-    session: AuthenticatedSession;
-    workspaceId: string;
-    requestId?: string;
-  }): Promise<WorkspaceAccess> {
+  async resolveWorkspaceAccess(input: ResolveWorkspaceAccessInput): Promise<WorkspaceAccess> {
     const membership = await this.#store.getMembership(input.workspaceId, input.session.user.id);
     if (membership === undefined) {
       throw new AuthError("workspace_access_denied");
@@ -684,11 +779,20 @@ export class AuthService {
     });
   }
 
-  async listWorkspaces(session: AuthenticatedSession): Promise<WorkspaceMembership[]> {
-    return this.#store.listMemberships(session.user.id);
+  /** Workspaces the user belongs to, with names, for a workspace switcher. */
+  async listWorkspaces(session: AuthenticatedSession): Promise<WorkspaceListing[]> {
+    const memberships = await this.#store.listMemberships(session.user.id);
+    const listings: WorkspaceListing[] = [];
+    for (const membership of memberships) {
+      const workspace = await this.#store.getWorkspace(membership.workspaceId);
+      if (workspace !== undefined) {
+        listings.push({ workspace, membership });
+      }
+    }
+    return listings;
   }
 
-  /** Permission check that audits denials, for review-gate and admin paths. */
+  /** Permission check that audits denials; the single enforcement path for web and MCP. */
   async authorize(access: WorkspaceAccess, action: WorkspaceAction): Promise<void> {
     if (can(access, action)) {
       return;
@@ -714,7 +818,7 @@ export class AuthService {
     await this.#store.saveTotpEnrollment({
       userId,
       secretCiphertext: this.#cipher.encrypt(secret),
-      lastUsedStep: -1,
+      lastUsedStep: TOTP_STEP_UNUSED,
       createdAt: this.#timestamp(),
       confirmedAt: undefined,
     });
@@ -728,11 +832,8 @@ export class AuthService {
     };
   }
 
-  async confirmTotpEnrollment(
-    session: AuthenticatedSession,
-    code: string,
-  ): Promise<TotpEnrollmentConfirmed> {
-    const userId = session.user.id;
+  async confirmTotpEnrollment(input: ConfirmTotpEnrollmentInput): Promise<TotpEnrollmentConfirmed> {
+    const userId = input.session.user.id;
     const now = this.#now();
     const enrollment = await this.#store.getTotpEnrollment(userId);
     if (enrollment === undefined) {
@@ -741,7 +842,7 @@ export class AuthService {
     if (enrollment.confirmedAt !== undefined) {
       throw new AuthError("totp_already_enrolled");
     }
-    const result = verifyTotp(this.#cipher.decrypt(enrollment.secretCiphertext), code, now, {
+    const result = verifyTotp(this.#cipher.decrypt(enrollment.secretCiphertext), input.code, now, {
       window: this.#totpWindow,
       afterStep: enrollment.lastUsedStep,
     });
@@ -761,7 +862,7 @@ export class AuthService {
       })),
     );
     await this.#store.confirmTotpEnrollment(userId, timestamp);
-    await this.#recordForUser(userId, {
+    await this.#recordAcrossUserWorkspaces(userId, {
       action: "auth.totp.enabled",
       actor: userId,
       targetType: "user",
@@ -770,11 +871,27 @@ export class AuthService {
     return { recoveryCodes };
   }
 
-  /** Requires the current password so a hijacked session cannot silently weaken the account. */
-  async disableTotp(session: AuthenticatedSession, password: string): Promise<void> {
-    const userId = session.user.id;
+  /** Password re-check is throttled and audited like a login, so a hijacked session cannot guess freely. */
+  async disableTotp(input: DisableTotpInput): Promise<void> {
+    const userId = input.session.user.id;
+    const now = this.#now();
+    const throttleKey = `totp_disable:${userId}`;
+    if (!this.#throttle.allows(throttleKey, now)) {
+      throw new AuthError("rate_limited");
+    }
     const credential = await this.#store.getCredential(userId);
-    if (credential === undefined || !(await verifyPassword(password, credential.passwordHash))) {
+    if (
+      credential === undefined ||
+      !(await this.#verifyPasswordBounded(input.password, credential.passwordHash))
+    ) {
+      this.#throttle.recordFailure(throttleKey, now);
+      await this.#recordAcrossUserWorkspaces(userId, {
+        action: "auth.totp.disable_denied",
+        actor: userId,
+        targetType: "user",
+        targetId: userId,
+        metadata: { reason: "invalid_password" },
+      });
       throw new AuthError("invalid_credentials");
     }
     if ((await this.#store.getTotpEnrollment(userId)) === undefined) {
@@ -782,7 +899,8 @@ export class AuthService {
     }
     await this.#store.deleteTotpEnrollment(userId);
     await this.#store.replaceRecoveryCodes(userId, []);
-    await this.#recordForUser(userId, {
+    this.#throttle.reset(throttleKey);
+    await this.#recordAcrossUserWorkspaces(userId, {
       action: "auth.totp.disabled",
       actor: userId,
       targetType: "user",
@@ -802,7 +920,6 @@ export class AuthService {
     if (access.principal.kind !== "session") {
       throw new AuthError("forbidden", ["api_token_cannot_mint"]);
     }
-    assertCan(access, "read");
     const scopes = uniqueScopes(input.scopes);
     for (const scope of scopes) {
       if (!SCOPE_GRANTS[scope].every((action) => can(access, action))) {
@@ -810,38 +927,35 @@ export class AuthService {
       }
     }
     const name = input.name.trim();
-    if (name === "" || name.length > 100) {
-      throw new Error("API token name must be 1-100 characters");
+    if (name === "" || name.length > MAX_API_TOKEN_NAME_LENGTH) {
+      throw new AuthError("invalid_input", ["name"]);
     }
     const ttlMs = input.ttlMs ?? DEFAULT_API_TOKEN_TTL_MS;
-    assertPositive(ttlMs, "api token ttlMs");
-    if (ttlMs > MAX_API_TOKEN_TTL_MS) {
-      throw new RangeError("api token ttlMs exceeds the one-year maximum");
-    }
+    assertTtl(ttlMs, MAX_API_TOKEN_TTL_MS);
     const now = this.#now();
-    const secret = generateToken("apiToken");
-    const token: ApiToken = {
+    const token = generateToken("api_token");
+    const apiToken: ApiToken = {
       id: this.#id("api_token"),
       workspaceId: access.context.workspaceId,
       createdByUserId: requireUserId(access),
       name,
-      tokenHash: hashToken(secret),
+      tokenHash: hashToken(token),
       scopes,
       createdAt: now.toISOString(),
       expiresAt: new Date(now.getTime() + ttlMs).toISOString(),
       lastUsedAt: undefined,
       revokedAt: undefined,
     };
-    await this.#store.createApiToken(token);
+    await this.#store.createApiToken(apiToken);
     await this.#record({
-      workspaceId: token.workspaceId,
+      workspaceId: apiToken.workspaceId,
       action: "auth.api_token.created",
       actor: auditActor(access),
       targetType: "api_token",
-      targetId: token.id,
-      metadata: { name: token.name, scopes: [...scopes], expiresAt: token.expiresAt },
+      targetId: apiToken.id,
+      metadata: { scopes: [...scopes], expiresAt: apiToken.expiresAt },
     });
-    return { token: stripHash(token), secret };
+    return { apiToken: stripHash(apiToken), token };
   }
 
   /**
@@ -849,37 +963,46 @@ export class AuthService {
    * member; grants are the token scopes capped by the creator's current role.
    */
   async resolveApiToken(
-    secret: string,
+    token: string,
     options: { requestId?: string } = {},
   ): Promise<WorkspaceAccess> {
     const now = this.#now();
-    const token = await findByToken(secret, "apiToken", (hash) =>
+    const apiToken = await findByToken(token, "api_token", (hash) =>
       this.#store.getApiTokenByHash(hash),
     );
-    if (token === undefined || token.revokedAt !== undefined || isExpired(token.expiresAt, now)) {
+    if (
+      apiToken === undefined ||
+      apiToken.revokedAt !== undefined ||
+      isExpired(apiToken.expiresAt, now)
+    ) {
       throw new AuthError("api_token_invalid");
     }
-    const membership = await this.#store.getMembership(token.workspaceId, token.createdByUserId);
+    const membership = await this.#store.getMembership(
+      apiToken.workspaceId,
+      apiToken.createdByUserId,
+    );
     if (membership === undefined) {
       throw new AuthError("api_token_invalid");
     }
     if (
-      token.lastUsedAt === undefined ||
-      now.getTime() - Date.parse(token.lastUsedAt) >= API_TOKEN_TOUCH_INTERVAL_MS
+      apiToken.lastUsedAt === undefined ||
+      now.getTime() - Date.parse(apiToken.lastUsedAt) >= API_TOKEN_TOUCH_INTERVAL_MS
     ) {
-      await this.#store.touchApiToken(token.id, now.toISOString());
+      await this.#store.touchApiToken(apiToken.id, now.toISOString());
     }
     return createApiTokenAccess({
       membership,
-      tokenId: token.id,
-      scopes: token.scopes,
+      tokenId: apiToken.id,
+      scopes: apiToken.scopes,
       requestId: options.requestId,
     });
   }
 
-  /** Admins see every token of the workspace; other members see their own. */
+  /** Admins see every token of the workspace; other members see their own. Agents see none. */
   async listApiTokens(access: WorkspaceAccess): Promise<ApiTokenView[]> {
-    assertCan(access, "read");
+    if (access.principal.kind !== "session") {
+      throw new AuthError("forbidden", ["api_token_cannot_list"]);
+    }
     const tokens = await this.#store.listApiTokens(access.context.workspaceId);
     const seesAll = can(access, "admin");
     const userId = access.context.userId;
@@ -887,7 +1010,7 @@ export class AuthService {
   }
 
   /** The creator or an admin may revoke; agent tokens cannot revoke tokens. */
-  async revokeApiToken(input: { access: WorkspaceAccess; tokenId: string }): Promise<void> {
+  async revokeApiToken(input: RevokeApiTokenInput): Promise<void> {
     const { access } = input;
     if (access.principal.kind !== "session") {
       throw new AuthError("forbidden", ["api_token_cannot_revoke"]);
@@ -930,6 +1053,14 @@ export class AuthService {
     return this.#dummyHash;
   }
 
+  /** Over-long passwords can never match a policy-checked hash; skip the KDF instead of feeding it. */
+  async #verifyPasswordBounded(password: string, passwordHash: string): Promise<boolean> {
+    if ([...password].length > this.#passwordPolicy.maxLength) {
+      return false;
+    }
+    return verifyPassword(password, passwordHash);
+  }
+
   #assertPasswordPolicy(password: string, email: string): void {
     const result = checkPasswordPolicy(password, { email }, this.#passwordPolicy);
     if (!result.ok) {
@@ -941,12 +1072,24 @@ export class AuthService {
     await this.#audit.append(createAuthAuditEvent(input, this.#id("audit"), this.#timestamp()));
   }
 
-  /** User-level events fan out to every workspace the user belongs to, plus the system workspace. */
-  async #recordForUser(userId: string, input: Omit<AuthAuditInput, "workspaceId">): Promise<void> {
+  /**
+   * User-level events are written to the system audit workspace (when
+   * configured) and to every workspace the user *owns*. They are deliberately
+   * not mirrored into workspaces where the user is only a member or advisor:
+   * one client's workspace must not see when a shared advisor logs in for
+   * another client.
+   */
+  async #recordAcrossUserWorkspaces(
+    userId: string,
+    input: Omit<AuthAuditInput, "workspaceId">,
+  ): Promise<void> {
     const memberships = await this.#store.listMemberships(userId);
-    const workspaceIds = new Set(memberships.map((membership) => membership.workspaceId));
-    if (this.#systemAuditWorkspaceId !== undefined) {
-      workspaceIds.add(this.#systemAuditWorkspaceId);
+    const workspaceIds = new Set(
+      memberships.filter((m) => m.role === "owner").map((m) => m.workspaceId),
+    );
+    const systemWorkspaceId = await this.#systemAuditWorkspace();
+    if (systemWorkspaceId !== undefined) {
+      workspaceIds.add(systemWorkspaceId);
     }
     for (const workspaceId of workspaceIds) {
       await this.#record({ ...input, workspaceId });
@@ -955,24 +1098,45 @@ export class AuthService {
 
   async #recordLoginFailure(user: AuthUser | undefined, reason: LoginFailureReason): Promise<void> {
     const metadata: Record<string, JsonValue> = { reason };
-    if (user === undefined) {
-      if (this.#systemAuditWorkspaceId !== undefined) {
-        await this.#record({
-          workspaceId: this.#systemAuditWorkspaceId,
-          action: "auth.login.failed",
-          actor: ANONYMOUS_ACTOR,
-          metadata,
-        });
-      }
+    if (user !== undefined) {
+      await this.#recordAcrossUserWorkspaces(user.id, {
+        action: "auth.login.failed",
+        actor: user.id,
+        targetType: "user",
+        targetId: user.id,
+        metadata,
+      });
       return;
     }
-    await this.#recordForUser(user.id, {
-      action: "auth.login.failed",
-      actor: user.id,
-      targetType: "user",
-      targetId: user.id,
-      metadata,
+    const systemWorkspaceId = await this.#systemAuditWorkspace();
+    if (systemWorkspaceId !== undefined) {
+      await this.#record({
+        workspaceId: systemWorkspaceId,
+        action: "auth.login.failed",
+        actor: ANONYMOUS_ACTOR,
+        metadata,
+      });
+    }
+  }
+
+  /**
+   * Verifies once that the configured system audit workspace exists, so a
+   * misconfiguration surfaces on the first login of any kind instead of only
+   * on unknown-email failures (which would make them distinguishable).
+   */
+  async #systemAuditWorkspace(): Promise<string | undefined> {
+    const workspaceId = this.#systemAuditWorkspaceId;
+    if (workspaceId === undefined) {
+      return undefined;
+    }
+    this.#systemWorkspaceChecked ??= this.#store.getWorkspace(workspaceId).then((workspace) => {
+      if (workspace === undefined) {
+        this.#systemWorkspaceChecked = undefined;
+        throw new Error("systemAuditWorkspaceId does not reference an existing workspace");
+      }
     });
+    await this.#systemWorkspaceChecked;
+    return workspaceId;
   }
 }
 
@@ -994,8 +1158,9 @@ async function findByToken<T extends { tokenHash: string }>(
   return record !== undefined && constantTimeEqual(record.tokenHash, hash) ? record : undefined;
 }
 
+/** Fails closed: an unparseable timestamp counts as expired. */
 function isExpired(isoTimestamp: string, now: Date): boolean {
-  return Date.parse(isoTimestamp) <= now.getTime();
+  return !(Date.parse(isoTimestamp) > now.getTime());
 }
 
 function isSessionActive(session: AuthSession, now: Date): boolean {
@@ -1030,6 +1195,13 @@ function uniqueScopes(scopes: readonly ApiTokenScope[]): readonly ApiTokenScope[
     }
   }
   return unique;
+}
+
+/** Caller-supplied lifetimes are input faults, not configuration errors. */
+function assertTtl(ttlMs: number, maxMs: number): void {
+  if (!Number.isFinite(ttlMs) || ttlMs <= 0 || ttlMs > maxMs) {
+    throw new AuthError("invalid_input", ["ttl"]);
+  }
 }
 
 function assertPositive(value: number, name: string): void {

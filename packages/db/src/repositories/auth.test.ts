@@ -458,10 +458,18 @@ describe("AuthService on SQLite", () => {
       email: "advisor@sona.test",
       role: "advisor_readonly",
     });
-    const accepted = await service.acceptInvite({ token: inviteToken, password: MEMBER_PASSWORD });
+    const accepted = await service.acceptInvite({
+      token: inviteToken,
+      password: MEMBER_PASSWORD,
+      throttleKey: "client:test",
+    });
     expect(accepted.membership).toMatchObject({ workspaceId: "ws_1", role: "advisor_readonly" });
     await expect(
-      service.acceptInvite({ token: inviteToken, password: MEMBER_PASSWORD }),
+      service.acceptInvite({
+        token: inviteToken,
+        password: MEMBER_PASSWORD,
+        throttleKey: "client:test",
+      }),
     ).rejects.toSatisfy((error: unknown) => isAuthError(error, "invite_used"));
 
     const advisorLogin = await service.login({
@@ -477,7 +485,7 @@ describe("AuthService on SQLite", () => {
       (error: unknown) => isAuthError(error, "forbidden"),
     );
 
-    const { secret } = await service.createApiToken({
+    const { token: secret } = await service.createApiToken({
       access: ownerAccess,
       name: "agent",
       scopes: ["execute"],
@@ -491,7 +499,6 @@ describe("AuthService on SQLite", () => {
       "auth.login.succeeded",
       "auth.invite.created",
       "auth.invite.accepted",
-      "auth.login.succeeded",
       "auth.permission.denied",
       "auth.api_token.created",
     ]);

@@ -108,6 +108,14 @@ export class SqliteAuthRepository implements AuthStore {
       .run(workspace.id, workspace.name, workspace.createdAt);
   }
 
+  async getWorkspace(workspaceId: string): Promise<Workspace | undefined> {
+    return this.#one(
+      "SELECT id, name, created_at FROM workspaces WHERE id = ?",
+      [workspaceId],
+      workspaceFromRow,
+    );
+  }
+
   async createMembership(membership: WorkspaceMembership): Promise<void> {
     this.#db
       .prepare(
@@ -435,6 +443,14 @@ function credentialFromRow(source: Row): UserCredential {
     userId: requiredString(source, "user_id"),
     passwordHash: requiredString(source, "password_hash"),
     updatedAt: requiredString(source, "updated_at"),
+  };
+}
+
+function workspaceFromRow(source: Row): Workspace {
+  return {
+    id: requiredString(source, "id"),
+    name: requiredString(source, "name"),
+    createdAt: requiredString(source, "created_at"),
   };
 }
 

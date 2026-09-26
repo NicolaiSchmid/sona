@@ -17,6 +17,7 @@ export const AUTH_ERROR_CODES = [
   "invalid_scope",
   "rate_limited",
   "not_found",
+  "invalid_input",
 ] as const;
 
 export type AuthErrorCode = (typeof AUTH_ERROR_CODES)[number];
@@ -40,13 +41,16 @@ const DEFAULT_MESSAGES: Record<AuthErrorCode, string> = {
   invalid_scope: "Requested scope is not permitted",
   rate_limited: "Too many attempts; try again later",
   not_found: "Not found",
+  invalid_input: "Invalid input",
 };
 
 /**
  * Error surfaced to callers. Messages are fixed per code and never echo the
  * input (passwords, tokens, codes, emails), so they can be serialized into
  * logs and HTTP responses. `details` is for non-secret, machine-readable
- * hints such as password-policy violations.
+ * hints such as password-policy violations or the offending `invalid_input`
+ * field name. Configuration mistakes throw plain `Error`/`RangeError` instead,
+ * so adapters can map `AuthError` to 4xx and everything else to 5xx.
  */
 export class AuthError extends Error {
   readonly code: AuthErrorCode;

@@ -13,7 +13,7 @@ import {
 export const TOKEN_PREFIXES = {
   session: "sona_sess_",
   invite: "sona_inv_",
-  apiToken: "sona_tok_",
+  api_token: "sona_tok_",
 } as const;
 
 export type TokenKind = keyof typeof TOKEN_PREFIXES;

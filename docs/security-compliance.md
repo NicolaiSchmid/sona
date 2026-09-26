@@ -77,10 +77,22 @@ OIDC/passkeys are a follow-up.
   dies when its creator leaves the workspace. Agent tokens cannot mint or
   revoke tokens or invites.
 - Login success/failure, logout, session revocation, invite lifecycle, TOTP
-  changes, token lifecycle, and permission denials are recorded through the
-  append-only audit log with identifiers and literal reason codes only —
-  never emails, passwords, tokens, codes, or secrets. Login and invite
-  acceptance are throttled per email and per client key.
+  changes, token lifecycle, and permission denials (including denied admin
+  operations inside the auth service) are recorded through the append-only
+  audit log with identifiers and literal reason codes only — never emails,
+  passwords, tokens, codes, or secrets. Workspace-scoped events (invites,
+  tokens, denials) land in that workspace's log. User-level events (logins,
+  logouts, session and 2FA changes) land in the configured system audit
+  workspace and in the workspaces the user *owns*, never in workspaces where
+  they are only a member or advisor, so one client cannot observe a shared
+  advisor's activity for another. Login failures for unknown emails are
+  recorded only in the system audit workspace; deployments should configure
+  one (hosted: an operations workspace; self-hosted: the bootstrap
+  workspace).
+- Login is throttled per normalized email and per client key; invite
+  acceptance and TOTP disabling are throttled per client key and per user
+  respectively. A lockout is audited once when it begins, and further
+  attempts during the lockout do no work and write no rows.
 - All secret comparisons are constant-time; unknown emails still run the KDF
   so response time does not reveal account existence.
 

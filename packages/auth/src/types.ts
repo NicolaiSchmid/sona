@@ -26,7 +26,8 @@ export function isWorkspaceRole(value: string): value is WorkspaceRole {
  * - `write_draft`: create drafts/suggestions, upload documents, trigger syncs.
  * - `review_approve`: move records through review states.
  * - `export`: generate tax-ready export packages.
- * - `admin`: manage members, invites, and API tokens.
+ * - `admin`: manage members and invites, and see or revoke every API token
+ *   (any member may mint tokens capped by their own role).
  */
 export const WORKSPACE_ACTIONS = [
   "read",
@@ -160,6 +161,7 @@ export interface UserStore {
 
 export interface WorkspaceMembershipStore {
   createWorkspace(workspace: Workspace): Promise<void>;
+  getWorkspace(workspaceId: string): Promise<Workspace | undefined>;
   createMembership(membership: WorkspaceMembership): Promise<void>;
   getMembership(workspaceId: string, userId: string): Promise<WorkspaceMembership | undefined>;
   listMemberships(userId: string): Promise<WorkspaceMembership[]>;

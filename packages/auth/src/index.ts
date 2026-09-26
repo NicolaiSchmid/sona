@@ -28,7 +28,6 @@ export {
 } from "./audit.js";
 export {
   type ApiTokenPrincipal,
-  assertCan,
   auditActor,
   can,
   createApiTokenAccess,
@@ -83,6 +82,7 @@ export {
   NO_THROTTLE,
 } from "./rate-limit.js";
 export {
+  type AcceptInviteAsUserInput,
   type AcceptInviteInput,
   type AcceptInviteResult,
   type ApiTokenView,
@@ -91,6 +91,7 @@ export {
   type AuthServiceOptions,
   type BootstrapOwnerInput,
   type BootstrapOwnerResult,
+  type ConfirmTotpEnrollmentInput,
   type CreateApiTokenInput,
   type CreateApiTokenResult,
   type CreateInviteInput,
@@ -98,6 +99,7 @@ export {
   DEFAULT_API_TOKEN_TTL_MS,
   DEFAULT_INVITE_TTL_MS,
   DEFAULT_SESSION_POLICY,
+  type DisableTotpInput,
   ID_KINDS,
   type IdKind,
   type InviteView,
@@ -107,25 +109,30 @@ export {
   type LoginResult,
   MAX_API_TOKEN_TTL_MS,
   normalizeEmail,
+  type ResolveWorkspaceAccessInput,
+  type RevokeApiTokenInput,
+  type RevokeInviteInput,
+  type RevokeSessionInput,
+  SECOND_FACTOR_KINDS,
+  type SecondFactor,
+  type SecondFactorKind,
   type SessionPolicy,
   type SessionView,
   type TotpEnrollmentConfirmed,
   type TotpEnrollmentStart,
+  type WorkspaceListing,
 } from "./service.js";
 export { InMemoryAuthStore } from "./testing.js";
 export {
-  base32Decode,
-  base32Encode,
   generateRecoveryCodes,
   generateTotpSecret,
-  hotp,
   normalizeRecoveryCode,
   RECOVERY_CODE_COUNT,
   TOTP_PARAMS,
+  TOTP_STEP_UNUSED,
   type TotpVerification,
   totp,
   totpProvisioningUri,
-  totpStep,
   verifyTotp,
 } from "./totp.js";
 export {

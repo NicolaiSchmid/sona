@@ -12,6 +12,9 @@ export const TOTP_PARAMS = {
   secretBytes: 20,
 } as const;
 
+/** Replay floor of an enrollment that has never accepted a code. */
+export const TOTP_STEP_UNUSED = -1;
+
 /** `step` is the time step whose code matched, to persist as the replay floor. */
 export type TotpVerification = { ok: true; step: number } | { ok: false };
 
@@ -54,7 +57,7 @@ export function verifyTotp(
   options: { window?: number; afterStep?: number } = {},
 ): TotpVerification {
   const window = options.window ?? 1;
-  const afterStep = options.afterStep ?? -1;
+  const afterStep = options.afterStep ?? TOTP_STEP_UNUSED;
   const normalized = code.replace(/\s+/g, "");
   if (!/^\d{6}$/.test(normalized)) {
     return { ok: false };
@@ -135,7 +138,7 @@ export function base32Encode(bytes: Uint8Array): string {
 }
 
 export function base32Decode(encoded: string): Buffer {
-  const cleaned = encoded.toUpperCase().replace(/=+$/, "").replace(/\s+/g, "");
+  const cleaned = encoded.toUpperCase().replace(/\s+/g, "").replace(/=+$/, "");
   let bits = 0;
   let value = 0;
   const output: number[] = [];

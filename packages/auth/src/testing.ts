@@ -65,6 +65,10 @@ export class InMemoryAuthStore implements AuthStore {
     this.workspaces.set(workspace.id, { ...workspace });
   }
 
+  async getWorkspace(workspaceId: string): Promise<Workspace | undefined> {
+    return this.workspaces.get(workspaceId);
+  }
+
   async createMembership(membership: WorkspaceMembership): Promise<void> {
     if ((await this.getMembership(membership.workspaceId, membership.userId)) !== undefined) {
       throw new Error("membership already exists");

@@ -46,7 +46,7 @@ export interface WorkspaceRow {
 export interface WorkspaceMemberRow {
   workspace_id: string;
   user_id: string;
-  role: string;
+  role: WorkspaceRole;
   created_at: string;
 }
 

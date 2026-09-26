@@ -17,6 +17,7 @@ export const AUTH_AUDIT_ACTIONS = [
   "auth.invite.revoked",
   "auth.totp.enabled",
   "auth.totp.disabled",
+  "auth.totp.disable_denied",
   "auth.recovery_code.used",
   "auth.api_token.created",
   "auth.api_token.revoked",

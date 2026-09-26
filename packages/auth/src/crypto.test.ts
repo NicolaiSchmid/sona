@@ -15,12 +15,12 @@ describe("tokens", () => {
     expect(first.startsWith(TOKEN_PREFIXES.session)).toBe(true);
     expect(first.length - TOKEN_PREFIXES.session.length).toBeGreaterThanOrEqual(43);
     expect(first).not.toEqual(second);
-    expect(generateToken("apiToken").startsWith("sona_tok_")).toBe(true);
+    expect(generateToken("api_token").startsWith("sona_tok_")).toBe(true);
     expect(generateToken("invite").startsWith("sona_inv_")).toBe(true);
   });
 
   it("hashes deterministically and does not reveal the token", () => {
-    const token = generateToken("apiToken");
+    const token = generateToken("api_token");
     expect(hashToken(token)).toBe(hashToken(token));
     expect(hashToken(token)).toMatch(/^[0-9a-f]{64}$/);
     expect(hashToken(token)).not.toContain(token.slice(9, 20));

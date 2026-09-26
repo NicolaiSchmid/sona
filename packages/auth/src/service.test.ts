@@ -52,6 +52,16 @@ function harness(overrides: Partial<AuthServiceOptions> = {}): Harness {
 
 async function bootstrapped(overrides: Partial<AuthServiceOptions> = {}) {
   const h = harness(overrides);
+  if (
+    overrides.systemAuditWorkspaceId !== undefined &&
+    overrides.systemAuditWorkspaceId !== "ws_a"
+  ) {
+    await h.store.createWorkspace({
+      id: overrides.systemAuditWorkspaceId,
+      name: "Operations",
+      createdAt: "2026-01-01T00:00:00Z",
+    });
+  }
   const owner = await h.service.bootstrapOwner({
     email: "Owner@Sona.test",
     password: OWNER_PASSWORD,
@@ -77,7 +87,7 @@ async function invitedMember(
     role: input.role,
   });
   const password = input.password ?? MEMBER_PASSWORD;
-  const accepted = await h.service.acceptInvite({ token, password });
+  const accepted = await h.service.acceptInvite({ token, password, throttleKey: "client:test" });
   const login = await h.service.login({ email: input.email, password });
   const session = await h.service.resolveSession(login.token);
   const access = await h.service.resolveWorkspaceAccess({ session, workspaceId: "ws_a" });
@@ -138,7 +148,7 @@ describe("bootstrap", () => {
         password: OWNER_PASSWORD,
         workspaceName: "   ",
       }),
-    ).rejects.toThrow(/workspaceName/);
+    ).rejects.toMatchObject({ code: "invalid_input", details: ["workspace_name"] });
     expect(await h.store.countUsers()).toBe(0);
     expect(h.store.workspaces.size).toBe(0);
     expect(h.store.memberships).toEqual([]);
@@ -191,9 +201,9 @@ describe("invites", () => {
       email: "new@sona.test",
       role: "member",
     });
-    await h.service.acceptInvite({ token, password: MEMBER_PASSWORD });
+    await h.service.acceptInvite({ token, password: MEMBER_PASSWORD, throttleKey: "client:test" });
     await expectAuthError(
-      h.service.acceptInvite({ token, password: MEMBER_PASSWORD }),
+      h.service.acceptInvite({ token, password: MEMBER_PASSWORD, throttleKey: "client:test" }),
       "invite_used",
     );
     expect(await h.store.countUsers()).toBe(2);
@@ -211,7 +221,7 @@ describe("invites", () => {
     expect(invite.expiresAt).toBe("2026-07-01T10:00:00.000Z");
     h.clock.advance(HOUR);
     await expectAuthError(
-      h.service.acceptInvite({ token, password: MEMBER_PASSWORD }),
+      h.service.acceptInvite({ token, password: MEMBER_PASSWORD, throttleKey: "client:test" }),
       "invite_expired",
     );
   });
@@ -225,15 +235,23 @@ describe("invites", () => {
     });
     await h.service.revokeInvite({ access: h.ownerAccess, inviteId: invite.id });
     await expectAuthError(
-      h.service.acceptInvite({ token, password: MEMBER_PASSWORD }),
+      h.service.acceptInvite({ token, password: MEMBER_PASSWORD, throttleKey: "client:test" }),
       "invite_invalid",
     );
     await expectAuthError(
-      h.service.acceptInvite({ token: "sona_inv_nope", password: MEMBER_PASSWORD }),
+      h.service.acceptInvite({
+        token: "sona_inv_nope",
+        password: MEMBER_PASSWORD,
+        throttleKey: "client:test",
+      }),
       "invite_invalid",
     );
     await expectAuthError(
-      h.service.acceptInvite({ token: "garbage", password: MEMBER_PASSWORD }),
+      h.service.acceptInvite({
+        token: "garbage",
+        password: MEMBER_PASSWORD,
+        throttleKey: "client:test",
+      }),
       "invite_invalid",
     );
     await expectAuthError(
@@ -249,9 +267,12 @@ describe("invites", () => {
       email: "owner@sona.test",
       role: "member",
     });
-    await expectAuthError(h.service.acceptInvite({ token, password: "weak" }), "password_policy");
     await expectAuthError(
-      h.service.acceptInvite({ token, password: MEMBER_PASSWORD }),
+      h.service.acceptInvite({ token, password: "weak", throttleKey: "client:test" }),
+      "password_policy",
+    );
+    await expectAuthError(
+      h.service.acceptInvite({ token, password: MEMBER_PASSWORD, throttleKey: "client:test" }),
       "email_taken",
     );
     // Neither failure consumed the invite.
@@ -378,10 +399,10 @@ describe("invites", () => {
         email: "x@sona.test",
         role: "superuser" as WorkspaceRole,
       }),
-    ).rejects.toThrow(/role/);
+    ).rejects.toMatchObject({ code: "invalid_input", details: ["role"] });
     await expect(
       h.service.createInvite({ access: h.ownerAccess, email: "not-an-email", role: "member" }),
-    ).rejects.toMatchObject({ code: "invalid_credentials", details: ["invalid_email"] });
+    ).rejects.toMatchObject({ code: "invalid_input", details: ["email"] });
     await expect(
       h.service.createInvite({
         access: h.ownerAccess,
@@ -389,7 +410,7 @@ describe("invites", () => {
         role: "member",
         ttlMs: 0,
       }),
-    ).rejects.toThrow(RangeError);
+    ).rejects.toMatchObject({ code: "invalid_input", details: ["ttl"] });
     expect(await h.service.listInvites(h.ownerAccess)).toEqual([]);
     expect(actions(h.events)).not.toContain("auth.invite.created");
   });
@@ -410,11 +431,15 @@ describe("invites", () => {
     expect((await h.service.listInvites(accessB)).map((i) => i.id)).toEqual([invite.id]);
     expect(actions(h.events)).not.toContain("auth.invite.revoked");
     // The invite is untouched and still accepts into ws_b only.
-    const accepted = await h.service.acceptInvite({ token, password: MEMBER_PASSWORD });
+    const accepted = await h.service.acceptInvite({
+      token,
+      password: MEMBER_PASSWORD,
+      throttleKey: "client:test",
+    });
     expect(accepted.membership.workspaceId).toBe("ws_b");
     expect(await h.store.getMembership("ws_a", accepted.user.id)).toBeUndefined();
     expect(
-      (await h.service.listWorkspaces(h.ownerSession)).map((m) => m.workspaceId).sort(),
+      (await h.service.listWorkspaces(h.ownerSession)).map((w) => w.workspace.id).sort(),
     ).toEqual(["ws_a", "ws_b"]);
   });
 });
@@ -652,7 +677,10 @@ describe("totp", () => {
       h.service.login({ email: "owner@sona.test", password: OWNER_PASSWORD }),
     ).resolves.toMatchObject({ method: "password" });
     const code = hotp(start.secret, totpStep(h.clock.now));
-    const confirmed = await h.service.confirmTotpEnrollment(h.ownerSession, code);
+    const confirmed = await h.service.confirmTotpEnrollment({
+      session: h.ownerSession,
+      code: code,
+    });
     expect(confirmed.recoveryCodes).toHaveLength(8);
     return { ...h, secret: start.secret, recoveryCodes: confirmed.recoveryCodes };
   }
@@ -673,18 +701,22 @@ describe("totp", () => {
     const result = await h.service.login({
       email: "owner@sona.test",
       password: OWNER_PASSWORD,
-      totpCode: code,
+      secondFactor: { kind: "totp", code: code },
     });
     expect(result.method).toBe("password_totp");
     await expectAuthError(
-      h.service.login({ email: "owner@sona.test", password: OWNER_PASSWORD, totpCode: code }),
+      h.service.login({
+        email: "owner@sona.test",
+        password: OWNER_PASSWORD,
+        secondFactor: { kind: "totp", code },
+      }),
       "invalid_totp",
     );
     await expectAuthError(
       h.service.login({
         email: "owner@sona.test",
         password: OWNER_PASSWORD,
-        totpCode: "000000",
+        secondFactor: { kind: "totp", code: "000000" },
       }),
       "invalid_totp",
     );
@@ -703,12 +735,16 @@ describe("totp", () => {
     const result = await h.service.login({
       email: "owner@sona.test",
       password: OWNER_PASSWORD,
-      recoveryCode: first.toUpperCase(),
+      secondFactor: { kind: "recovery_code", code: first.toUpperCase() },
     });
     expect(result.method).toBe("password_recovery_code");
     expect(await h.store.countUnusedRecoveryCodes(h.owner.user.id)).toBe(7);
     await expectAuthError(
-      h.service.login({ email: "owner@sona.test", password: OWNER_PASSWORD, recoveryCode: first }),
+      h.service.login({
+        email: "owner@sona.test",
+        password: OWNER_PASSWORD,
+        secondFactor: { kind: "recovery_code", code: first },
+      }),
       "invalid_totp",
     );
     const used = h.events.find((event) => event.action === "auth.recovery_code.used");
@@ -722,8 +758,11 @@ describe("totp", () => {
   it("requires the password to disable and refuses double enrollment", async () => {
     const h = await enrolled();
     await expectAuthError(h.service.beginTotpEnrollment(h.ownerSession), "totp_already_enrolled");
-    await expectAuthError(h.service.disableTotp(h.ownerSession, "not it"), "invalid_credentials");
-    await h.service.disableTotp(h.ownerSession, OWNER_PASSWORD);
+    await expectAuthError(
+      h.service.disableTotp({ session: h.ownerSession, password: "not it" }),
+      "invalid_credentials",
+    );
+    await h.service.disableTotp({ session: h.ownerSession, password: OWNER_PASSWORD });
     expect(await h.store.getTotpEnrollment(h.owner.user.id)).toBeUndefined();
     expect(await h.store.countUnusedRecoveryCodes(h.owner.user.id)).toBe(0);
     expect(actions(h.events, "ws_a")).toContain("auth.totp.disabled");
@@ -736,32 +775,35 @@ describe("totp", () => {
     const h = await bootstrapped();
     await h.service.beginTotpEnrollment(h.ownerSession);
     await expectAuthError(
-      h.service.confirmTotpEnrollment(h.ownerSession, "123456"),
+      h.service.confirmTotpEnrollment({ session: h.ownerSession, code: "123456" }),
       "invalid_totp",
     );
     expect((await h.store.getTotpEnrollment(h.owner.user.id))?.confirmedAt).toBeUndefined();
     // An unconfirmed enrollment can be abandoned with the password, like a confirmed one.
-    await h.service.disableTotp(h.ownerSession, OWNER_PASSWORD);
+    await h.service.disableTotp({ session: h.ownerSession, password: OWNER_PASSWORD });
     expect(await h.store.getTotpEnrollment(h.owner.user.id)).toBeUndefined();
   });
 
   it("reports totp_not_enrolled when confirming or disabling without an enrollment", async () => {
     const h = await bootstrapped();
     await expectAuthError(
-      h.service.confirmTotpEnrollment(h.ownerSession, "123456"),
+      h.service.confirmTotpEnrollment({ session: h.ownerSession, code: "123456" }),
       "totp_not_enrolled",
     );
     // The password is checked before the enrollment state is revealed.
-    await expectAuthError(h.service.disableTotp(h.ownerSession, "not it"), "invalid_credentials");
     await expectAuthError(
-      h.service.disableTotp(h.ownerSession, OWNER_PASSWORD),
+      h.service.disableTotp({ session: h.ownerSession, password: "not it" }),
+      "invalid_credentials",
+    );
+    await expectAuthError(
+      h.service.disableTotp({ session: h.ownerSession, password: OWNER_PASSWORD }),
       "totp_not_enrolled",
     );
     expect(actions(h.events)).not.toContain("auth.totp.enabled");
     expect(actions(h.events)).not.toContain("auth.totp.disabled");
   });
 
-  it("prefers the recovery code when both factors are supplied", async () => {
+  it("uses a recovery code without moving the TOTP replay floor", async () => {
     const h = await enrolled();
     const [first] = h.recoveryCodes;
     if (first === undefined) {
@@ -772,30 +814,36 @@ describe("totp", () => {
     const result = await h.service.login({
       email: "owner@sona.test",
       password: OWNER_PASSWORD,
-      recoveryCode: first,
-      totpCode: "000000",
+      secondFactor: { kind: "recovery_code", code: first },
     });
     expect(result.method).toBe("password_recovery_code");
     expect(await h.store.countUnusedRecoveryCodes(h.owner.user.id)).toBe(7);
-    // The bogus TOTP code was never evaluated: the replay floor did not move.
     expect((await h.store.getTotpEnrollment(h.owner.user.id))?.lastUsedStep).toBe(
       before?.lastUsedStep,
     );
-    // A wrong recovery code fails even when a valid TOTP code is attached.
+    // A TOTP code offered as a recovery code fails, and vice versa.
     const code = hotp(h.secret, totpStep(h.clock.now));
     await expectAuthError(
       h.service.login({
         email: "owner@sona.test",
         password: OWNER_PASSWORD,
-        recoveryCode: "zzzzz-zzzzz",
-        totpCode: code,
+        secondFactor: { kind: "recovery_code", code },
+      }),
+      "invalid_totp",
+    );
+    const [, second] = h.recoveryCodes;
+    await expectAuthError(
+      h.service.login({
+        email: "owner@sona.test",
+        password: OWNER_PASSWORD,
+        secondFactor: { kind: "totp", code: second ?? "" },
       }),
       "invalid_totp",
     );
     const reasons = h.events
       .filter((event) => event.action === "auth.login.failed")
       .map((event) => (event.metadata as { reason: string }).reason);
-    expect(reasons).toEqual(["invalid_recovery_code"]);
+    expect(reasons).toEqual(["invalid_recovery_code", "invalid_totp"]);
   });
 
   it("replaces the pending secret when enrollment is begun again", async () => {
@@ -804,14 +852,23 @@ describe("totp", () => {
     const second = await h.service.beginTotpEnrollment(h.ownerSession);
     expect(second.secret).not.toBe(first.secret);
     await expectAuthError(
-      h.service.confirmTotpEnrollment(h.ownerSession, hotp(first.secret, totpStep(h.clock.now))),
+      h.service.confirmTotpEnrollment({
+        session: h.ownerSession,
+        code: hotp(first.secret, totpStep(h.clock.now)),
+      }),
       "invalid_totp",
     );
     await expect(
-      h.service.confirmTotpEnrollment(h.ownerSession, hotp(second.secret, totpStep(h.clock.now))),
+      h.service.confirmTotpEnrollment({
+        session: h.ownerSession,
+        code: hotp(second.secret, totpStep(h.clock.now)),
+      }),
     ).resolves.toMatchObject({ recoveryCodes: expect.any(Array) });
     await expectAuthError(
-      h.service.confirmTotpEnrollment(h.ownerSession, hotp(second.secret, totpStep(h.clock.now))),
+      h.service.confirmTotpEnrollment({
+        session: h.ownerSession,
+        code: hotp(second.secret, totpStep(h.clock.now)),
+      }),
       "totp_already_enrolled",
     );
   });
@@ -870,7 +927,7 @@ describe("workspace access", () => {
 describe("api tokens", () => {
   it("mints a hashed, workspace-bound token that resolves to capped agent access", async () => {
     const h = await bootstrapped();
-    const { token, secret } = await h.service.createApiToken({
+    const { apiToken: token, token: secret } = await h.service.createApiToken({
       access: h.ownerAccess,
       name: "domovoi",
       scopes: ["read", "suggest"],
@@ -915,7 +972,7 @@ describe("api tokens", () => {
       h.service.createApiToken({ access: h.ownerAccess, name: "x", scopes: [] }),
       "invalid_scope",
     );
-    const { secret } = await h.service.createApiToken({
+    const { token: secret } = await h.service.createApiToken({
       access: h.ownerAccess,
       name: "agent",
       scopes: ["execute"],
@@ -934,7 +991,7 @@ describe("api tokens", () => {
   it("stops working when revoked, expired, or when the creator leaves the workspace", async () => {
     const h = await bootstrapped();
     const member = await invitedMember(h, { email: "member@sona.test", role: "member" });
-    const { token, secret } = await h.service.createApiToken({
+    const { apiToken: token, token: secret } = await h.service.createApiToken({
       access: member.access,
       name: "sync bot",
       scopes: ["execute"],
@@ -962,7 +1019,7 @@ describe("api tokens", () => {
       ttlMs: HOUR,
     });
     h.clock.advance(HOUR);
-    await expectAuthError(h.service.resolveApiToken(expiring.secret), "api_token_invalid");
+    await expectAuthError(h.service.resolveApiToken(expiring.token), "api_token_invalid");
 
     const orphaned = await h.service.createApiToken({
       access: member.access,
@@ -973,7 +1030,7 @@ describe("api tokens", () => {
       h.store.memberships.findIndex((m) => m.userId === member.user.id),
       1,
     );
-    await expectAuthError(h.service.resolveApiToken(orphaned.secret), "api_token_invalid");
+    await expectAuthError(h.service.resolveApiToken(orphaned.token), "api_token_invalid");
     await expectAuthError(h.service.resolveApiToken("sona_sess_wrongkind"), "api_token_invalid");
     expect(actions(h.events, "ws_a")).toEqual(
       expect.arrayContaining(["auth.api_token.created", "auth.api_token.revoked"]),
@@ -997,7 +1054,7 @@ describe("api tokens", () => {
 
   it("touches lastUsedAt at most once a minute", async () => {
     const h = await bootstrapped();
-    const { token, secret } = await h.service.createApiToken({
+    const { apiToken: token, token: secret } = await h.service.createApiToken({
       access: h.ownerAccess,
       name: "bot",
       scopes: ["read"],
@@ -1020,7 +1077,7 @@ describe("api tokens", () => {
   it("caps grants by the creator's current role, not the role at minting", async () => {
     const h = await bootstrapped();
     const member = await invitedMember(h, { email: "member@sona.test", role: "member" });
-    const { secret } = await h.service.createApiToken({
+    const { token: secret } = await h.service.createApiToken({
       access: member.access,
       name: "suggester",
       scopes: ["suggest"],
@@ -1052,10 +1109,11 @@ describe("api tokens", () => {
         scopes: input.scopes ?? ["read"],
         ...(input.ttlMs === undefined ? {} : { ttlMs: input.ttlMs }),
       });
-    await expect(create({ name: "   " })).rejects.toThrow(/name/);
-    await expect(create({ name: "n".repeat(101) })).rejects.toThrow(/name/);
-    await expect(create({ ttlMs: 0 })).rejects.toThrow(RangeError);
-    await expect(create({ ttlMs: -DAY })).rejects.toThrow(RangeError);
+    const invalid = (field: string) => ({ code: "invalid_input", details: [field] });
+    await expect(create({ name: "   " })).rejects.toMatchObject(invalid("name"));
+    await expect(create({ name: "n".repeat(101) })).rejects.toMatchObject(invalid("name"));
+    await expect(create({ ttlMs: 0 })).rejects.toMatchObject(invalid("ttl"));
+    await expect(create({ ttlMs: -DAY })).rejects.toMatchObject(invalid("ttl"));
     await expect(create({ scopes: ["admin" as ApiTokenScope] })).rejects.toMatchObject({
       code: "invalid_scope",
       details: ["admin"],
@@ -1063,12 +1121,14 @@ describe("api tokens", () => {
     expect(h.store.apiTokens.size).toBe(0);
     expect(actions(h.events)).not.toContain("auth.api_token.created");
 
-    const { token } = await create({ name: "  padded  ", scopes: ["read", "read", "suggest"] });
+    const { apiToken: token } = await create({
+      name: "  padded  ",
+      scopes: ["read", "read", "suggest"],
+    });
     expect(token.name).toBe("padded");
     expect(token.scopes).toEqual(["read", "suggest"]);
     const created = h.events.find((event) => event.action === "auth.api_token.created");
     expect(created?.metadata).toEqual({
-      name: "padded",
       scopes: ["read", "suggest"],
       expiresAt: token.expiresAt,
     });
@@ -1077,7 +1137,7 @@ describe("api tokens", () => {
   it("keeps tokens invisible and irrevocable from another workspace, and from agents", async () => {
     const h = await bootstrapped();
     const accessB = await secondWorkspace(h);
-    const { token, secret } = await h.service.createApiToken({
+    const { apiToken: token, token: secret } = await h.service.createApiToken({
       access: accessB,
       name: "b bot",
       scopes: ["read"],
@@ -1094,6 +1154,10 @@ describe("api tokens", () => {
     await expect(
       h.service.revokeApiToken({ access: agent, tokenId: token.id }),
     ).rejects.toMatchObject({ code: "forbidden", details: ["api_token_cannot_revoke"] });
+    await expect(h.service.listApiTokens(agent)).rejects.toMatchObject({
+      code: "forbidden",
+      details: ["api_token_cannot_list"],
+    });
     await expect(h.service.resolveApiToken(secret)).resolves.toBeDefined();
     expect(actions(h.events)).not.toContain("auth.api_token.revoked");
   });
@@ -1107,7 +1171,7 @@ describe("api tokens", () => {
         scopes: ["read"],
         ttlMs: 400 * DAY,
       }),
-    ).rejects.toThrow(/one-year/);
+    ).rejects.toMatchObject({ code: "invalid_input", details: ["ttl"] });
   });
 });
 
@@ -1120,7 +1184,7 @@ describe("secret hygiene", () => {
       email: "invitee@sona.test",
       role: "member",
     });
-    const { secret: apiSecret } = await h.service.createApiToken({
+    const { token: apiSecret } = await h.service.createApiToken({
       access: h.ownerAccess,
       name: "bot",
       scopes: ["read"],
@@ -1130,7 +1194,12 @@ describe("secret hygiene", () => {
     const failures: unknown[] = [];
     for (const attempt of [
       () => h.service.login({ email: "owner@sona.test", password: "wrong-password-value-xyz" }),
-      () => h.service.acceptInvite({ token: inviteToken, password: "short" }),
+      () =>
+        h.service.acceptInvite({
+          token: inviteToken,
+          password: "short",
+          throttleKey: "client:test",
+        }),
       () => h.service.resolveSession(`${h.ownerToken}tampered`),
       () => h.service.resolveApiToken(`${apiSecret}tampered`),
     ]) {
@@ -1176,7 +1245,7 @@ describe("secret hygiene", () => {
       apiTokens: [...h.store.apiTokens.values()],
       credentials: [...h.store.credentials.values()],
     });
-    for (const secret of [invite.token, api.secret, h.ownerToken, OWNER_PASSWORD]) {
+    for (const secret of [invite.token, api.token, h.ownerToken, OWNER_PASSWORD]) {
       expect(dump).not.toContain(secret);
     }
   });
@@ -1189,5 +1258,91 @@ describe("default policy", () => {
       absoluteTtlMs: 30 * DAY,
       renewIntervalMs: HOUR,
     });
+  });
+});
+
+describe("audit routing and lockouts", () => {
+  it("audits a lockout once and writes nothing while it lasts", async () => {
+    const throttle = createFixedWindowThrottle({ maxFailures: 2, windowMs: 10 * MINUTE });
+    const h = await bootstrapped({ throttle });
+    const attempt = () =>
+      h.service.login({ email: "owner@sona.test", password: "wrong password here" });
+    await expectAuthError(attempt(), "invalid_credentials");
+    await expectAuthError(attempt(), "invalid_credentials");
+    const before = h.events.length;
+    for (let index = 0; index < 5; index += 1) {
+      await expectAuthError(attempt(), "rate_limited");
+    }
+    expect(h.events.length).toBe(before);
+    const reasons = h.events
+      .filter((event) => event.action === "auth.login.failed")
+      .map((event) => (event.metadata as { reason: string }).reason);
+    expect(reasons).toEqual(["invalid_password", "invalid_password", "rate_limited"]);
+  });
+
+  it("keeps a shared advisor's logins out of client workspaces", async () => {
+    const h = await bootstrapped({ systemAuditWorkspaceId: "ws_ops" });
+    const advisor = await invitedMember(h, {
+      email: "advisor@steuerberater.test",
+      role: "advisor_readonly",
+    });
+    const advisorLogins = h.events.filter(
+      (event) => event.action === "auth.login.succeeded" && event.actor === advisor.user.id,
+    );
+    expect(advisorLogins.map((event) => event.workspaceId)).toEqual(["ws_ops"]);
+    await h.service.logout(advisor.token);
+    expect(actions(h.events, "ws_a")).not.toContain("auth.logout");
+    expect(actions(h.events, "ws_ops")).toContain("auth.logout");
+    // Workspace-scoped events about the advisor still land in the workspace.
+    expect(actions(h.events, "ws_a")).toContain("auth.invite.accepted");
+  });
+
+  it("throttles and audits failed password checks when disabling TOTP", async () => {
+    const throttle = createFixedWindowThrottle({ maxFailures: 2, windowMs: 10 * MINUTE });
+    const h = await bootstrapped({ throttle });
+    const start = await h.service.beginTotpEnrollment(h.ownerSession);
+    await h.service.confirmTotpEnrollment({
+      session: h.ownerSession,
+      code: hotp(start.secret, totpStep(h.clock.now)),
+    });
+    const attempt = (password: string) =>
+      h.service.disableTotp({ session: h.ownerSession, password });
+    await expectAuthError(attempt("not the password"), "invalid_credentials");
+    await expectAuthError(attempt("still not it here"), "invalid_credentials");
+    await expectAuthError(attempt(OWNER_PASSWORD), "rate_limited");
+    expect(await h.store.getTotpEnrollment(h.owner.user.id)).toBeDefined();
+    expect(actions(h.events, "ws_a").filter((a) => a === "auth.totp.disable_denied")).toHaveLength(
+      2,
+    );
+    // The login throttle is separate: the account itself is not locked.
+    h.clock.advance(30_000);
+    await expect(
+      h.service.login({
+        email: "owner@sona.test",
+        password: OWNER_PASSWORD,
+        secondFactor: { kind: "totp", code: hotp(start.secret, totpStep(h.clock.now)) },
+      }),
+    ).resolves.toBeDefined();
+    h.clock.advance(10 * MINUTE);
+    await attempt(OWNER_PASSWORD);
+    expect(await h.store.getTotpEnrollment(h.owner.user.id)).toBeUndefined();
+  });
+
+  it("fails loudly when the system audit workspace does not exist", async () => {
+    const h = harness({ systemAuditWorkspaceId: "ws_missing" });
+    await h.service.bootstrapOwner({
+      email: "owner@sona.test",
+      password: OWNER_PASSWORD,
+      workspaceName: "Solo",
+      workspaceId: "ws_a",
+    });
+    // Both the unknown-email and the known-user path hit the same check, so a
+    // misconfiguration cannot be used to tell accounts apart.
+    await expect(
+      h.service.login({ email: "owner@sona.test", password: OWNER_PASSWORD }),
+    ).rejects.toThrow(/systemAuditWorkspaceId/);
+    await expect(
+      h.service.login({ email: "nobody@sona.test", password: OWNER_PASSWORD }),
+    ).rejects.toThrow(/systemAuditWorkspaceId/);
   });
 });
