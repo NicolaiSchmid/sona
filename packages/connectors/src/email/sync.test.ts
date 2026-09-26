@@ -713,6 +713,79 @@ describe("runEmailSync", () => {
     ).rejects.toThrow(/not found/);
   });
 
+  it("rejects a non-positive batch size before touching any store", async () => {
+    const stores = createStores();
+    for (const batchSize of [0, -1, 1.5]) {
+      await expect(
+        runEmailSync({ ...base, ...stores, client: inboxClient(), batchSize }),
+      ).rejects.toThrow(/batchSize/);
+    }
+    expect(stores.runEvents).toEqual([]);
+  });
+
+  it("treats a unique-constraint loss on save as a dedupe when the content is now referenced", async () => {
+    const stores = createStores();
+    let raced = false;
+    const documentStore: EmailDocumentStore = {
+      ...stores.documentStore,
+      // The other writer's INSERT lands between our lookup and save, so ours
+      // fails on the unique index instead of returning the existing row.
+      save: async (document) => {
+        if (!raced) {
+          raced = true;
+          await stores.documentStore.save({ ...document, id: "doc_from_other_writer" });
+          throw new Error(
+            "UNIQUE constraint failed: documents.workspace_id, documents.content_hash",
+          );
+        }
+        return stores.documentStore.save(document);
+      },
+    };
+    const summary = await runEmailSync({
+      ...base,
+      ...stores,
+      documentStore,
+      client: inboxClient({}, { uidValidity: UID_VALIDITY, messages: [INVOICE_MESSAGE] }),
+    });
+
+    expect(summary.errors).toEqual([]);
+    expect(summary.attachmentsStored).toBe(0);
+    expect(summary.attachmentsDeduplicated).toBe(1);
+    expect(summary.messagesIngested).toBe(1);
+    expect(summary.cursor?.lastUid).toBe(101);
+    expect(stores.documents.map((d) => d.id)).toEqual(["doc_from_other_writer"]);
+  });
+
+  it("records a failed orphan-blob cleanup instead of hiding it", async () => {
+    const stores = createStores();
+    const documentStorage: DocumentStorage = {
+      put: (input) => stores.documentStorage.put(input),
+      get: (input) => stores.documentStorage.get(input),
+      delete: async () => {
+        throw new Error("EACCES: permission denied, unlink '/data/ws_1/Rechnung-2026-0042.pdf'");
+      },
+    };
+    const documentStore: EmailDocumentStore = {
+      ...stores.documentStore,
+      save: async () => {
+        throw new Error("documents table is locked");
+      },
+    };
+    const summary = await runEmailSync({
+      ...base,
+      ...stores,
+      documentStore,
+      documentStorage,
+      client: inboxClient({}, { uidValidity: UID_VALIDITY, messages: [INVOICE_MESSAGE] }),
+    });
+
+    expect(summary.errors.map((e) => e.message)).toEqual([
+      "removing the orphaned blob for part 2 failed: EACCES: permission denied, unlink '/data/ws_1/[redacted]'",
+      "storing part 2 of UID 101 failed: documents table is locked",
+    ]);
+    expect(summary.cursor?.lastUid).toBe(0);
+  });
+
   it("refuses to run without a valid workspace context", async () => {
     const stores = createStores();
     await expect(

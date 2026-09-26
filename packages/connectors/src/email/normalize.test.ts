@@ -85,6 +85,23 @@ describe("resolveEmailSourcePolicy validation", () => {
       "2026-01-01",
     );
   });
+
+  it("rejects impossible calendar dates in both date and timestamp form", () => {
+    expect(() => resolveEmailSourcePolicy({ initialSinceDate: "2026-02-30" })).toThrow(
+      /initialSinceDate/,
+    );
+    expect(() => resolveEmailSourcePolicy({ initialSinceDate: "2026-02-30T00:00:00Z" })).toThrow(
+      /initialSinceDate/,
+    );
+    for (const valid of [
+      "2026-02-28",
+      "2026-01-01T00:00:00Z",
+      "2026-01-01T00:00:00.000Z",
+      "2026-01-01T00:00:00+01:00",
+    ]) {
+      expect(resolveEmailSourcePolicy({ initialSinceDate: valid }).initialSinceDate).toBe(valid);
+    }
+  });
 });
 
 describe("selectAttachments", () => {
