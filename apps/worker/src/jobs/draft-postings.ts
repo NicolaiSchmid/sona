@@ -17,6 +17,7 @@
 import {
   isZeroDecimal,
   type JsonValue,
+  negateDecimal,
   type ReviewState,
   SUSPENSE_ACCOUNTS,
   stableJsonHash,
@@ -125,10 +126,6 @@ export function draftIdempotencyKey(bankTransactionId: string): string {
   return `draft_posting:${bankTransactionId}`;
 }
 
-function negate(amount: string): string {
-  return amount.startsWith("-") ? amount.slice(1) : `-${amount}`;
-}
-
 function describe(transaction: DraftPostingSource): string {
   const parts = [transaction.counterpartyName, transaction.remittanceInfo].filter(
     (part): part is string => part !== undefined && part.trim() !== "",
@@ -139,15 +136,12 @@ function describe(transaction: DraftPostingSource): string {
     : text;
 }
 
-function desiredDraft(
-  input: DraftPostingInput,
-  id: string,
-  idempotencyKey: string,
-  bookedOn: string,
-): CreateLedgerTransactionInput {
+type DesiredDraft = CreateLedgerTransactionInput & { idempotencyKey: string };
+
+function desiredDraft(input: DraftPostingInput, bookedOn: string): DesiredDraft {
   const { transaction } = input;
   return {
-    id,
+    id: draftTransactionId(transaction.bankTransactionId),
     bookedOn,
     description: describe(transaction),
     postings: [
@@ -157,13 +151,13 @@ function desiredDraft(
       },
       {
         account: SUSPENSE_ACCOUNTS.unclassified,
-        amount: { amount: negate(transaction.amount), commodity: transaction.currency },
+        amount: { amount: negateDecimal(transaction.amount), commodity: transaction.currency },
         memo: "awaiting classification",
       },
     ],
     reviewState: "draft",
     createdAt: input.now,
-    idempotencyKey,
+    idempotencyKey: draftIdempotencyKey(transaction.bankTransactionId),
   };
 }
 
@@ -219,11 +213,8 @@ export async function ensureDraftPosting(
     createdAt: input.now,
   });
 
-  const baseId = draftTransactionId(transaction.bankTransactionId);
-  const baseKey = draftIdempotencyKey(transaction.bankTransactionId);
-  const desired = desiredDraft(input, baseId, baseKey, bookedOn);
-
-  const original = await deps.ledger.getTransaction(workspaceId, baseId);
+  const desired = desiredDraft(input, bookedOn);
+  const original = await deps.ledger.getTransaction(workspaceId, desired.id);
   let outcome: DraftPostingResult;
   if (original === undefined) {
     const created = await deps.ledger.createTransaction(workspaceId, desired);
@@ -261,7 +252,7 @@ async function reconcileCorrection(
   deps: DraftPostingDependencies,
   input: DraftPostingInput,
   original: PersistedLedgerTransaction,
-  desired: CreateLedgerTransactionInput,
+  desired: DesiredDraft,
 ): Promise<DraftPostingResult> {
   const workspaceId = input.context.workspaceId;
   const chain = await supersessionChain(deps.ledger, original);
@@ -311,8 +302,8 @@ async function reconcileCorrection(
     supersedesTransactionId: head.id,
     replacement: {
       ...desired,
-      id: `${draftTransactionId(input.transaction.bankTransactionId)}:r${revision}`,
-      idempotencyKey: `${draftIdempotencyKey(input.transaction.bankTransactionId)}:r${revision}`,
+      id: `${desired.id}:r${revision}`,
+      idempotencyKey: `${desired.idempotencyKey}:r${revision}`,
     },
     actor: BANK_CORRECTION_ACTOR,
     supersededAt: input.now,
@@ -357,19 +348,14 @@ export function bankCorrectionReviewItemId(
   ledgerTransactionId: string,
   desired: CreateLedgerTransactionInput,
 ): string {
-  const fingerprint = stableJsonHash({
-    bookedOn: desired.bookedOn,
-    description: desired.description,
-    postings: desired.postings.map((posting) => ({
-      account: posting.account,
-      amount: posting.amount.amount,
-      commodity: posting.amount.commodity,
-    })),
-  }).slice(0, 16);
+  const fingerprint = stableJsonHash(transactionSummary(desired)).slice(0, 16);
   return `review:bank_correction:${ledgerTransactionId}:${fingerprint}`;
 }
 
-function transactionSummary(transaction: PersistedLedgerTransaction): JsonValue {
+/** The content a bank correction is judged on: date, description, and the posting legs. */
+function transactionSummary(
+  transaction: Pick<CreateLedgerTransactionInput, "bookedOn" | "description" | "postings">,
+): JsonValue {
   return {
     bookedOn: transaction.bookedOn,
     description: transaction.description,

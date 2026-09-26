@@ -182,13 +182,7 @@ export class FakeEnableBankingClient implements enableBanking.EnableBankingClien
     strategy?: string;
   }): Promise<enableBanking.EbTransactionsResponse> {
     this.calls.push(`transactions:${input.accountUid}`);
-    this.transactionRequests.push({
-      accountUid: input.accountUid,
-      continuationKey: input.continuationKey,
-      dateFrom: input.dateFrom,
-      dateTo: input.dateTo,
-      strategy: input.strategy,
-    });
+    this.transactionRequests.push({ ...input });
     const account = this.#account(input.accountUid);
     const pageSize = account.pageSize ?? account.transactions.length;
     const offset =

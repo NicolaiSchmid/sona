@@ -161,23 +161,21 @@ export function narrowJobKind(job: PersistedJob): Job {
   return narrowJob(job, job.kind);
 }
 
-type IdempotencyKeyDerivers = { [K in JobKind]: (payload: JobPayload<K>) => string };
-
-/** `prefix:a:b` with undefined parts dropped. */
-function key(...parts: ReadonlyArray<string | number | undefined>): string {
-  return parts.filter((part) => part !== undefined).join(":");
-}
-
-const IDEMPOTENCY_KEY_DERIVERS: IdempotencyKeyDerivers = {
-  source_sync: (p) => key("source_sync", p.sourceId, p.window),
-  document_ingest: (p) => key("document_ingest", p.uploadId),
-  extraction: (p) => key("extraction", p.documentId),
-  reconciliation: (p) => key("reconciliation", p.documentId, p.trigger),
-  export_generation: (p) => key("export_generation", p.year, p.mode, p.templateId),
-  portal_fetch: (p) => key("portal_fetch", p.connectionId, p.window),
+/** The payload fields that identify one unit of work per kind; `undefined` parts are dropped. */
+const IDEMPOTENCY_KEY_PARTS: {
+  [K in JobKind]: (payload: JobPayload<K>) => ReadonlyArray<string | number | undefined>;
+} = {
+  source_sync: (p) => [p.sourceId, p.window],
+  document_ingest: (p) => [p.uploadId],
+  extraction: (p) => [p.documentId],
+  reconciliation: (p) => [p.documentId, p.trigger],
+  export_generation: (p) => [p.year, p.mode, p.templateId],
+  portal_fetch: (p) => [p.connectionId, p.window],
 };
 
-/** Default workspace-scoped idempotency key for a kind and parsed payload. */
+/** Default workspace-scoped idempotency key, `<kind>:<part>:<part>`, for a kind and parsed payload. */
 export function defaultIdempotencyKey<K extends JobKind>(kind: K, payload: JobPayload<K>): string {
-  return IDEMPOTENCY_KEY_DERIVERS[kind](payload);
+  return [kind, ...IDEMPOTENCY_KEY_PARTS[kind](payload)]
+    .filter((part) => part !== undefined)
+    .join(":");
 }

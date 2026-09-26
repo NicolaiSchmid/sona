@@ -42,7 +42,6 @@ import {
   type MatchCandidate,
   type MatchOutcome,
   type MatchSetItem,
-  type ResolvedMatch,
   reconcileMatchSet,
   scoreMatch,
 } from "@sona/receipts";
@@ -91,10 +90,6 @@ export type ReconciliationSkipReason = (typeof RECONCILIATION_SKIP_REASONS)[numb
 /** Outcomes that are persisted as candidates; weak and blocked pairs are not. */
 export type PersistedMatchOutcome = Extract<MatchOutcome, "auto_match" | "review">;
 
-interface PersistedMatch extends ResolvedMatch {
-  outcome: PersistedMatchOutcome;
-}
-
 export interface ReconcileDocumentResult {
   extractionId: string | undefined;
   skipped: ReconciliationSkipReason | undefined;
@@ -142,10 +137,7 @@ interface MatchEntry {
   target: RecordRef;
 }
 
-function toMatchable(
-  transaction: PersistedBankTransaction,
-  account: string | undefined,
-): MatchableTransaction {
+function toMatchable(transaction: PersistedBankTransaction): MatchableTransaction {
   return {
     id: transaction.id,
     amount: transaction.amount,
@@ -154,7 +146,7 @@ function toMatchable(
     valueDate: transaction.valueDate,
     counterpartyName: transaction.counterpartyName,
     remittanceInfo: transaction.remittanceInfo,
-    account,
+    account: undefined,
     sourceReliability: undefined,
   };
 }
@@ -248,7 +240,8 @@ export async function reconcileDocument(
   // review regardless of score and crowd out the real match as "contested".
   const entries: MatchEntry[] = [];
   for (const transaction of transactions) {
-    const score = scoreMatch(toMatchable(transaction, undefined), matchable);
+    const matchableTransaction = toMatchable(transaction);
+    const score = scoreMatch(matchableTransaction, matchable);
     if (score.blockers.length > 0 || score.score < policy.candidateThreshold) {
       continue;
     }
@@ -263,7 +256,7 @@ export async function reconcileDocument(
         transactionId: transaction.id,
         documentId,
         score,
-        transaction: toMatchable(transaction, account),
+        transaction: { ...matchableTransaction, account },
         account,
         policy,
       },
@@ -309,17 +302,14 @@ export async function reconcileDocument(
         scored.outcome === "auto_match"
           ? await substantiatedByOtherDocument(deps.evidenceLinks, workspaceId, target, documentId)
           : undefined;
-      const match: PersistedMatch =
+      const outcome: PersistedMatchOutcome = contestedBy === undefined ? scored.outcome : "review";
+      const reasons =
         contestedBy === undefined
-          ? { ...scored, outcome: scored.outcome }
-          : {
-              ...scored,
-              outcome: "review",
-              reasons: [
-                ...scored.reasons,
-                `transaction already substantiated by document ${contestedBy}; needs review`,
-              ],
-            };
+          ? scored.reasons
+          : [
+              ...scored.reasons,
+              `transaction already substantiated by document ${contestedBy}; needs review`,
+            ];
       const candidate: MatchCandidate = {
         id,
         workspaceId,
@@ -329,24 +319,24 @@ export async function reconcileDocument(
         extractionId: extraction.id,
         scorerVersion: SCORER_VERSION,
         score: item.score.score,
-        reasons: match.reasons,
+        reasons,
         blockers: item.score.blockers,
         warnings: item.score.warnings,
-        outcome: match.outcome,
+        outcome,
         createdAt: input.now,
       };
       await deps.matchCandidates.save(candidate);
-      result.candidates[match.outcome].push(id);
+      result.candidates[outcome].push(id);
 
-      if (match.outcome === "review") {
+      if (outcome === "review") {
         const reviewItemId = matchReviewItemId(id);
         const reason: JsonValue = {
           kind: "receipt_match",
           candidateId: id,
           documentId,
-          bankTransactionId: match.transactionId,
+          bankTransactionId: transaction.id,
           score: item.score.score,
-          reasons: match.reasons,
+          reasons,
         };
         await deps.reviewQueue.enqueue({
           id: reviewItemId,
@@ -368,7 +358,7 @@ export async function reconcileDocument(
         candidateId: id,
         decision: "approved",
         actor: AUTO_APPLY_ACTOR,
-        notes: match.reasons.join("; "),
+        notes: reasons.join("; "),
         createdAt: input.now,
       });
       await deps.auditEvents.append({
@@ -380,9 +370,9 @@ export async function reconcileDocument(
         targetId: id,
         metadata: {
           documentId,
-          bankTransactionId: match.transactionId,
+          bankTransactionId: transaction.id,
           score: item.score.score,
-          reasons: match.reasons,
+          reasons,
         },
         createdAt: input.now,
       });

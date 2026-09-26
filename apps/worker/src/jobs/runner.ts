@@ -208,15 +208,20 @@ export class JobRunner {
     return outcomes;
   }
 
+  /**
+   * Runs the handler, then writes the attempt's outcome and audit event
+   * atomically. A lost lease is an outcome of its own rather than an
+   * exception, so one slow job never abandons the rest of the batch.
+   */
   async #process(persisted: PersistedJob, run: PersistedJobRun): Promise<JobRunOutcome> {
     const produced: RecordRef[] = [];
-    let result: JsonValue | undefined;
+    let write: (finishedAt: string) => Promise<OutcomeDetails>;
     try {
       if (!isJobKind(persisted.kind)) {
         throw new NonRetryableJobError(`unknown job kind ${JSON.stringify(persisted.kind)}`);
       }
       const context = createWorkspaceContext({ workspaceId: persisted.workspaceId });
-      result = await dispatch(this.#deps.handlers, persisted.kind, persisted, {
+      const result = await dispatch(this.#deps.handlers, persisted.kind, persisted, {
         run,
         context,
         now: run.startedAt,
@@ -228,41 +233,11 @@ export class JobRunner {
           }
         },
       });
+      write = (finishedAt) => this.#recordSuccess(persisted, run, produced, result, finishedAt);
     } catch (error) {
-      return this.#settle(persisted, run, produced, (finishedAt) =>
-        this.#recordFailure(persisted, run, produced, error, finishedAt),
-      );
+      write = (finishedAt) => this.#recordFailure(persisted, run, produced, error, finishedAt);
     }
-    return this.#settle(persisted, run, produced, async (finishedAt) => {
-      await this.#deps.jobs.succeed({
-        workspaceId: persisted.workspaceId,
-        jobId: persisted.id,
-        runId: run.id,
-        workerId: this.#options.workerId,
-        finishedAt,
-        result,
-        produced,
-      });
-      await this.#deps.auditEvents.append(
-        this.#auditEvent(persisted, run, finishedAt, "job.run.succeeded", {
-          produced: produced.map((ref) => ({ type: ref.type, id: ref.id })),
-        }),
-      );
-      return { state: "succeeded" };
-    });
-  }
 
-  /**
-   * Writes the attempt's outcome and audit event atomically. A lost lease is
-   * an outcome of its own rather than an exception, so one slow job never
-   * abandons the rest of the claimed batch.
-   */
-  async #settle(
-    persisted: PersistedJob,
-    run: PersistedJobRun,
-    produced: RecordRef[],
-    write: (finishedAt: string) => Promise<OutcomeDetails>,
-  ): Promise<JobRunOutcome> {
     const finishedAt = this.#options.now();
     try {
       const details = await withTransactionAsync(this.#deps.db, () => write(finishedAt));
@@ -273,6 +248,30 @@ export class JobRunner {
       }
       throw error;
     }
+  }
+
+  async #recordSuccess(
+    persisted: PersistedJob,
+    run: PersistedJobRun,
+    produced: RecordRef[],
+    result: JsonValue | undefined,
+    finishedAt: string,
+  ): Promise<OutcomeDetails> {
+    await this.#deps.jobs.succeed({
+      workspaceId: persisted.workspaceId,
+      jobId: persisted.id,
+      runId: run.id,
+      workerId: this.#options.workerId,
+      finishedAt,
+      result,
+      produced,
+    });
+    await this.#deps.auditEvents.append(
+      this.#auditEvent(persisted, run, finishedAt, "job.run.succeeded", {
+        produced: produced.map((ref) => ({ type: ref.type, id: ref.id })),
+      }),
+    );
+    return { state: "succeeded" };
   }
 
   async #recordFailure(

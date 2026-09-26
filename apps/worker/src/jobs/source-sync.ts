@@ -133,6 +133,20 @@ export interface RunSourceSyncInput {
   transactionQuery?: enableBanking.RunEnableBankingSyncInput["transactionQuery"];
 }
 
+function rawRecordStore(rawRecords: SqliteRawRecordRepository): email.EmailRawRecordStore {
+  return {
+    append: async (record) => {
+      await rawRecords.append(record);
+    },
+    findByExternalId: (workspaceId, sourceId, externalId) =>
+      rawRecords.findByExternalId(workspaceId, sourceId, externalId),
+  };
+}
+
+function syncStatusFor(errors: readonly unknown[]): "succeeded" | "completed_with_errors" {
+  return errors.length > 0 ? "completed_with_errors" : "succeeded";
+}
+
 export async function runSourceSync(
   deps: SourceSyncDependencies,
   input: RunSourceSyncInput,
@@ -194,8 +208,7 @@ async function syncEnableBanking(
   const captured = new Map<string, CapturedTransaction>();
   const bankStore = createWorkspaceBankRecordStore(deps.bankRecords, workspaceId);
   const capturingStore: enableBanking.BankRecordStore = {
-    saveAccount: (account, link) => bankStore.saveAccount(account, link),
-    saveBalance: (balance, link) => bankStore.saveBalance(balance, link),
+    ...bankStore,
     saveTransaction: async (transaction, link) => {
       await bankStore.saveTransaction(transaction, link);
       captured.set(`${transaction.accountExternalId}:${transaction.externalId}`, {
@@ -211,11 +224,7 @@ async function syncEnableBanking(
     sessionId,
     client,
     runStore: redactingSyncRunStore(createWorkspaceSyncRunStore(deps.syncRuns, workspaceId)),
-    rawStore: {
-      append: async (record) => {
-        await deps.rawRecords.append(record);
-      },
-    },
+    rawStore: rawRecordStore(deps.rawRecords),
     bankStore: capturingStore,
     env: { ids: deps.ids, nowIso: () => input.now },
     transactionQuery: input.transactionQuery,
@@ -256,7 +265,7 @@ async function syncEnableBanking(
   return {
     kind: "enable_banking",
     syncRunId: summary.runId,
-    syncStatus: summary.errors.length > 0 ? "completed_with_errors" : "succeeded",
+    syncStatus: syncStatusFor(summary.errors),
     accountsSynced: summary.accountsSynced,
     transactionsSynced: summary.transactionsSynced,
     drafts,
@@ -298,13 +307,7 @@ async function syncEmail(
     client,
     policy,
     runStore: createWorkspaceEmailSyncRunStore(deps.emailSyncRuns, workspaceId),
-    rawStore: {
-      append: async (record) => {
-        await deps.rawRecords.append(record);
-      },
-      findByExternalId: (ws, src, externalId) =>
-        deps.rawRecords.findByExternalId(ws, src, externalId),
-    },
+    rawStore: rawRecordStore(deps.rawRecords),
     documentStore,
     documentStorage: deps.storage,
     env: { ids: deps.ids, nowIso: () => input.now },
@@ -313,7 +316,7 @@ async function syncEmail(
   return {
     kind: "email",
     syncRunId: summary.runId,
-    syncStatus: summary.errors.length > 0 ? "completed_with_errors" : "succeeded",
+    syncStatus: syncStatusFor(summary.errors),
     messagesSeen: summary.messagesSeen,
     messagesIngested: summary.messagesIngested,
     attachmentsStored: summary.attachmentsStored,
