@@ -35,9 +35,27 @@ importers:
       '@sona/agents':
         specifier: workspace:*
         version: link:../../packages/agents
+      '@sona/connectors':
+        specifier: workspace:*
+        version: link:../../packages/connectors
       '@sona/core':
         specifier: workspace:*
         version: link:../../packages/core
+      '@sona/db':
+        specifier: workspace:*
+        version: link:../../packages/db
+      '@sona/receipts':
+        specifier: workspace:*
+        version: link:../../packages/receipts
+      '@sona/tax-de':
+        specifier: workspace:*
+        version: link:../../packages/tax-de
+      yaml:
+        specifier: ^2.9.0
+        version: 2.9.0
+      zod:
+        specifier: ^3.24.0
+        version: 3.25.76
 
   packages/agents:
     dependencies:

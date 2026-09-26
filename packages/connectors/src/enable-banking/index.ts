@@ -33,6 +33,7 @@ export {
   type RawLink,
   type RawRecordStore,
   type RunEnableBankingSyncInput,
+  rawRecordId,
   runEnableBankingSync,
   type SyncEnv,
   type SyncRunStore,

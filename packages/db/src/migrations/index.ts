@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 /** A single forward-only schema migration. */
@@ -10,7 +10,15 @@ export interface Migration {
 }
 
 function load(file: string): string {
-  return readFileSync(fileURLToPath(new URL(file, import.meta.url)), "utf8");
+  // Compiled output lives in `dist/migrations/`; a plain `tsc` build does not
+  // copy `.sql` assets, so fall back to the source directory next to it.
+  for (const base of [import.meta.url, new URL("../../src/migrations/", import.meta.url).href]) {
+    const path = fileURLToPath(new URL(file, base));
+    if (existsSync(path)) {
+      return readFileSync(path, "utf8");
+    }
+  }
+  throw new Error(`migration file not found: ${file}`);
 }
 
 /**
@@ -30,4 +38,5 @@ export const CORE_MIGRATIONS: readonly Migration[] = [
   { id: "0005_email_sources", sql: load("./0005_email_sources.sql") },
   { id: "0006_assets", sql: load("./0006_assets.sql") },
   { id: "0007_portfolio", sql: load("./0007_portfolio.sql") },
+  { id: "0008_jobs", sql: load("./0008_jobs.sql") },
 ];

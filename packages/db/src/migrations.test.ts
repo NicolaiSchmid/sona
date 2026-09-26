@@ -6,6 +6,7 @@ import {
   ASSET_TABLES,
   CORE_TABLES,
   EMAIL_TABLES,
+  JOB_TABLES,
   LEDGER_REPOSITORY_TABLES,
   PORTFOLIO_TABLES,
   RECEIPT_TABLES,
@@ -40,6 +41,7 @@ describe("core migrations", () => {
         ...ASSET_TABLES,
         ...PORTFOLIO_TABLES,
         ...EMAIL_TABLES,
+        ...JOB_TABLES,
       ]) {
         expect(names.has(table), `missing table ${table}`).toBe(true);
       }
