@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { InvalidDecimalError, isValidDecimalString, isZeroDecimal, sumDecimals } from "./decimal";
+import {
+  divideRoundHalfAwayFromZero,
+  fromScaledBigInt,
+  InvalidDecimalError,
+  isValidDecimalString,
+  isZeroDecimal,
+  sumDecimals,
+  toScaledBigInt,
+} from "./decimal";
 
 describe("decimal helpers", () => {
   it("validates decimal strings", () => {
@@ -35,5 +43,30 @@ describe("decimal helpers", () => {
 
   it("throws InvalidDecimalError on bad input", () => {
     expect(() => sumDecimals(["nope"])).toThrow(InvalidDecimalError);
+  });
+});
+
+describe("scaled bigint helpers", () => {
+  it("round-trips decimals through a fixed scale", () => {
+    expect(toScaledBigInt("250000", 2)).toBe(25000000n);
+    expect(toScaledBigInt("-84.23", 2)).toBe(-8423n);
+    expect(toScaledBigInt("2.5", 4)).toBe(25000n);
+    expect(fromScaledBigInt(25000000n, 2)).toBe("250000.00");
+    expect(fromScaledBigInt(-5n, 2)).toBe("-0.05");
+    expect(fromScaledBigInt(7n, 0)).toBe("7");
+  });
+
+  it("refuses to drop fractional digits when narrowing", () => {
+    expect(() => toScaledBigInt("1.234", 2)).toThrow(/fractional/);
+    expect(() => toScaledBigInt("nope", 2)).toThrow(InvalidDecimalError);
+  });
+
+  it("divides with deterministic half-away-from-zero rounding", () => {
+    expect(divideRoundHalfAwayFromZero(5n, 2n)).toBe(3n);
+    expect(divideRoundHalfAwayFromZero(-5n, 2n)).toBe(-3n);
+    expect(divideRoundHalfAwayFromZero(4n, 2n)).toBe(2n);
+    expect(divideRoundHalfAwayFromZero(7n, 3n)).toBe(2n);
+    expect(divideRoundHalfAwayFromZero(8n, 3n)).toBe(3n);
+    expect(() => divideRoundHalfAwayFromZero(1n, 0n)).toThrow(RangeError);
   });
 });

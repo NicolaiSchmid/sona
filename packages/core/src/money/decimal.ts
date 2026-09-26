@@ -70,6 +70,41 @@ export function isZeroDecimal(value: string): boolean {
   return parseScaled(value).value === 0n;
 }
 
+/**
+ * Parses a decimal string into a signed integer at exactly `scale` fractional
+ * digits. Throws {@link InvalidDecimalError} on bad input and a plain `Error`
+ * if the value carries more fractional digits than `scale` can represent, so
+ * callers never silently lose precision.
+ */
+export function toScaledBigInt(value: string, scale: number): bigint {
+  const parsed = parseScaled(value);
+  if (parsed.scale > scale) {
+    throw new Error(`Decimal ${JSON.stringify(value)} has more than ${scale} fractional digit(s)`);
+  }
+  return rescale(parsed, scale);
+}
+
+/** Formats a signed integer at `scale` fractional digits as a canonical decimal string. */
+export function fromScaledBigInt(value: bigint, scale: number): string {
+  return formatScaled(value, scale);
+}
+
+/**
+ * Divides `numerator` by `denominator` rounding half away from zero. Both
+ * operands are plain integers; callers scale them first so the quotient lands
+ * at the intended number of fractional digits.
+ */
+export function divideRoundHalfAwayFromZero(numerator: bigint, denominator: bigint): bigint {
+  if (denominator === 0n) {
+    throw new RangeError("Division by zero");
+  }
+  const negative = numerator < 0n !== denominator < 0n;
+  const absNumerator = numerator < 0n ? -numerator : numerator;
+  const absDenominator = denominator < 0n ? -denominator : denominator;
+  const quotient = (2n * absNumerator + absDenominator) / (2n * absDenominator);
+  return negative ? -quotient : quotient;
+}
+
 function formatScaled(value: bigint, scale: number): string {
   if (scale === 0) {
     return value.toString();
