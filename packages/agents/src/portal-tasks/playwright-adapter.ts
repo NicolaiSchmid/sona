@@ -17,7 +17,7 @@ import type {
 import { isSelectorTimeoutError } from "./browser.js";
 import { DownloadTooLargeError } from "./download.js";
 import type { PortalRequest } from "./network-guard.js";
-import type { PortalResourceType } from "./provenance.js";
+import { PORTAL_RESOURCE_TYPES, type PortalResourceType } from "./provenance.js";
 
 const PLAYWRIGHT_SPECIFIER = "playwright";
 const MIN_TOKEN_LENGTH = 8;
@@ -194,28 +194,14 @@ function toPortalRequest(request: PlaywrightRequest): PortalRequest {
   };
 }
 
-const RESOURCE_TYPES: ReadonlySet<PortalResourceType> = new Set<PortalResourceType>([
-  "document",
-  "stylesheet",
-  "image",
-  "media",
-  "font",
-  "script",
-  "texttrack",
-  "xhr",
-  "fetch",
-  "eventsource",
-  "websocket",
-  "manifest",
-  "other",
-]);
+const RESOURCE_TYPES: ReadonlySet<string> = new Set(PORTAL_RESOURCE_TYPES);
 
 function toResourceType(value: string): PortalResourceType {
   return isPortalResourceType(value) ? value : "other";
 }
 
 function isPortalResourceType(value: string): value is PortalResourceType {
-  return RESOURCE_TYPES.has(value as PortalResourceType);
+  return RESOURCE_TYPES.has(value);
 }
 
 /**

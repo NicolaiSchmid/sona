@@ -163,13 +163,10 @@ export async function runPortalFetchJob(
     }
   }
 
-  if (runResult?.status === "completed") {
+  const settledStatus = runResult === undefined ? undefined : settledJobStatus(runResult.status);
+  if (settledStatus !== undefined) {
     await input.state.complete(leaseKey);
-    return { ...base, status: "completed", runId, cooldownUntil, runResult };
-  }
-  if (runResult !== undefined && TERMINAL_RUN_STATUSES.has(runResult.status)) {
-    await input.state.complete(leaseKey);
-    return { ...base, status: "rejected", runId, cooldownUntil, runResult };
+    return { ...base, status: settledStatus, runId, cooldownUntil, runResult };
   }
   const releaseError = await releaseQuietly(input.state, leaseKey);
   return {
@@ -180,6 +177,16 @@ export async function runPortalFetchJob(
     runResult,
     error: [error, releaseError].filter((part) => part !== undefined).join("; ") || undefined,
   };
+}
+
+/** Job statuses that consume the job id; anything else releases the lease for a retry. */
+function settledJobStatus(
+  status: PortalTaskRunStatus,
+): Extract<PortalFetchJobStatus, "completed" | "rejected"> | undefined {
+  if (status === "completed") {
+    return "completed";
+  }
+  return TERMINAL_RUN_STATUSES.has(status) ? "rejected" : undefined;
 }
 
 function runIdFor(jobId: string, attempt: number): string {

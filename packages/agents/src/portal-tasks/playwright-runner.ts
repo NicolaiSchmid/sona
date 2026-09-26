@@ -366,10 +366,17 @@ async function selectorStep(
     if (!(error instanceof SelectorMissingError) && !isSelectorTimeoutError(error)) {
       throw error;
     }
-    state.result.errors.push(`selector_missing: ${selector}`);
-    await captureFailureArtifact(state);
-    return "selector_missing";
+    return await reportSelectorMissing(state, selector);
   }
+}
+
+async function reportSelectorMissing(
+  state: ExecutionState,
+  detail: string,
+): Promise<PortalTaskRunStatus> {
+  state.result.errors.push(`selector_missing: ${detail}`);
+  await captureFailureArtifact(state);
+  return "selector_missing";
 }
 
 type DownloadLinksStep = Extract<PortalTaskStep, { kind: "downloadLinks" }>;
@@ -380,9 +387,7 @@ async function downloadLinks(
 ): Promise<PortalTaskRunStatus> {
   const elements = await state.session.page.queryAll(step.selector);
   if (elements.length === 0) {
-    state.result.errors.push(`selector_missing: ${step.selector}`);
-    await captureFailureArtifact(state);
-    return "selector_missing";
+    return await reportSelectorMissing(state, step.selector);
   }
 
   let storedIndex = 0;
@@ -455,11 +460,10 @@ async function downloadLinks(
   // Matching elements without a usable link mean the portal markup changed
   // under the selector; a silent empty run would hide a broken fetch.
   if (usableLinks === 0) {
-    state.result.errors.push(
-      `selector_missing: no usable "${step.hrefAttribute}" on ${step.selector}`,
+    return await reportSelectorMissing(
+      state,
+      `no usable "${step.hrefAttribute}" on ${step.selector}`,
     );
-    await captureFailureArtifact(state);
-    return "selector_missing";
   }
 
   return "completed";
