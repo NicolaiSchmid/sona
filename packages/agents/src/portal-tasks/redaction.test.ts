@@ -52,6 +52,29 @@ describe("PortalSecretRedactor", () => {
     expect(output.startsWith("pw [REDACTED_")).toBe(true);
   });
 
+  it("redacts a secret equal to the marker itself without looping or exposing neighbours", () => {
+    const redactor = new PortalSecretRedactor();
+    redactor.addSecret(PortalSecretRedactor.MARKER);
+    redactor.addSecret("hunter2");
+
+    expect(redactor.redactText("hunter2 [REDACTED_SECRET] hunter2")).toBe(
+      "[REDACTED_SECRET] [REDACTED_SECRET] [REDACTED_SECRET]",
+    );
+  });
+
+  it("redacts a shorter secret found mid-way inside a longer one and on its own", () => {
+    const redactor = new PortalSecretRedactor();
+    redactor.addSecret("hunter2");
+    redactor.addSecret("user-hunter2-tail");
+
+    const output = redactor.redactText("login user-hunter2-tail then hunter2 then hunter2-tail");
+
+    expect(output).toBe(
+      "login [REDACTED_SECRET] then [REDACTED_SECRET] then [REDACTED_SECRET]-tail",
+    );
+    expect(output).not.toContain("hunter2");
+  });
+
   it("treats regex metacharacters in secrets literally", () => {
     const redactor = new PortalSecretRedactor();
     const secret = "p+ss(w0rd)*[1].$^|?";

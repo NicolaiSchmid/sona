@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { parse } from "yaml";
+import { parse, stringify } from "yaml";
 import { syntheticReferencePortalTask } from "./definitions/synthetic-reference-portal.js";
 import {
   PORTAL_EXCEPTION_HTTP_METHODS,
@@ -155,6 +155,63 @@ describe("portalTaskSchema", () => {
       portalTaskDigest(task),
     );
     expect(portalTaskDigest({ ...task, version: 2 })).not.toBe(portalTaskDigest(task));
+  });
+
+  it("digests a YAML round-trip of a definition identically to the object literal", () => {
+    const task = parsePortalTask(syntheticReferencePortalTask);
+    const roundTripped = parsePortalTask(parse(stringify(syntheticReferencePortalTask)));
+
+    expect(portalTaskDigest(roundTripped)).toBe(portalTaskDigest(task));
+  });
+
+  it("digests nested step and exception key order independently", () => {
+    const task = parsePortalTask(syntheticReferencePortalTask);
+    const reorderedNested = parsePortalTask({
+      ...syntheticReferencePortalTask,
+      steps: syntheticReferencePortalTask.steps.map((step) =>
+        Object.fromEntries(Object.entries(step).reverse()),
+      ),
+      httpMethodExceptions: syntheticReferencePortalTask.httpMethodExceptions.map((exception) =>
+        Object.fromEntries(Object.entries(exception).reverse()),
+      ),
+    });
+
+    expect(portalTaskDigest(reorderedNested)).toBe(portalTaskDigest(task));
+  });
+
+  it("changes the digest when the order of steps or domains changes", () => {
+    const task = parsePortalTask(syntheticReferencePortalTask);
+    const twoDomains = parsePortalTask({
+      ...syntheticReferencePortalTask,
+      domains: ["portal.test", "invoices.portal.test"],
+    });
+    const flippedDomains = parsePortalTask({
+      ...syntheticReferencePortalTask,
+      domains: ["invoices.portal.test", "portal.test"],
+    });
+
+    expect(portalTaskDigest({ ...task, steps: [...task.steps].reverse() })).not.toBe(
+      portalTaskDigest(task),
+    );
+    expect(portalTaskDigest(flippedDomains)).not.toBe(portalTaskDigest(twoDomains));
+  });
+
+  it("distinguishes an explicit sensitive: false from an absent flag", () => {
+    // Documents current behavior: only undefined values are dropped from the
+    // canonical form, so spelling out `sensitive: false` is a different
+    // revision than omitting it and requires a fresh connection approval.
+    const task = parsePortalTask(syntheticReferencePortalTask);
+    const explicit = {
+      ...task,
+      steps: task.steps.map((step) => ({ ...step, sensitive: step.sensitive ?? false })),
+    };
+    const explicitUndefined = {
+      ...task,
+      steps: task.steps.map((step) => ({ ...step, sensitive: step.sensitive })),
+    };
+
+    expect(portalTaskDigest(explicit)).not.toBe(portalTaskDigest(task));
+    expect(portalTaskDigest(explicitUndefined)).toBe(portalTaskDigest(task));
   });
 
   it("rejects plaintext non-local navigation and exception URLs", () => {

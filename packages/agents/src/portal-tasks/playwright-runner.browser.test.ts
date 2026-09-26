@@ -93,6 +93,100 @@ describe.skipIf(!runBrowserTests)("LocalPlaywrightPortalTaskRunner browser fixtu
     expect(hits.get("GET /redirect-out")).toBe(1);
   });
 
+  it("follows an allowlisted same-host GET redirect chain as routed navigations", async () => {
+    const { result, hits } = await runFixtureWithServer((origin) =>
+      makeTask(origin, [
+        ...loginSteps(origin),
+        { kind: "navigate", url: `${origin}/start` },
+        { kind: "waitForSelector", selector: "[data-testid='invoice-list']", timeoutMs: 5_000 },
+        {
+          kind: "downloadLinks",
+          selector: "a.invoice-download",
+          hrefAttribute: "href",
+          filenameAttribute: "data-filename",
+          mimeType: "application/pdf",
+        },
+      ]),
+    );
+
+    expect(result.errors).toEqual([]);
+    expect(result.status).toBe("completed");
+    expect(result.documents).toHaveLength(2);
+    expect(result.provenance.blockedRequests).toEqual([]);
+    expect(hits.get("GET /start")).toBe(1);
+    expect(hits.get("GET /hop")).toBe(1);
+    expect(hits.get("GET /invoices")).toBe(2);
+  });
+
+  it("aborts a subresource redirect onto an off-allowlist host at the hop", async () => {
+    const { result, hits } = await runFixtureWithServer((origin) =>
+      makeTask(origin, [
+        { kind: "navigate", url: `${origin}/gallery` },
+        { kind: "waitForSelector", selector: "[data-testid='gallery']", timeoutMs: 5_000 },
+      ]),
+    );
+
+    expect(result.status).toBe("blocked");
+    expect(result.provenance.blockedRequests).toEqual([
+      expect.objectContaining({
+        url: "https://tracking.example/pixel2.gif",
+        resourceType: "image",
+        reason: "off_allowlist",
+      }),
+    ]);
+    expect(hits.get("GET /img-redirect")).toBe(1);
+  });
+
+  it("follows a download redirect onto an allowlisted path and stores the final document", async () => {
+    let origin = "";
+    const { result, hits } = await runFixtureWithServer((serverOrigin) => {
+      origin = serverOrigin;
+      return makeTask(origin, [
+        ...loginSteps(origin),
+        {
+          kind: "downloadLinks",
+          selector: "a.redirected-download",
+          hrefAttribute: "href",
+          filenameAttribute: "data-filename",
+          mimeType: "application/pdf",
+        },
+      ]);
+    });
+
+    expect(result.errors).toEqual([]);
+    expect(result.status).toBe("completed");
+    expect(result.documents.map((document) => [document.filename, document.sourceUrl])).toEqual([
+      ["three.pdf", `${origin}/invoices/three.pdf`],
+    ]);
+    expect(result.storedDocuments).toHaveLength(1);
+    expect(hits.get("GET /dl/redirect-in")).toBe(1);
+    expect(hits.get("GET /invoices/three.pdf")).toBe(1);
+  });
+
+  it("refuses a download redirect that leaves the allowlist without storing anything", async () => {
+    const { result, hits } = await runFixtureWithServer((origin) =>
+      makeTask(origin, [
+        ...loginSteps(origin),
+        {
+          kind: "downloadLinks",
+          selector: "a.leaking-download",
+          hrefAttribute: "href",
+          filenameAttribute: "data-filename",
+          mimeType: "application/pdf",
+        },
+      ]),
+    );
+
+    expect(result.status).toBe("blocked");
+    expect(result.errors).toEqual(["download redirect blocked by portal network policy"]);
+    expect(result.storedDocuments).toEqual([]);
+    expect(result.documents).toEqual([]);
+    expect(result.provenance.blockedRequests).toEqual([
+      expect.objectContaining({ url: "https://evil.example/leak.pdf", reason: "off_allowlist" }),
+    ]);
+    expect(hits.get("GET /dl/redirect-out")).toBe(1);
+  });
+
   it("stops reading an oversized chunked download at the byte cap", async () => {
     const result = await runFixture(
       (origin) =>
@@ -118,6 +212,15 @@ describe.skipIf(!runBrowserTests)("LocalPlaywrightPortalTaskRunner browser fixtu
 
 interface RunFixtureOptions {
   maxDownloadBytes?: number;
+}
+
+/** Signs in with the fixture form so later downloads carry the session cookie. */
+function loginSteps(origin: string): PortalTaskStep[] {
+  return [
+    { kind: "navigate", url: `${origin}/login` },
+    { kind: "click", selector: "button.login" },
+    { kind: "waitForSelector", selector: "[data-testid='invoice-list']", timeoutMs: 5_000 },
+  ];
 }
 
 async function runFixture(
@@ -244,6 +347,36 @@ function handleFixtureRequest(request: IncomingMessage, response: ServerResponse
     response.end();
     return;
   }
+  if (url.pathname === "/start" && request.method === "GET") {
+    response.writeHead(302, { location: "/hop" });
+    response.end();
+    return;
+  }
+  if (url.pathname === "/hop" && request.method === "GET") {
+    response.writeHead(302, { location: "/invoices" });
+    response.end();
+    return;
+  }
+  if (url.pathname === "/gallery" && request.method === "GET") {
+    response.writeHead(200, { "content-type": "text/html" });
+    response.end(`<!doctype html><main data-testid="gallery"><img src="/img-redirect"></main>`);
+    return;
+  }
+  if (url.pathname === "/img-redirect" && request.method === "GET") {
+    response.writeHead(302, { location: "https://tracking.example/pixel2.gif" });
+    response.end();
+    return;
+  }
+  if (url.pathname === "/dl/redirect-in" && request.method === "GET") {
+    response.writeHead(302, { location: "/invoices/three.pdf" });
+    response.end();
+    return;
+  }
+  if (url.pathname === "/dl/redirect-out" && request.method === "GET") {
+    response.writeHead(302, { location: "https://evil.example/leak.pdf" });
+    response.end();
+    return;
+  }
   if (url.pathname === "/login-redirect" && request.method === "POST") {
     // A method-preserving redirect the guard can only observe, not abort.
     response.writeHead(307, { location: "/account/close" });
@@ -267,6 +400,8 @@ function handleFixtureRequest(request: IncomingMessage, response: ServerResponse
         <a class="invoice-download" href="/invoices/one.pdf" data-filename="one.pdf">One</a>
         <a class="invoice-download" href="/invoices/two.pdf" data-filename="two.pdf">Two</a>
         <a class="oversized-download" href="/oversized.pdf">Oversized</a>
+        <a class="redirected-download" href="/dl/redirect-in" data-filename="three.pdf">Three</a>
+        <a class="leaking-download" href="/dl/redirect-out" data-filename="leak.pdf">Leak</a>
         <button class="open-live" type="button">Live</button>
         <script>
           document.querySelector("button.open-live").addEventListener("click", () => {
