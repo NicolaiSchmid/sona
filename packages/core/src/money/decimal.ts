@@ -84,6 +84,12 @@ export function toScaledBigInt(value: string, scale: number): bigint {
   return rescale(parsed, scale);
 }
 
+/** Returns the canonical negation of a decimal string ("6360.00" → "-6360.00", "-1.5" → "1.5", "0" → "0"). */
+export function negateDecimal(value: string): string {
+  const parsed = parseScaled(value);
+  return fromScaledBigInt(-parsed.value, parsed.scale);
+}
+
 /**
  * Divides `numerator` by `denominator` rounding half away from zero. Both
  * operands are plain integers; callers scale them first so the quotient lands

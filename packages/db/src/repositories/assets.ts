@@ -9,14 +9,27 @@ import {
   type MoneyAmount,
 } from "@sona/core";
 import type { DbClient } from "../runner.js";
-import { optionalString, parseJson, requiredNumber, requiredString, row, rows } from "./helpers.js";
+import {
+  optionalNumber,
+  optionalString,
+  parseJson,
+  requiredNumber,
+  requiredString,
+  row,
+  rows,
+} from "./helpers.js";
 
-/** A generated depreciation transaction recorded for one asset-year. */
+/**
+ * A generated depreciation transaction recorded for one asset-year. The
+ * persistence-layer counterpart of core's `RecordedDepreciation`; callers add
+ * the ledger transaction's review state before planning.
+ */
 export interface RecordedDepreciationEntry {
   id: string;
   workspaceId: string;
   assetId: string;
-  scheduleId: string;
+  /** Schedule configuration the transaction was generated from. */
+  configId: string;
   year: number;
   transactionId: string;
   amount: MoneyAmount;
@@ -96,7 +109,13 @@ export class SqliteAssetRepository {
   /** Appends an improvement or disposal. Events are never updated or deleted. */
   async appendEvent(input: AssetEvent): Promise<void> {
     const event = assetEventSchema.parse(input);
-    await this.#requireAsset(event.workspaceId, event.assetId);
+    const asset = await this.#requireAsset(event.workspaceId, event.assetId);
+    if (
+      event.kind === "improvement" &&
+      !asset.components.some((component) => component.id === event.componentId)
+    ) {
+      throw new Error(`component ${event.componentId} does not belong to asset ${asset.id}`);
+    }
     const existing = row(
       this.#db
         .prepare("SELECT id FROM asset_events WHERE workspace_id = ? AND id = ?")
@@ -205,26 +224,31 @@ export class SqliteAssetRepository {
   }
 
   /**
-   * Records the transaction generated for an asset-year. Idempotent: if the
-   * year is already recorded, the existing entry is returned unchanged and the
-   * new input is ignored — recorded years are never rewritten.
+   * Records the transaction generated for an asset-year. Insert-only and
+   * idempotent by transaction id: recording the same transaction again
+   * returns the stored entry unchanged; nothing is ever updated. Several
+   * entries may exist for one year over time (superseded draft + replacement);
+   * the ledger's review state says which is live.
    */
   async recordDepreciationEntry(
     entry: RecordedDepreciationEntry,
   ): Promise<RecordedDepreciationEntry> {
-    const existing = await this.getDepreciationEntry(entry.workspaceId, entry.assetId, entry.year);
+    const existing = await this.getDepreciationEntryByTransaction(
+      entry.workspaceId,
+      entry.transactionId,
+    );
     if (existing !== undefined) {
       return existing;
     }
     this.#db
       .prepare(
-        "INSERT INTO asset_depreciation_entries (id, workspace_id, asset_id, schedule_id, year, transaction_id, amount, commodity, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO asset_depreciation_entries (id, workspace_id, asset_id, config_id, year, transaction_id, amount, commodity, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
       )
       .run(
         entry.id,
         entry.workspaceId,
         entry.assetId,
-        entry.scheduleId,
+        entry.configId,
         entry.year,
         entry.transactionId,
         entry.amount.amount,
@@ -234,17 +258,16 @@ export class SqliteAssetRepository {
     return entry;
   }
 
-  async getDepreciationEntry(
+  async getDepreciationEntryByTransaction(
     workspaceId: string,
-    assetId: string,
-    year: number,
+    transactionId: string,
   ): Promise<RecordedDepreciationEntry | undefined> {
     const result = row(
       this.#db
         .prepare(
-          "SELECT * FROM asset_depreciation_entries WHERE workspace_id = ? AND asset_id = ? AND year = ?",
+          "SELECT * FROM asset_depreciation_entries WHERE workspace_id = ? AND transaction_id = ?",
         )
-        .get(workspaceId, assetId, year),
+        .get(workspaceId, transactionId),
     );
     return result === undefined ? undefined : entryFromRow(result);
   }
@@ -256,16 +279,18 @@ export class SqliteAssetRepository {
     return rows(
       this.#db
         .prepare(
-          "SELECT * FROM asset_depreciation_entries WHERE workspace_id = ? AND asset_id = ? ORDER BY year",
+          "SELECT * FROM asset_depreciation_entries WHERE workspace_id = ? AND asset_id = ? ORDER BY year, created_at, id",
         )
         .all(workspaceId, assetId),
     ).map(entryFromRow);
   }
 
-  async #requireAsset(workspaceId: string, assetId: string): Promise<void> {
-    if ((await this.getById(workspaceId, assetId)) === undefined) {
+  async #requireAsset(workspaceId: string, assetId: string): Promise<Asset> {
+    const asset = await this.getById(workspaceId, assetId);
+    if (asset === undefined) {
       throw new Error("asset not found in workspace");
     }
+    return asset;
   }
 
   #assetFromRow(source: Record<string, unknown>): Asset {
@@ -361,7 +386,7 @@ function configFromRow(source: Record<string, unknown>): DepreciationScheduleCon
       residualValue === undefined || residualCommodity === undefined
         ? undefined
         : { amount: residualValue, commodity: residualCommodity },
-    roundingScale: source["rounding_scale"] ?? undefined,
+    roundingScale: optionalNumber(source, "rounding_scale"),
     expenseAccount: requiredString(source, "expense_account"),
     accumulatedDepreciationAccount: requiredString(source, "accumulated_depreciation_account"),
     createdAt: requiredString(source, "created_at"),
@@ -373,7 +398,7 @@ function entryFromRow(source: Record<string, unknown>): RecordedDepreciationEntr
     id: requiredString(source, "id"),
     workspaceId: requiredString(source, "workspace_id"),
     assetId: requiredString(source, "asset_id"),
-    scheduleId: requiredString(source, "schedule_id"),
+    configId: requiredString(source, "config_id"),
     year: requiredNumber(source, "year"),
     transactionId: requiredString(source, "transaction_id"),
     amount: {

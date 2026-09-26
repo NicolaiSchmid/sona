@@ -7,15 +7,15 @@
  * (negative amount). Drafts always require human review — nothing here
  * approves, suggests, or exports.
  *
- * Generation is idempotent per asset-year: rows that already have a recorded
- * transaction are skipped, never rewritten. If a recomputed schedule disagrees
- * with an already-recorded year, the difference is reported so the user can
+ * Generation is idempotent per asset-year: rows that already have a live
+ * recorded transaction are skipped, never rewritten. If a recomputed schedule
+ * disagrees with what is recorded, the difference is reported so the user can
  * decide on an explicit adjustment posting.
  */
 import type { EvidenceLink } from "../evidence/types";
 import { validateBalancedTransaction } from "../ledger/balance";
 import type { LedgerPosting, LedgerTransaction } from "../ledger/types";
-import { isZeroDecimal, sumDecimals } from "../money/decimal";
+import { isZeroDecimal, negateDecimal, sumDecimals } from "../money/decimal";
 import type { MoneyAmount } from "../money/types";
 import type { ReviewState } from "../review/types";
 import {
@@ -23,7 +23,7 @@ import {
   type DepreciationScheduleRow,
   describeDepreciationMethod,
 } from "./schedule";
-import type { Asset, DepreciationScheduleConfig } from "./types";
+import { type Asset, DepreciationError, type DepreciationScheduleConfig } from "./types";
 
 /** Evidence-graph record type names used for asset-related links. */
 export const ASSET_RECORD_TYPES = {
@@ -35,15 +35,17 @@ export const ASSET_RECORD_TYPES = {
 
 /**
  * Deterministic transaction id for an asset-year under a configuration
- * version. Deterministic ids make regeneration reproducible; idempotency is
- * still enforced per asset-year via {@link planDepreciationDrafts}.
+ * version. `attempt` distinguishes a regenerated draft from superseded
+ * predecessors for the same year and version (0 = first generation).
  */
 export function depreciationTransactionId(
   assetId: string,
   configVersion: number,
   year: number,
+  attempt = 0,
 ): string {
-  return `depr:${assetId}:v${configVersion}:${year}`;
+  const base = `depr:${assetId}:v${configVersion}:${year}`;
+  return attempt > 0 ? `${base}:r${attempt}` : base;
 }
 
 export interface DepreciationDraft {
@@ -62,6 +64,8 @@ export interface BuildDepreciationDraftInput {
   row: DepreciationScheduleRow;
   /** ISO timestamp recorded as `createdAt` on the transaction and links. */
   createdAt: string;
+  /** Number of superseded transactions already recorded for this year (default 0). */
+  attempt?: number;
 }
 
 /** Booking date: the disposal date in a disposal year, otherwise 31 December. */
@@ -75,11 +79,18 @@ function bookedOnFor(schedule: DepreciationSchedule, row: DepreciationScheduleRo
 export function buildDepreciationDraft(input: BuildDepreciationDraftInput): DepreciationDraft {
   const { asset, config, schedule, row } = input;
   if (schedule.assetId !== asset.id || schedule.configId !== config.id) {
-    throw new Error(`Schedule does not belong to asset ${asset.id} / config ${config.id}`);
+    throw new DepreciationError(
+      `Schedule does not belong to asset ${asset.id} / config ${config.id}`,
+    );
   }
-  const transactionId = depreciationTransactionId(asset.id, config.version, row.year);
+  const transactionId = depreciationTransactionId(
+    asset.id,
+    config.version,
+    row.year,
+    input.attempt,
+  );
   const debit: MoneyAmount = { amount: row.amount, commodity: schedule.commodity };
-  const credit: MoneyAmount = { amount: `-${row.amount}`, commodity: schedule.commodity };
+  const credit: MoneyAmount = { amount: negateDecimal(row.amount), commodity: schedule.commodity };
   const memo = `configured rule v${config.version}: ${describeDepreciationMethod(config.method)}`;
 
   const postings: LedgerPosting[] = [
@@ -101,7 +112,7 @@ export function buildDepreciationDraft(input: BuildDepreciationDraftInput): Depr
 
   const balance = validateBalancedTransaction(postings);
   if (!balance.balanced) {
-    throw new Error(
+    throw new DepreciationError(
       `Depreciation draft ${transactionId} is unbalanced: ${balance.errors.join("; ")}`,
     );
   }
@@ -152,7 +163,10 @@ export function buildDepreciationDraft(input: BuildDepreciationDraftInput): Depr
   };
 }
 
-/** A depreciation transaction already recorded for an asset-year. */
+/**
+ * A depreciation transaction already recorded for an asset-year, with the
+ * review state read from the ledger. Produced by the persistence layer.
+ */
 export interface RecordedDepreciation {
   year: number;
   transactionId: string;
@@ -166,11 +180,21 @@ export interface SkippedDepreciationYear {
   reason: "already_recorded";
 }
 
-/** A recorded year whose amount no longer matches the recomputed schedule. */
+export type DepreciationDiscrepancyReason =
+  /** The recorded amount differs from the recomputed schedule row. */
+  | "amount_mismatch"
+  /** A live transaction exists for a year the current schedule no longer covers. */
+  | "not_in_schedule"
+  /** More than one live transaction is recorded for the same year. */
+  | "duplicate_recording";
+
+/** A recorded year that disagrees with the recomputed schedule. */
 export interface DepreciationDiscrepancy {
   year: number;
   transactionId: string;
+  reason: DepreciationDiscrepancyReason;
   recordedAmount: string;
+  /** "0" when the year is no longer scheduled. */
   scheduledAmount: string;
   reviewState: ReviewState;
   /** Never auto-corrected: the user decides on an explicit adjustment posting. */
@@ -194,25 +218,54 @@ export interface PlanDepreciationDraftsInput {
   createdAt: string;
 }
 
+function sameAmount(recorded: MoneyAmount, scheduled: string, commodity: string): boolean {
+  return (
+    recorded.commodity === commodity &&
+    isZeroDecimal(sumDecimals([recorded.amount, negateDecimal(scheduled)]))
+  );
+}
+
 /**
  * Decides which schedule rows still need a draft transaction. Years with a
  * live (non-superseded) recorded transaction are skipped regardless of review
- * state, so reviewed postings are never modified by recomputation.
+ * state, so reviewed postings are never modified by recomputation. Superseded
+ * recordings free the year for regeneration under a fresh transaction id.
  */
 export function planDepreciationDrafts(input: PlanDepreciationDraftsInput): DepreciationPlan {
-  const live = new Map<number, RecordedDepreciation>();
+  const live = new Map<number, RecordedDepreciation[]>();
+  const supersededCount = new Map<number, number>();
   for (const entry of input.recorded) {
-    if (entry.reviewState !== "superseded") {
-      live.set(entry.year, entry);
+    if (entry.reviewState === "superseded") {
+      supersededCount.set(entry.year, (supersededCount.get(entry.year) ?? 0) + 1);
+      continue;
     }
+    const bucket = live.get(entry.year) ?? [];
+    bucket.push(entry);
+    live.set(entry.year, bucket);
   }
 
   const plan: DepreciationPlan = { create: [], skipped: [], discrepancies: [] };
+  const discrepancy = (
+    entry: RecordedDepreciation,
+    reason: DepreciationDiscrepancyReason,
+    scheduledAmount: string,
+  ): DepreciationDiscrepancy => ({
+    year: entry.year,
+    transactionId: entry.transactionId,
+    reason,
+    recordedAmount: entry.amount.amount,
+    scheduledAmount,
+    reviewState: entry.reviewState,
+    resolution: "adjustment_posting_required",
+  });
+
+  const scheduledYears = new Set<number>();
   for (const row of input.schedule.rows) {
     if (row.year > input.throughYear) {
       break;
     }
-    const existing = live.get(row.year);
+    scheduledYears.add(row.year);
+    const [existing, ...duplicates] = live.get(row.year) ?? [];
     if (existing === undefined) {
       plan.create.push(
         buildDepreciationDraft({
@@ -221,6 +274,7 @@ export function planDepreciationDrafts(input: PlanDepreciationDraftsInput): Depr
           schedule: input.schedule,
           row,
           createdAt: input.createdAt,
+          attempt: supersededCount.get(row.year) ?? 0,
         }),
       );
       continue;
@@ -230,19 +284,21 @@ export function planDepreciationDrafts(input: PlanDepreciationDraftsInput): Depr
       transactionId: existing.transactionId,
       reason: "already_recorded",
     });
-    const sameAmount =
-      existing.amount.commodity === input.schedule.commodity &&
-      isZeroDecimal(sumDecimals([existing.amount.amount, `-${row.amount}`]));
-    if (!sameAmount) {
-      plan.discrepancies.push({
-        year: row.year,
-        transactionId: existing.transactionId,
-        recordedAmount: existing.amount.amount,
-        scheduledAmount: row.amount,
-        reviewState: existing.reviewState,
-        resolution: "adjustment_posting_required",
-      });
+    if (!sameAmount(existing.amount, row.amount, input.schedule.commodity)) {
+      plan.discrepancies.push(discrepancy(existing, "amount_mismatch", row.amount));
+    }
+    for (const duplicate of duplicates) {
+      plan.discrepancies.push(discrepancy(duplicate, "duplicate_recording", row.amount));
     }
   }
+
+  for (const [year, entries] of live) {
+    if (year <= input.throughYear && !scheduledYears.has(year)) {
+      for (const entry of entries) {
+        plan.discrepancies.push(discrepancy(entry, "not_in_schedule", "0"));
+      }
+    }
+  }
+
   return plan;
 }

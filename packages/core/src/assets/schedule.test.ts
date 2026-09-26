@@ -12,11 +12,15 @@ import {
   allocateAcquisitionCosts,
   computeDepreciationSchedule,
   type DepreciationSchedule,
-  DepreciationScheduleError,
   type DepreciationScheduleRow,
   describeDepreciationMethod,
 } from "./schedule";
-import type { Asset, AssetComponent, DepreciationScheduleConfig } from "./types";
+import {
+  type Asset,
+  type AssetComponent,
+  DepreciationError,
+  type DepreciationScheduleConfig,
+} from "./types";
 
 function rowFor(schedule: DepreciationSchedule, year: number) {
   const row = schedule.rows.find((r) => r.year === year);
@@ -99,7 +103,7 @@ describe("allocateAcquisitionCosts", () => {
       ...SAMPLE_PROPERTY,
       components: [{ ...componentOf(SAMPLE_PROPERTY, 0), cost: { amount: "0", commodity: "EUR" } }],
     };
-    expect(() => allocateAcquisitionCosts(asset)).toThrow(DepreciationScheduleError);
+    expect(() => allocateAcquisitionCosts(asset)).toThrow(DepreciationError);
   });
 });
 
@@ -344,13 +348,13 @@ describe("computeDepreciationSchedule — improvements", () => {
         asset: SAMPLE_PROPERTY,
         config: { ...SAMPLE_PROPERTY_CONFIG, assetId: "asset_laptop" },
       }),
-    ).toThrow(DepreciationScheduleError);
+    ).toThrow(DepreciationError);
     expect(() =>
       computeDepreciationSchedule({
         asset: SAMPLE_PROPERTY,
         config: { ...SAMPLE_PROPERTY_CONFIG, workspaceId: "ws_2" },
       }),
-    ).toThrow(DepreciationScheduleError);
+    ).toThrow(DepreciationError);
   });
 });
 
@@ -675,6 +679,43 @@ describe("computeDepreciationSchedule — termination and degenerate inputs", ()
     ).toThrow(/did not terminate within 200 years/);
   });
 
+  it("refuses a disposal dated before the acquisition month of the same year", () => {
+    expect(() =>
+      computeDepreciationSchedule({
+        asset: SAMPLE_PROPERTY,
+        config: SAMPLE_PROPERTY_CONFIG,
+        events: [{ ...SAMPLE_DISPOSAL, occurredOn: "2024-03-31" }],
+      }),
+    ).toThrow(/before the asset was acquired/);
+    expect(() =>
+      computeDepreciationSchedule({
+        asset: SAMPLE_PROPERTY,
+        config: SAMPLE_PROPERTY_CONFIG,
+        events: [{ ...SAMPLE_IMPROVEMENT, occurredOn: "2024-02-01" }],
+      }),
+    ).toThrow(/before the asset was acquired/);
+  });
+
+  it("flags an improvement that re-opens a fully depreciated schedule", () => {
+    const s = computeDepreciationSchedule({
+      asset: SAMPLE_EQUIPMENT,
+      config: { ...SAMPLE_EQUIPMENT_CONFIG, proRataTemporis: false },
+      events: [
+        {
+          ...SAMPLE_IMPROVEMENT,
+          id: "evt_late",
+          assetId: "asset_laptop",
+          componentId: "cmp_laptop",
+          occurredOn: "2031-02-01",
+          amount: { amount: "2400.00", commodity: "EUR" },
+        },
+      ],
+    });
+    expect(lastRow(s).year).toBe(2031);
+    expect(lastRow(s).notes).toContain("post_completion_improvement");
+    expect(totalOf(s)).toBe("14400.00");
+  });
+
   it("refuses a basis so small every yearly amount rounds to zero", () => {
     const asset: Asset = {
       ...SAMPLE_EQUIPMENT,
@@ -690,7 +731,7 @@ describe("computeDepreciationSchedule — termination and degenerate inputs", ()
           method: { kind: "linear_percentage", annualRatePercent: "2" },
         },
       }),
-    ).toThrow(DepreciationScheduleError);
+    ).toThrow(/rounds to zero/);
   });
 
   it("yields an empty, complete schedule for an asset with no depreciable component", () => {

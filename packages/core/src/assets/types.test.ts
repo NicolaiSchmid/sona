@@ -74,6 +74,16 @@ describe("depreciationScheduleConfigSchema", () => {
     ).toBe(false);
   });
 
+  it("caps the rate at four fractional digits", () => {
+    const parse = (annualRatePercent: string) =>
+      depreciationScheduleConfigSchema.safeParse({
+        ...SAMPLE_PROPERTY_CONFIG,
+        method: { kind: "linear_percentage", annualRatePercent },
+      }).success;
+    expect(parse("3.3333")).toBe(true);
+    expect(parse("3.33333")).toBe(false);
+  });
+
   it("requires positive versions and account paths", () => {
     expect(
       depreciationScheduleConfigSchema.safeParse({ ...SAMPLE_PROPERTY_CONFIG, version: 0 }).success,

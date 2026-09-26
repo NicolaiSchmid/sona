@@ -12,24 +12,23 @@
  * so each generated row can name the exact configuration that produced it.
  */
 import { z } from "zod";
-import { isValidDecimalString, isZeroDecimal } from "../money/decimal";
-import type { MoneyAmount } from "../money/types";
+import { isZeroDecimal } from "../money/decimal";
+import { decimalStringSchema, type MoneyAmount, moneyAmountSchema } from "../money/types";
+
+/** Thrown when asset configuration or history cannot produce a valid schedule or posting. */
+export class DepreciationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "DepreciationError";
+  }
+}
 
 /** ISO calendar date, YYYY-MM-DD. */
 const isoDateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "expected YYYY-MM-DD");
 
-const decimalStringSchema = z
-  .string()
-  .refine(isValidDecimalString, { message: "expected a decimal string" });
-
 const nonNegativeDecimalSchema = decimalStringSchema.refine((v) => !v.startsWith("-"), {
   message: "expected a non-negative decimal string",
 });
-
-export const moneyAmountSchema = z.object({
-  amount: decimalStringSchema,
-  commodity: z.string().min(1),
-}) satisfies z.ZodType<MoneyAmount>;
 
 const nonNegativeMoneySchema = moneyAmountSchema.extend({
   amount: nonNegativeDecimalSchema,
@@ -180,13 +179,20 @@ export type AssetEventKind = AssetEvent["kind"];
  * How the annual amount is derived. Both are user-configured data: Sona does
  * not pick a rate or useful life on the user's behalf.
  */
+/** Maximum fractional digits of a configured percentage rate (e.g. "2.5", "3.3333"). */
+export const DEPRECIATION_RATE_SCALE = 4;
+
+const rateScaleRe = new RegExp(`^\\d+(\\.\\d{1,${DEPRECIATION_RATE_SCALE}})?$`);
+
 export const depreciationMethodSchema = z.discriminatedUnion("kind", [
   z.object({
     kind: z.literal("linear_percentage"),
     /** Annual rate in percent of the depreciable basis, e.g. "2", "2.5", "3". */
-    annualRatePercent: nonNegativeDecimalSchema.refine((v) => !isZeroDecimal(v), {
-      message: "annual rate must be greater than zero",
-    }),
+    annualRatePercent: nonNegativeDecimalSchema
+      .refine((v) => !isZeroDecimal(v), { message: "annual rate must be greater than zero" })
+      .refine((v) => rateScaleRe.test(v), {
+        message: `annual rate supports at most ${DEPRECIATION_RATE_SCALE} fractional digits`,
+      }),
   }),
   z.object({
     kind: z.literal("linear_useful_life"),

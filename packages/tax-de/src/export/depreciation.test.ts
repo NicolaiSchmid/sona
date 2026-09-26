@@ -1,6 +1,12 @@
+import { computeDepreciationSchedule } from "@sona/core";
 import { describe, expect, it } from "vitest";
 import { generateDepreciationSection } from "./depreciation.js";
-import { SAMPLE_DEPRECIATION, SAMPLE_EQUIPMENT_DEPRECIATION } from "./fixtures.js";
+import {
+  SAMPLE_ASSET,
+  SAMPLE_DEPRECIATION,
+  SAMPLE_EQUIPMENT_DEPRECIATION,
+  SAMPLE_SCHEDULE_CONFIG,
+} from "./fixtures.js";
 
 describe("generateDepreciationSection", () => {
   it("emits a traceable row for the export year in final mode when reviewed", () => {
@@ -17,8 +23,8 @@ describe("generateDepreciationSection", () => {
       assetName: "Synthetic flat",
       assetKind: "real_estate",
       year: 2026,
-      scheduleConfigId: "cfg_flat_v1",
-      scheduleVersion: 1,
+      configId: "cfg_flat_v1",
+      configVersion: 1,
       configuredMethod: "linear 2 % per year",
       monthsInService: 12,
       depreciableBasis: "318000.00",
@@ -40,7 +46,12 @@ describe("generateDepreciationSection", () => {
     });
     expect(draftYear.rows).toEqual([]);
     expect(draftYear.excluded).toEqual([
-      { assetId: "asset_flat", year: 2025, reason: expect.stringContaining('"draft"') },
+      {
+        assetId: "asset_flat",
+        year: 2025,
+        transactionId: "depr:asset_flat:v1:2025",
+        reason: expect.stringContaining('"draft"'),
+      },
     ]);
 
     const notGenerated = generateDepreciationSection([SAMPLE_DEPRECIATION], {
@@ -75,6 +86,78 @@ describe("generateDepreciationSection", () => {
     expect(planned2027.rows[0]?.notes).toContain("review required");
   });
 
+  it("never exports a reviewed amount that the current schedule no longer produces", () => {
+    // Reviewed under v1 at 6 360; the schedule was later reconfigured to 3 %.
+    const v2 = {
+      ...SAMPLE_DEPRECIATION,
+      schedule: computeDepreciationSchedule({
+        asset: SAMPLE_ASSET,
+        config: {
+          ...SAMPLE_SCHEDULE_CONFIG,
+          id: "cfg_flat_v2",
+          version: 2,
+          method: { kind: "linear_percentage", annualRatePercent: "3" },
+        },
+      }),
+    };
+    const final = generateDepreciationSection([v2], { year: 2026, mode: "final" });
+    expect(final.rows).toEqual([]);
+    expect(final.excluded).toEqual([
+      {
+        assetId: "asset_flat",
+        year: 2026,
+        transactionId: "t_depr",
+        reason: expect.stringContaining("recorded amount 6360.00 EUR (config v1) differs"),
+      },
+    ]);
+
+    const draft = generateDepreciationSection([v2], { year: 2026, mode: "draft" });
+    expect(draft.rows[0]).toMatchObject({
+      amount: "9540.00",
+      recordedAmount: "6360.00",
+      recordedConfigVersion: 1,
+      configVersion: 2,
+      status: "user_reviewed",
+    });
+    expect(draft.rows[0]?.notes).toContain("differs from configured schedule");
+    expect(draft.rows[0]?.notes).toContain("review required");
+  });
+
+  it("surfaces a recorded transaction for a year the current schedule no longer covers", () => {
+    const disposed = {
+      ...SAMPLE_DEPRECIATION,
+      schedule: computeDepreciationSchedule({
+        asset: SAMPLE_ASSET,
+        config: SAMPLE_SCHEDULE_CONFIG,
+        events: [
+          {
+            kind: "disposal",
+            id: "evt_sale",
+            workspaceId: "ws_1",
+            assetId: "asset_flat",
+            occurredOn: "2025-06-30",
+            description: "Sold",
+            evidenceDocumentIds: ["doc_sale"],
+            createdAt: "2025-07-01T00:00:00Z",
+          },
+        ],
+      }),
+    };
+    const { rows, excluded } = generateDepreciationSection([disposed], {
+      year: 2026,
+      mode: "final",
+    });
+    expect(rows).toEqual([]);
+    expect(excluded).toEqual([
+      {
+        assetId: "asset_flat",
+        year: 2026,
+        transactionId: "t_depr",
+        reason: expect.stringContaining("outside the current schedule"),
+      },
+    ]);
+  });
+
   it("ignores superseded transactions when resolving a year's status", () => {
     const { rows } = generateDepreciationSection(
       [
@@ -85,6 +168,8 @@ describe("generateDepreciationSection", () => {
               year: 2026,
               transactionId: "t_old",
               postingIds: ["p_old"],
+              amount: { amount: "6360.00", commodity: "EUR" },
+              configVersion: 1,
               reviewState: "superseded",
             },
           ],
@@ -148,6 +233,8 @@ describe("generateDepreciationSection", () => {
               year: 2026,
               transactionId: "t_old",
               postingIds: ["p_old"],
+              amount: { amount: "6360.00", commodity: "EUR" },
+              configVersion: 1,
               reviewState: "superseded",
             },
           ],
@@ -157,7 +244,12 @@ describe("generateDepreciationSection", () => {
     );
     expect(rows).toEqual([]);
     expect(excluded).toEqual([
-      { assetId: "asset_flat", year: 2026, reason: "no depreciation transaction generated yet" },
+      {
+        assetId: "asset_flat",
+        year: 2026,
+        transactionId: undefined,
+        reason: "no depreciation transaction generated yet",
+      },
     ]);
   });
 
@@ -171,7 +263,7 @@ describe("generateDepreciationSection", () => {
     const workstation = rows.find((r) => r.assetId === "asset_workstation");
     expect(workstation).toMatchObject({
       assetKind: "equipment",
-      scheduleConfigId: "cfg_workstation_v1",
+      configId: "cfg_workstation_v1",
       configuredMethod: "linear over 3 years",
       monthsInService: 12,
       amount: "4000.00",

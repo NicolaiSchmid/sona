@@ -5,6 +5,7 @@ import {
   InvalidDecimalError,
   isValidDecimalString,
   isZeroDecimal,
+  negateDecimal,
   sumDecimals,
   toScaledBigInt,
 } from "./decimal";
@@ -59,6 +60,13 @@ describe("scaled bigint helpers", () => {
   it("refuses to drop fractional digits when narrowing", () => {
     expect(() => toScaledBigInt("1.234", 2)).toThrow(/fractional/);
     expect(() => toScaledBigInt("nope", 2)).toThrow(InvalidDecimalError);
+  });
+
+  it("negates decimals canonically", () => {
+    expect(negateDecimal("6360.00")).toBe("-6360.00");
+    expect(negateDecimal("-1.5")).toBe("1.5");
+    expect(negateDecimal("0")).toBe("0");
+    expect(negateDecimal("0.00")).toBe("0.00");
   });
 
   it("divides with deterministic half-away-from-zero rounding", () => {

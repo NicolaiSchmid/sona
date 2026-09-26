@@ -165,7 +165,6 @@ describe("SqliteAssetRepository", () => {
           id: "asset_other",
           workspaceId: "ws_2",
           name: "Other",
-          components: property().components.map((c) => ({ ...c, id: `${c.id}_ws2` })),
         }),
       );
       await repo.appendEvent(improvement);
@@ -237,26 +236,42 @@ describe("SqliteAssetRepository", () => {
     }
   });
 
-  it("records one depreciation entry per asset-year and never rewrites it", async () => {
+  it("records depreciation entries insert-only, idempotent by transaction id", async () => {
     const { db, close } = createTestDatabase();
     try {
       const repo = new SqliteAssetRepository(db);
       await repo.create(property());
       await repo.saveScheduleConfig(config());
       const first = await repo.recordDepreciationEntry(entry(2024));
+      // Same transaction again: the stored entry wins, nothing is rewritten.
       const again = await repo.recordDepreciationEntry({
         ...entry(2024),
         id: "entry_dup",
-        transactionId: "tx_other",
         amount: { amount: "999.00", commodity: "EUR" },
       });
       expect(first).toEqual(entry(2024));
       expect(again).toEqual(entry(2024));
+      // A replacement transaction for the same year is a new history row.
+      await repo.recordDepreciationEntry({
+        ...entry(2024),
+        id: "entry_2024_r1",
+        transactionId: "depr:asset_flat:v1:2024:r1",
+        createdAt: "2026-02-01T00:00:00Z",
+      });
       await repo.recordDepreciationEntry(entry(2025));
-      expect((await repo.listDepreciationEntries("ws_1", "asset_flat")).map((e) => e.year)).toEqual(
-        [2024, 2025],
-      );
-      expect(await repo.getDepreciationEntry("ws_1", "asset_flat", 2025)).toEqual(entry(2025));
+      expect(
+        (await repo.listDepreciationEntries("ws_1", "asset_flat")).map((e) => e.transactionId),
+      ).toEqual([
+        "depr:asset_flat:v1:2024",
+        "depr:asset_flat:v1:2024:r1",
+        "depr:asset_flat:v1:2025",
+      ]);
+      expect(
+        await repo.getDepreciationEntryByTransaction("ws_1", "depr:asset_flat:v1:2025"),
+      ).toEqual(entry(2025));
+      expect(
+        await repo.getDepreciationEntryByTransaction("ws_2", "depr:asset_flat:v1:2025"),
+      ).toBeUndefined();
     } finally {
       close();
     }
@@ -310,21 +325,39 @@ describe("SqliteAssetRepository", () => {
         property({
           id: "asset_other",
           workspaceId: "ws_2",
-          components: property().components.map((c) => ({ ...c, id: `${c.id}_ws2` })),
         }),
       );
-      // The asset exists in ws_2, so the repository's own check passes; only the
-      // composite (workspace_id, component_id) foreign key can refuse this.
+      // ws_1 has a component ws_2's asset does not; the repository check and the
+      // composite (workspace_id, asset_id, component_id) foreign key both refuse.
+      await repo.create(
+        property({
+          id: "asset_third",
+          components: [
+            {
+              id: "cmp_only_ws1",
+              role: "whole_asset",
+              label: "Third",
+              cost: { amount: "1000.00", commodity: "EUR" },
+              depreciable: true,
+            },
+          ],
+        }),
+      );
       await expect(
         repo.appendEvent({
           ...improvement,
           id: "evt_cross",
           workspaceId: "ws_2",
           assetId: "asset_other",
-          componentId: "cmp_building",
+          componentId: "cmp_only_ws1",
         }),
-      ).rejects.toThrow();
+      ).rejects.toThrow(/does not belong to asset/);
+      // Same workspace, wrong asset.
+      await expect(
+        repo.appendEvent({ ...improvement, id: "evt_wrong_asset", componentId: "cmp_only_ws1" }),
+      ).rejects.toThrow(/does not belong to asset/);
       expect(await repo.listEvents("ws_2", "asset_other")).toEqual([]);
+      expect(await repo.listEvents("ws_1", "asset_flat")).toEqual([]);
     } finally {
       close();
     }
@@ -379,7 +412,6 @@ describe("SqliteAssetRepository", () => {
         property({
           id: "asset_other",
           workspaceId: "ws_2",
-          components: property().components.map((c) => ({ ...c, id: `${c.id}_ws2` })),
         }),
       );
       await repo.saveScheduleConfig(
@@ -387,11 +419,11 @@ describe("SqliteAssetRepository", () => {
       );
 
       await expect(
-        repo.recordDepreciationEntry({ ...entry(2024), scheduleId: "cfg_missing" }),
+        repo.recordDepreciationEntry({ ...entry(2024), configId: "cfg_missing" }),
       ).rejects.toThrow();
       // Config exists, but in another workspace.
       await expect(
-        repo.recordDepreciationEntry({ ...entry(2024), scheduleId: "cfg_ws2" }),
+        repo.recordDepreciationEntry({ ...entry(2024), configId: "cfg_ws2" }),
       ).rejects.toThrow();
       expect(await repo.listDepreciationEntries("ws_1", "asset_flat")).toEqual([]);
     } finally {
@@ -422,13 +454,17 @@ describe("SqliteAssetRepository", () => {
     const { db, close } = createTestDatabase();
     try {
       const repo = new SqliteAssetRepository(db);
-      await repo.create(property());
-      // Component ids are a global primary key, so reusing them collides even
-      // in another workspace; the whole create must be atomic.
+      // Plant a component row that will collide on (workspace_id, asset_id, id)
+      // once the asset is created; the whole create must roll back.
+      db.exec("PRAGMA foreign_keys = OFF");
+      db.prepare(
+        "INSERT INTO asset_components (id, workspace_id, asset_id, position, role, label, cost, depreciable) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+      ).run("cmp_building", "ws_2", "asset_colliding", 9, "building", "Orphan", "1.00", 1);
+      db.exec("PRAGMA foreign_keys = ON");
       await expect(
-        repo.create(property({ id: "asset_dup_components", workspaceId: "ws_2" })),
-      ).rejects.toThrow();
-      expect(await repo.getById("ws_2", "asset_dup_components")).toBeUndefined();
+        repo.create(property({ id: "asset_colliding", workspaceId: "ws_2" })),
+      ).rejects.toThrow(/UNIQUE|PRIMARY KEY/i);
+      expect(await repo.getById("ws_2", "asset_colliding")).toBeUndefined();
       expect(await repo.list("ws_2")).toEqual([]);
     } finally {
       close();
@@ -441,7 +477,7 @@ function entry(year: number): RecordedDepreciationEntry {
     id: `entry_${year}`,
     workspaceId: "ws_1",
     assetId: "asset_flat",
-    scheduleId: "cfg_v1",
+    configId: "cfg_v1",
     year,
     transactionId: `depr:asset_flat:v1:${year}`,
     amount: { amount: year === 2024 ? "3180.00" : "6360.00", commodity: "EUR" },

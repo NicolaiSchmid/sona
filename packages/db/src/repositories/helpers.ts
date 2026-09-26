@@ -72,6 +72,17 @@ export function requiredLiteral<T extends string>(
   return value;
 }
 
+export function optionalNumber(source: Row, key: string): number | undefined {
+  const value = source[key];
+  if (value === null || value === undefined) {
+    return undefined;
+  }
+  if (typeof value !== "number") {
+    throw new Error(`database column ${key} was not a number`);
+  }
+  return value;
+}
+
 export function parseJson(value: string): JsonValue {
   return JSON.parse(value) as JsonValue;
 }
