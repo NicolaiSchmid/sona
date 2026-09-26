@@ -10,6 +10,15 @@ export const sonaTaxDeVersion = "0.0.0" as const;
 
 export { matchesAccountPattern } from "./export/accounts.js";
 export {
+  type DepreciationExportRow,
+  type DepreciationRowStatus,
+  type DepreciationScheduleExportInput,
+  type DepreciationSectionOptions,
+  type DepreciationSectionResult,
+  type DepreciationTransactionRef,
+  generateDepreciationSection,
+} from "./export/depreciation.js";
+export {
   type GenerateOptions,
   type GenerateResult,
   generateExportLines,

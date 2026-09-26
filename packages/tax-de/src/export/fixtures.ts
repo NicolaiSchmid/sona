@@ -1,7 +1,84 @@
 /**
- * Synthetic ledger postings for tax export tests. No real financial data.
+ * Synthetic ledger postings and depreciation schedules for tax export tests.
+ * No real financial data.
  */
+import {
+  type Asset,
+  computeDepreciationSchedule,
+  type DepreciationScheduleConfig,
+} from "@sona/core";
+import type { DepreciationScheduleExportInput } from "./depreciation.js";
 import type { TaxPostingInput } from "./types.js";
+
+/** Rental flat acquired 2024-07; 2 % linear on a 318 000 building basis → 6 360 per full year. */
+export const SAMPLE_ASSET: Asset = {
+  id: "asset_flat",
+  workspaceId: "ws_1",
+  kind: "real_estate",
+  name: "Synthetic flat",
+  commodity: "EUR",
+  acquiredOn: "2024-07-15",
+  components: [
+    {
+      id: "cmp_building",
+      role: "building",
+      label: "Building",
+      cost: { amount: "300000.00", commodity: "EUR" },
+      depreciable: true,
+    },
+    {
+      id: "cmp_land",
+      role: "land",
+      label: "Land",
+      cost: { amount: "100000.00", commodity: "EUR" },
+      depreciable: false,
+    },
+  ],
+  acquisitionSideCosts: [
+    {
+      id: "sc_notary",
+      label: "Notary and transfer tax",
+      amount: { amount: "24000.00", commodity: "EUR" },
+      evidenceDocumentIds: ["doc_notary"],
+    },
+  ],
+  evidenceDocumentIds: ["doc_2"],
+  createdAt: "2026-01-01T00:00:00Z",
+};
+
+export const SAMPLE_SCHEDULE_CONFIG: DepreciationScheduleConfig = {
+  id: "cfg_flat_v1",
+  workspaceId: "ws_1",
+  assetId: "asset_flat",
+  version: 1,
+  method: { kind: "linear_percentage", annualRatePercent: "2" },
+  proRataTemporis: true,
+  expenseAccount: "Expenses:RealEstate:Depreciation:Flat",
+  accumulatedDepreciationAccount: "Assets:RealEstate:Flat:AccumulatedDepreciation",
+  createdAt: "2026-01-01T00:00:00Z",
+};
+
+/** The 2026 depreciation posting (`p_depr`) is generated and user-reviewed; 2025 is a draft. */
+export const SAMPLE_DEPRECIATION: DepreciationScheduleExportInput = {
+  assetId: SAMPLE_ASSET.id,
+  assetName: SAMPLE_ASSET.name,
+  assetKind: SAMPLE_ASSET.kind,
+  schedule: computeDepreciationSchedule({ asset: SAMPLE_ASSET, config: SAMPLE_SCHEDULE_CONFIG }),
+  transactions: [
+    {
+      year: 2025,
+      transactionId: "depr:asset_flat:v1:2025",
+      postingIds: ["depr:asset_flat:v1:2025:expense", "depr:asset_flat:v1:2025:accumulated"],
+      reviewState: "draft",
+    },
+    {
+      year: 2026,
+      transactionId: "t_depr",
+      postingIds: ["p_depr", "p_depr_accumulated"],
+      reviewState: "user_reviewed",
+    },
+  ],
+};
 
 export const SAMPLE_POSTINGS: TaxPostingInput[] = [
   {

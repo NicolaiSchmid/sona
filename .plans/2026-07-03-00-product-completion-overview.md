@@ -25,7 +25,7 @@ Index and sequencing for all Sona implementation plans, from foundation to a com
 | 13 | `2026-07-03-13-email-invoice-ingestion.md` | planned |
 | 14 | `2026-07-03-14-browser-portal-runner.md` | planned |
 | 15 | `2026-07-03-15-mcp-facade-wiring.md` | planned |
-| 16 | `2026-07-03-16-assets-depreciation.md` | planned |
+| 16 | `2026-07-03-16-assets-depreciation.md` | done |
 | 17 | `2026-07-03-17-portfolio-support.md` | planned |
 | 18 | `2026-07-03-18-web-review-ui.md` | planned |
 | 19 | `2026-07-03-19-auth-tenancy.md` | planned |
