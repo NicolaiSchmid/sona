@@ -55,4 +55,60 @@ describe("session cookies", () => {
     expect(readCookie("theme=dark", "sona_session")).toBeUndefined();
     expect(readCookie(undefined, "sona_session")).toBeUndefined();
   });
+
+  it("tolerates irregular whitespace and matches the cookie name exactly", () => {
+    expect(readCookie("  sona_session =  sona_sess_x  ;theme=dark", "sona_session")).toBe(
+      "sona_sess_x",
+    );
+    expect(readCookie("sona_session=sona_sess_x", "sona_session")).toBe("sona_sess_x");
+    // Prefix, suffix, and case variants are different cookies.
+    expect(readCookie("sona_session2=x; xsona_session=y", "sona_session")).toBeUndefined();
+    expect(readCookie("SONA_SESSION=x", "sona_session")).toBeUndefined();
+    // Empty and malformed pairs are skipped rather than matched.
+    expect(readCookie("; ; sona_session; other=1", "sona_session")).toBeUndefined();
+    expect(readCookie("", "sona_session")).toBeUndefined();
+  });
+
+  it("returns the first value when a name repeats and keeps '=' inside values", () => {
+    expect(readCookie("sona_session=first; sona_session=second", "sona_session")).toBe("first");
+    expect(readCookie("sona_session=a=b=c", "sona_session")).toBe("a=b=c");
+    expect(readCookie("sona_session=", "sona_session")).toBe("");
+    // Quoted values are returned verbatim; the prefix check downstream rejects them.
+    expect(readCookie('sona_session="sona_sess_x"', "sona_session")).toBe('"sona_sess_x"');
+  });
+
+  it("serializes Max-Age without Expires when only a lifetime is given", () => {
+    const header = serializeCookie({
+      ...sessionCookie("tok", expires),
+      expires: undefined,
+      maxAge: 3600,
+    });
+    expect(header).toBe("sona_session=tok; Path=/; Max-Age=3600; HttpOnly; Secure; SameSite=Lax");
+    expect(header).not.toContain("Expires=");
+  });
+
+  it("rejects the separator and whitespace characters cookies cannot carry", () => {
+    for (const value of ["a b", 'say"hi"', "a,b", "back\\slash", "tab\there"]) {
+      expect(() => serializeCookie(sessionCookie(value, expires))).toThrow(/value/);
+    }
+    // The empty value used for clearing is fine; so is the full base64url alphabet.
+    expect(() => serializeCookie(sessionCookie("", expires))).not.toThrow();
+    expect(() =>
+      serializeCookie(sessionCookie("sona_sess_AZaz09-_~!#$%&'()*+./:<>?@[]^`{|}", expires)),
+    ).not.toThrow();
+    for (const name of ["sid;x", "sid=x", "sid,x", "(sid)", ""]) {
+      expect(() => serializeCookie(sessionCookie("v", expires, { name }))).toThrow(/name/);
+    }
+  });
+
+  it("keeps the clearing cookie's name, path, and domain aligned with the live cookie", () => {
+    const options = { name: "sid", path: "/app", domain: "app.sona.test", secure: false };
+    const live = serializeCookie(sessionCookie("tok", expires, options));
+    const clear = serializeCookie(clearSessionCookie(options));
+    expect(clear.startsWith("sid=;")).toBe(true);
+    expect(clear).toContain("Path=/app");
+    expect(clear).toContain("Domain=app.sona.test");
+    expect(clear).not.toContain("Secure");
+    expect(live).not.toContain("Max-Age");
+  });
 });

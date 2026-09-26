@@ -84,6 +84,73 @@ describe("totp", () => {
     expect(() => base32Decode("not!base32")).toThrow(/base32/);
   });
 
+  it("decodes lower-case and padded base32 the same as canonical input", () => {
+    expect(base32Decode(RFC_SECRET.toLowerCase())).toEqual(base32Decode(RFC_SECRET));
+    expect(base32Decode("gezd gnbv gy3t qojq gezd gnbv gy3t qojq")).toEqual(
+      base32Decode(RFC_SECRET),
+    );
+    // RFC 4648 padded forms round-trip to the unpadded encoding.
+    expect(base32Encode(Buffer.from("f"))).toBe("MY");
+    expect(base32Decode("MY======").toString("ascii")).toBe("f");
+    expect(base32Decode("MZXW6YTB").toString("ascii")).toBe("fooba");
+    expect(base32Decode("MZXW6YQ=").toString("ascii")).toBe("foob");
+    expect(base32Decode("my======").toString("ascii")).toBe("f");
+    expect(base32Decode("")).toHaveLength(0);
+    // Padding in the middle is not tolerated.
+    expect(() => base32Decode("MY==MY")).toThrow(/base32/);
+    // Authenticator apps accept lower-case secrets, so codes must agree.
+    expect(hotp(RFC_SECRET.toLowerCase(), 0)).toBe("755224");
+  });
+
+  it("handles counters above 32 bits without truncating the high word", () => {
+    // RFC 4226 vectors for the low counters we can cross-check directly.
+    expect(hotp(RFC_SECRET, 1)).toBe("287082");
+    expect(hotp(RFC_SECRET, 9)).toBe("520489");
+    const high = hotp(RFC_SECRET, 2 ** 32);
+    expect(high).toMatch(/^\d{6}$/);
+    expect(high).not.toBe(hotp(RFC_SECRET, 0));
+    const huge = hotp(RFC_SECRET, Number.MAX_SAFE_INTEGER);
+    expect(huge).toMatch(/^\d{6}$/);
+    expect(huge).not.toBe(hotp(RFC_SECRET, Number.MAX_SAFE_INTEGER - 2 ** 32));
+    expect(hotp(RFC_SECRET, 2 ** 32)).toBe(hotp(RFC_SECRET, 2 ** 32));
+    // Codes below 100000 keep their leading zeros.
+    expect(totp(RFC_SECRET, new Date(1234567890 * 1000))).toBe("005924");
+  });
+
+  it("accepts only the current step when the window is zero", () => {
+    const now = new Date(1111111111 * 1000);
+    const step = totpStep(now);
+    expect(verifyTotp(RFC_SECRET, hotp(RFC_SECRET, step), now, { window: 0 })).toEqual({
+      ok: true,
+      step,
+    });
+    expect(verifyTotp(RFC_SECRET, hotp(RFC_SECRET, step - 1), now, { window: 0 })).toEqual({
+      ok: false,
+    });
+    expect(verifyTotp(RFC_SECRET, hotp(RFC_SECRET, step + 1), now, { window: 0 })).toEqual({
+      ok: false,
+    });
+    // A replay floor still applies with no skew allowance.
+    expect(
+      verifyTotp(RFC_SECRET, hotp(RFC_SECRET, step), now, { window: 0, afterStep: step }),
+    ).toEqual({ ok: false });
+  });
+
+  it("reports the earliest unused matching step when several candidates match", () => {
+    // The first step strictly above afterStep wins, so the replay floor
+    // advances by the smallest amount that admits the code.
+    const now = new Date(1111111111 * 1000);
+    const step = totpStep(now);
+    expect(verifyTotp(RFC_SECRET, hotp(RFC_SECRET, step + 1), now, { afterStep: step })).toEqual({
+      ok: true,
+      step: step + 1,
+    });
+    expect(totpStep(new Date(0))).toBe(0);
+    expect(totpStep(new Date(29_999))).toBe(0);
+    expect(totpStep(new Date(30_000))).toBe(1);
+    expect(totpStep(new Date(60_000), 60)).toBe(1);
+  });
+
   it("builds an otpauth provisioning URI", () => {
     const uri = totpProvisioningUri({
       secretBase32: RFC_SECRET,

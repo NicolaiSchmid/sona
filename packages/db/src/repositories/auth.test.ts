@@ -235,6 +235,165 @@ describe("SqliteAuthRepository", () => {
     await expect(repository.getApiToken("ws_1", "tok_1")).rejects.toThrow(/scopes_json/);
   });
 
+  it("orders memberships by creation time, then workspace id, and rejects duplicates", async () => {
+    await seedUser("user_1", "a@sona.test");
+    await repository.createWorkspace({ id: "ws_3", name: "C", createdAt: T0 });
+    const join = (workspaceId: string, createdAt: string) =>
+      repository.createMembership({ workspaceId, userId: "user_1", role: "member", createdAt });
+    await join("ws_3", "2026-01-02T00:00:00Z");
+    await join("ws_2", "2026-01-01T00:00:00Z");
+    await join("ws_1", "2026-01-02T00:00:00Z");
+    expect((await repository.listMemberships("user_1")).map((m) => m.workspaceId)).toEqual([
+      "ws_2",
+      "ws_1",
+      "ws_3",
+    ]);
+    expect(await repository.listMemberships("user_missing")).toEqual([]);
+    await expect(join("ws_1", T0)).rejects.toThrow(/UNIQUE|PRIMARY KEY/i);
+    await expect(
+      repository.createMembership({
+        workspaceId: "ws_1",
+        userId: "user_missing",
+        role: "member",
+        createdAt: T0,
+      }),
+    ).rejects.toThrow(/FOREIGN KEY constraint failed/i);
+    await expect(join("ws_missing", T0)).rejects.toThrow(/FOREIGN KEY constraint failed/i);
+    expect(await repository.listMemberships("user_1")).toHaveLength(3);
+  });
+
+  it("rejects a credential for a different user and updates for unknown users", async () => {
+    await expect(
+      repository.createUser(
+        { id: "user_1", email: "a@sona.test", createdAt: T0 },
+        { userId: "user_2", passwordHash: "$scrypt$ln=10,r=8,p=1$c2FsdA$aGFzaA", updatedAt: T0 },
+      ),
+    ).rejects.toThrow(/must match/);
+    expect(await repository.getUserById("user_1")).toBeUndefined();
+    expect(await repository.countUsers()).toBe(0);
+    await expect(
+      repository.updateCredential({ userId: "user_missing", passwordHash: "x", updatedAt: T0 }),
+    ).rejects.toThrow(/not found/);
+    await expect(repository.confirmTotpEnrollment("user_missing", T0)).rejects.toThrow(/not found/);
+    // A credential row cannot exist without its user.
+    expect(() =>
+      database.db
+        .prepare(
+          "INSERT INTO user_credentials (user_id, password_hash, updated_at) VALUES (?, ?, ?)",
+        )
+        .run("user_missing", "x", T0),
+    ).toThrow(/FOREIGN KEY constraint failed/i);
+  });
+
+  it("returns undefined for unknown token hashes and ids", async () => {
+    expect(await repository.getInviteByTokenHash(hashToken("sona_inv_unknown"))).toBeUndefined();
+    expect(await repository.getSessionByTokenHash(hashToken("sona_sess_unknown"))).toBeUndefined();
+    expect(await repository.getApiTokenByHash(hashToken("sona_tok_unknown"))).toBeUndefined();
+    expect(await repository.getInvite("ws_1", "inv_missing")).toBeUndefined();
+    expect(await repository.getSession("user_1", "ses_missing")).toBeUndefined();
+    expect(await repository.getApiToken("ws_1", "tok_missing")).toBeUndefined();
+    expect(await repository.getUserByEmail("nobody@sona.test")).toBeUndefined();
+    expect(await repository.getCredential("user_missing")).toBeUndefined();
+    expect(await repository.getTotpEnrollment("user_missing")).toBeUndefined();
+    expect(await repository.getMembership("ws_1", "user_missing")).toBeUndefined();
+    expect(await repository.countUnusedRecoveryCodes("user_missing")).toBe(0);
+    expect(await repository.claimInvite("inv_missing", T0, "user_1")).toBe(false);
+  });
+
+  it("enforces foreign keys, required columns, and hash uniqueness on auth rows", async () => {
+    await seedUser("user_1", "a@sona.test");
+    const session = {
+      id: "ses_1",
+      userId: "user_missing",
+      tokenHash: hashToken("sona_sess_one"),
+      createdAt: T0,
+      expiresAt: "2026-07-08T09:00:00.000Z",
+      absoluteExpiresAt: "2026-07-31T09:00:00.000Z",
+      lastSeenAt: T0,
+      revokedAt: undefined,
+      clientLabel: undefined,
+    };
+    await expect(repository.createSession(session)).rejects.toThrow(
+      /FOREIGN KEY constraint failed/i,
+    );
+    await repository.createSession({ ...session, userId: "user_1" });
+    // Token hashes are unique, so two sessions can never share a bearer token.
+    await expect(
+      repository.createSession({ ...session, id: "ses_2", userId: "user_1" }),
+    ).rejects.toThrow(/UNIQUE/i);
+
+    const token = {
+      id: "tok_1",
+      workspaceId: "ws_missing",
+      createdByUserId: "user_1",
+      name: "bot",
+      tokenHash: hashToken("sona_tok_one"),
+      scopes: ["read"] as const,
+      createdAt: T0,
+      expiresAt: "2026-09-29T09:00:00.000Z",
+      lastUsedAt: undefined,
+      revokedAt: undefined,
+    };
+    await expect(repository.createApiToken(token)).rejects.toThrow(
+      /FOREIGN KEY constraint failed/i,
+    );
+    await expect(
+      repository.createApiToken({ ...token, workspaceId: "ws_1", createdByUserId: "user_missing" }),
+    ).rejects.toThrow(/FOREIGN KEY constraint failed/i);
+    await repository.createApiToken({ ...token, workspaceId: "ws_1" });
+    await expect(
+      repository.createApiToken({ ...token, id: "tok_2", workspaceId: "ws_2" }),
+    ).rejects.toThrow(/UNIQUE/i);
+    // Agent tokens must carry an expiry.
+    expect(() =>
+      database.db
+        .prepare(
+          "INSERT INTO api_tokens (id, workspace_id, created_by_user_id, name, token_hash, scopes_json, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .run("tok_3", "ws_1", "user_1", "bot", hashToken("sona_tok_three"), "[]", T0, null),
+    ).toThrow(/NOT NULL constraint failed: api_tokens.expires_at/i);
+
+    const invite = {
+      id: "inv_1",
+      workspaceId: "ws_missing",
+      email: "new@sona.test",
+      role: "member" as const,
+      tokenHash: hashToken("sona_inv_one"),
+      createdByUserId: "user_1",
+      createdAt: T0,
+      expiresAt: "2026-07-08T09:00:00.000Z",
+      acceptedAt: undefined,
+      acceptedByUserId: undefined,
+      revokedAt: undefined,
+    };
+    await expect(repository.createInvite(invite)).rejects.toThrow(/FOREIGN KEY constraint failed/i);
+    await expect(
+      repository.createInvite({ ...invite, workspaceId: "ws_1", createdByUserId: "user_missing" }),
+    ).rejects.toThrow(/FOREIGN KEY constraint failed/i);
+    await repository.createInvite({ ...invite, workspaceId: "ws_1" });
+    await expect(
+      repository.createInvite({ ...invite, id: "inv_2", workspaceId: "ws_2" }),
+    ).rejects.toThrow(/UNIQUE/i);
+
+    await expect(
+      repository.saveTotpEnrollment({
+        userId: "user_missing",
+        secretCiphertext: "v1.x",
+        lastUsedStep: -1,
+        createdAt: T0,
+        confirmedAt: undefined,
+      }),
+    ).rejects.toThrow(/FOREIGN KEY constraint failed/i);
+    await expect(
+      repository.replaceRecoveryCodes("user_missing", [
+        { id: "rc_1", userId: "user_missing", codeHash: "h", createdAt: T0, usedAt: undefined },
+      ]),
+    ).rejects.toThrow(/FOREIGN KEY constraint failed/i);
+    expect(await repository.listSessions("user_1")).toHaveLength(1);
+    expect(await repository.listApiTokens("ws_1")).toHaveLength(1);
+    expect(await repository.listInvites("ws_1")).toHaveLength(1);
+  });
+
   it("rejects an unknown membership role read from the database", async () => {
     await seedUser("user_1", "a@sona.test");
     database.db

@@ -101,6 +101,85 @@ describe("core migrations", () => {
     }
   });
 
+  it("keeps auth rows anchored to existing users and workspaces", () => {
+    const db = new DatabaseSync(":memory:");
+    try {
+      applyMigrations(db, CORE_MIGRATIONS);
+      // 0009 is idempotent and creates each auth index exactly once.
+      applyMigrations(db, CORE_MIGRATIONS);
+      const indexes = db
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name LIKE 'idx_%'")
+        .all() as Array<{ name: string }>;
+      for (const name of [
+        "idx_recovery_codes_user",
+        "idx_invites_workspace",
+        "idx_auth_sessions_user",
+        "idx_api_tokens_workspace",
+      ]) {
+        expect(indexes.filter((index) => index.name === name)).toHaveLength(1);
+      }
+
+      db.exec("PRAGMA foreign_keys = ON");
+      db.exec(
+        "INSERT INTO workspaces (id, name, created_at) VALUES ('ws_1', 'A', '2026-01-01T00:00:00Z')",
+      );
+      db.exec(
+        "INSERT INTO users (id, email, created_at) VALUES ('user_1', 'a@sona.test', '2026-01-01T00:00:00Z')",
+      );
+      const fk = /FOREIGN KEY constraint failed/i;
+      const insertInvite = (id: string, ws: string, creator: string, hash: string) =>
+        db.exec(
+          "INSERT INTO workspace_invites (id, workspace_id, email, role, token_hash, created_by_user_id, created_at, expires_at)" +
+            ` VALUES ('${id}', '${ws}', 'x@sona.test', 'member', '${hash}', '${creator}', '2026-01-01T00:00:00Z', '2026-01-08T00:00:00Z')`,
+        );
+      expect(() => insertInvite("inv_1", "ws_missing", "user_1", "h1")).toThrow(fk);
+      expect(() => insertInvite("inv_1", "ws_1", "user_missing", "h1")).toThrow(fk);
+      expect(() => insertInvite("inv_1", "ws_1", "user_1", "h1")).not.toThrow();
+      // Claims may reference a user that does not exist yet (claim-first).
+      expect(() =>
+        db.exec(
+          "UPDATE workspace_invites SET accepted_at = '2026-01-02T00:00:00Z', accepted_by_user_id = 'user_pending' WHERE id = 'inv_1'",
+        ),
+      ).not.toThrow();
+      expect(() => insertInvite("inv_2", "ws_1", "user_1", "h1")).toThrow(
+        /UNIQUE constraint failed/i,
+      );
+
+      const insertSession = (id: string, user: string, hash: string) =>
+        db.exec(
+          "INSERT INTO auth_sessions (id, user_id, token_hash, created_at, expires_at, absolute_expires_at, last_seen_at)" +
+            ` VALUES ('${id}', '${user}', '${hash}', '2026-01-01T00:00:00Z', '2026-01-08T00:00:00Z', '2026-01-31T00:00:00Z', '2026-01-01T00:00:00Z')`,
+        );
+      expect(() => insertSession("ses_1", "user_missing", "s1")).toThrow(fk);
+      expect(() => insertSession("ses_1", "user_1", "s1")).not.toThrow();
+      expect(() => insertSession("ses_2", "user_1", "s1")).toThrow(/UNIQUE constraint failed/i);
+
+      const insertToken = (id: string, ws: string, creator: string, hash: string) =>
+        db.exec(
+          "INSERT INTO api_tokens (id, workspace_id, created_by_user_id, name, token_hash, scopes_json, created_at, expires_at)" +
+            ` VALUES ('${id}', '${ws}', '${creator}', 'bot', '${hash}', '["read"]', '2026-01-01T00:00:00Z', '2026-04-01T00:00:00Z')`,
+        );
+      expect(() => insertToken("tok_1", "ws_missing", "user_1", "t1")).toThrow(fk);
+      expect(() => insertToken("tok_1", "ws_1", "user_missing", "t1")).toThrow(fk);
+      expect(() => insertToken("tok_1", "ws_1", "user_1", "t1")).not.toThrow();
+      expect(() => insertToken("tok_2", "ws_1", "user_1", "t1")).toThrow(
+        /UNIQUE constraint failed/i,
+      );
+
+      for (const sql of [
+        "INSERT INTO user_credentials (user_id, password_hash, updated_at) VALUES ('user_missing', 'h', '2026-01-01T00:00:00Z')",
+        "INSERT INTO user_totp_enrollments (user_id, secret_ciphertext, created_at) VALUES ('user_missing', 'c', '2026-01-01T00:00:00Z')",
+        "INSERT INTO user_recovery_codes (id, user_id, code_hash, created_at) VALUES ('rc_1', 'user_missing', 'h', '2026-01-01T00:00:00Z')",
+      ]) {
+        expect(() => db.exec(sql)).toThrow(fk);
+      }
+      // A referenced user cannot be removed from under its auth rows.
+      expect(() => db.exec("DELETE FROM users WHERE id = 'user_1'")).toThrow(fk);
+    } finally {
+      db.close();
+    }
+  });
+
   it("enforces the raw-record dedup unique index", () => {
     const db = new DatabaseSync(":memory:");
     try {

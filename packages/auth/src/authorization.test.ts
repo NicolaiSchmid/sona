@@ -79,6 +79,27 @@ describe("api token scopes", () => {
     expect(grantsForScopes([] as ApiTokenScope[], "owner")).toEqual([]);
   });
 
+  it("ignores duplicate scopes and orders grants by the action vocabulary", () => {
+    expect(grantsForScopes(["read", "read", "suggest", "suggest"], "member")).toEqual([
+      "read",
+      "write_draft",
+    ]);
+    expect(grantsForScopes(["execute", "read"], "owner")).toEqual(
+      grantsForScopes(["read", "execute"], "owner"),
+    );
+    expect(grantsForScopes(["execute", "suggest", "read"], "owner")).toEqual([
+      "read",
+      "write_draft",
+      "export",
+    ]);
+    // Even the widest scope on the widest role never yields approval or admin.
+    for (const role of ["owner", "member", "advisor_readonly"] as const) {
+      const grants = grantsForScopes(["read", "suggest", "execute"], role);
+      expect(grants).not.toContain("review_approve");
+      expect(grants).not.toContain("admin");
+    }
+  });
+
   it("builds an agent principal whose audit actor is the token, not the user", () => {
     const access = createApiTokenAccess({
       membership: membership("member"),
@@ -104,5 +125,28 @@ describe("workspace access context", () => {
       userId: "user_1",
     });
     expect(auditActor(access)).toBe("user_1");
+  });
+
+  it("leaves requestId absent, not undefined, when none is supplied", () => {
+    const session = createSessionAccess({ membership: membership("member"), sessionId: "ses_1" });
+    expect(Object.keys(session.context)).toEqual(["workspaceId", "userId"]);
+    expect("requestId" in session.context).toBe(false);
+    const agent = createApiTokenAccess({
+      membership: membership("member"),
+      tokenId: "tok_1",
+      scopes: ["read"],
+    });
+    expect("requestId" in agent.context).toBe(false);
+    expect(Object.isFrozen(agent.principal)).toBe(true);
+    // Supplying one threads it through to the frozen context.
+    const traced = createSessionAccess({
+      membership: membership("member"),
+      sessionId: "ses_1",
+      requestId: "req_9",
+    });
+    expect(traced.context.requestId).toBe("req_9");
+    expect(() => {
+      (traced.context as { requestId?: string }).requestId = "req_10";
+    }).toThrow(TypeError);
   });
 });

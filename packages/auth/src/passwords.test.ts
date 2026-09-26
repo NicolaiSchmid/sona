@@ -46,6 +46,43 @@ describe("password hashing", () => {
     await expect(hashPassword("x", { logN: 12, blockSize: 0, parallelization: 1 })).rejects.toThrow(
       /blockSize/,
     );
+    await expect(
+      hashPassword("x", { logN: 12, blockSize: 8, parallelization: 17 }),
+    ).rejects.toThrow(/parallelization/);
+    await expect(
+      hashPassword("x", { logN: 12.5, blockSize: 8, parallelization: 1 }),
+    ).rejects.toThrow(/logN/);
+  });
+
+  it("accepts stored hashes at the parameter boundaries and rejects those just outside", () => {
+    // Parsing only: ln=20 would cost 1 GiB to actually derive.
+    const phc = (logN: number, blockSize = 8, parallelization = 2) =>
+      `$scrypt$ln=${logN},r=${blockSize},p=${parallelization}$c2FsdHNhbHRzYWx0c2FsdA$aGFzaGhhc2hoYXNoaGFzaGhhc2hoYXNoaGFzaGhhc2g`;
+    expect(passwordHashNeedsRehash(phc(20), DEFAULT_SCRYPT_PARAMS)).toBe(false);
+    expect(passwordHashNeedsRehash(phc(10), DEFAULT_SCRYPT_PARAMS)).toBe(true);
+    expect(passwordHashNeedsRehash(phc(10), FAST)).toBe(false);
+    // Out of range parses as malformed, which always needs a rehash.
+    expect(passwordHashNeedsRehash(phc(21), DEFAULT_SCRYPT_PARAMS)).toBe(true);
+    expect(passwordHashNeedsRehash(phc(9), FAST)).toBe(true);
+    expect(passwordHashNeedsRehash(phc(16, 32, 16), DEFAULT_SCRYPT_PARAMS)).toBe(false);
+    expect(passwordHashNeedsRehash(phc(16, 33, 2), DEFAULT_SCRYPT_PARAMS)).toBe(true);
+    expect(passwordHashNeedsRehash(phc(16, 8, 17), DEFAULT_SCRYPT_PARAMS)).toBe(true);
+    // Any single weaker dimension triggers a rehash even when the others are stronger.
+    expect(passwordHashNeedsRehash(phc(20, 8, 1), DEFAULT_SCRYPT_PARAMS)).toBe(true);
+  });
+
+  it("verifies as false for hashes with out-of-range or malformed parameters", async () => {
+    await expect(verifyPassword("anything", "$scrypt$ln=21,r=8,p=1$c2FsdA$aGFzaA")).resolves.toBe(
+      false,
+    );
+    await expect(verifyPassword("anything", "$scrypt$ln=9,r=8,p=1$c2FsdA$aGFzaA")).resolves.toBe(
+      false,
+    );
+    // Non-base64url characters or a missing segment do not parse.
+    await expect(verifyPassword("anything", "$scrypt$ln=10,r=8,p=1$c2F+sdA$aGFzaA")).resolves.toBe(
+      false,
+    );
+    await expect(verifyPassword("anything", "$scrypt$ln=10,r=8,p=1$c2FsdA")).resolves.toBe(false);
   });
 });
 
@@ -73,6 +110,43 @@ describe("password policy", () => {
     expect(checkPasswordPolicy("something unrelated here", { email: "bob@sona.test" }).ok).toBe(
       true,
     );
+  });
+
+  it("treats the maximum length as inclusive", () => {
+    const varied = (length: number) =>
+      Array.from({ length }, (_, index) => String.fromCharCode(97 + (index % 26))).join("");
+    expect(checkPasswordPolicy(varied(128))).toEqual({ ok: true, violations: [] });
+    expect(checkPasswordPolicy(varied(129))).toEqual({ ok: false, violations: ["too_long"] });
+    expect(checkPasswordPolicy(varied(12)).ok).toBe(true);
+    expect(checkPasswordPolicy(varied(11)).violations).toEqual(["too_short"]);
+    // Custom policy bounds are honoured the same way.
+    const policy = { minLength: 8, maxLength: 16 };
+    expect(checkPasswordPolicy(varied(16), {}, policy).ok).toBe(true);
+    expect(checkPasswordPolicy(varied(17), {}, policy).violations).toEqual(["too_long"]);
+  });
+
+  it("matches the full email address even when the local part is too short to match alone", () => {
+    const email = "ab@sona.test";
+    expect(checkPasswordPolicy("ledger for AB@Sona.Test 2026", { email }).violations).toEqual([
+      "contains_email",
+    ]);
+    // Two-letter local parts on their own are too common to reject.
+    expect(checkPasswordPolicy("absolutely fabulous ledger", { email }).ok).toBe(true);
+    // Untrimmed, mixed-case context addresses are normalized before matching.
+    expect(
+      checkPasswordPolicy("my ab@sona.test passphrase", { email: "  AB@SONA.TEST " }).violations,
+    ).toEqual(["contains_email"]);
+  });
+
+  it("does not reject passwords containing a local part shorter than four characters", () => {
+    expect(checkPasswordPolicy("bobsled team riding 2026", { email: "bob@sona.test" }).ok).toBe(
+      true,
+    );
+    expect(checkPasswordPolicy("bobby tables ledger 2026", { email: "bobb@sona.test" }).ok).toBe(
+      false,
+    );
+    // No email context: nothing to match.
+    expect(checkPasswordPolicy("alice.example rides again").ok).toBe(true);
   });
 
   it("counts code points, not UTF-16 units", () => {
