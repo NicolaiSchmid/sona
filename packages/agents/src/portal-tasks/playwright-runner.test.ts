@@ -85,7 +85,17 @@ describe("LocalPlaywrightPortalTaskRunner", () => {
     expect(first.storedDocuments[0]?.metadata["portal.runId"]).toBe("run_1");
     expect(first.storedDocuments[0]?.metadata["portal.taskId"]).toBe("synthetic-reference-portal");
     expect(second.status).toBe("completed");
-    expect(second.documents).toEqual([]);
+    // The rerun still references the evidence it observed, without storing it twice.
+    expect(second.documents.map((document) => document.content)).toEqual(
+      first.storedDocuments.map((stored) => ({
+        kind: "objectRef",
+        uri: `stored-document:${stored.id}`,
+      })),
+    );
+    expect(second.documents[0]?.provenance.runId).toBe("run_2");
+    expect(second.warnings).toEqual(
+      first.storedDocuments.map((stored) => `duplicate content already stored as ${stored.id}`),
+    );
     expect(second.storedDocuments).toEqual([]);
     expect(storage.putCount).toBe(2);
   });
@@ -564,6 +574,43 @@ describe("LocalPlaywrightPortalTaskRunner", () => {
     expect(retried.documents).toHaveLength(2);
   });
 
+  it("keeps selector_missing when the failure screenshot itself fails", async () => {
+    const page = new FixturePortalPage({
+      missingSelectors: new Set(["[data-testid='invoice-list']"]),
+      screenshotFailure: new Error("page closed"),
+    });
+    const nonSensitive: PortalTask = {
+      ...task,
+      steps: task.steps.map((step) => ({ ...step, sensitive: false })),
+    };
+    const runner = await makeRunner({ page, connectionTask: nonSensitive });
+
+    const result = await runner.runTask(input({ task: nonSensitive }));
+
+    expect(result.status).toBe("selector_missing");
+    expect(result.warnings).toEqual(["failure screenshot unavailable: page closed"]);
+  });
+
+  it("reports a hash reservation that could not be released after a failed store", async () => {
+    const registry = new InMemoryPortalDocumentRegistry();
+    registry.releaseContentHash = async () => {
+      throw new Error("registry offline");
+    };
+    const storage = new CountingDocumentStorage();
+    storage.failNextPut = new Error("disk full");
+    const runner = await makeRunner({ page: new FixturePortalPage(), registry, storage });
+
+    const result = await runner.runTask(input());
+
+    expect(result.status).toBe("failed");
+    expect(result.errors).toEqual([
+      expect.stringMatching(
+        /^content hash reservation [0-9a-f]{16} could not be released and needs manual reclaim: registry offline$/,
+      ),
+      "disk full",
+    ]);
+  });
+
   it("refuses a login POST whose body carries fields outside the reviewed form", async () => {
     const page = new FixturePortalPage({
       loginPostData: "email=a%40b.test&password=x&action=delete_account",
@@ -818,7 +865,8 @@ describe("LocalPlaywrightPortalTaskRunner", () => {
 
     expect(firstResult.documents).toHaveLength(2);
     expect(secondResult.status).toBe("completed");
-    expect(secondResult.documents).toEqual([]);
+    expect(secondResult.storedDocuments).toEqual([]);
+    expect(secondResult.documents).toHaveLength(2);
     expect(firstStorage.putCount).toBe(2);
     expect(secondStorage.putCount).toBe(0);
   });
@@ -849,7 +897,12 @@ describe("LocalPlaywrightPortalTaskRunner", () => {
       documentId: "d4",
     });
 
-    expect([first, again, otherWorkspace, afterRelease]).toEqual([true, false, true, true]);
+    expect([first, again, otherWorkspace, afterRelease]).toEqual([
+      { reserved: true },
+      { reserved: false, existingDocumentId: "d1" },
+      { reserved: true },
+      { reserved: true },
+    ]);
   });
 
   it("fails before loading credentials when the connection targets another task", async () => {
@@ -945,7 +998,7 @@ describe("LocalPlaywrightPortalTaskRunner", () => {
     ]);
     for (const [index, stored] of result.storedDocuments.entries()) {
       const fetched = result.documents[index];
-      expect(stored.id).toBe(`portal_conn_1_${fetched?.contentHash.slice(0, 16)}`);
+      expect(stored.id).toBe(`portal_ws_1_conn_1_${fetched?.contentHash.slice(0, 16)}`);
       expect(stored.metadata).toMatchObject({
         "portal.runId": "run_1",
         "portal.taskId": "synthetic-reference-portal",
@@ -1136,6 +1189,8 @@ interface FixturePortalPageOptions {
   loginPostData?: string;
   /** Extra requests the login page issues on load, e.g. third-party pixels. */
   subresources?: readonly Pick<PortalRequest, "url" | "resourceType">[];
+  /** Makes `screenshot()` reject, as a closed page would. */
+  screenshotFailure?: Error;
 }
 
 class FixturePortalPage implements PortalBrowserPage {
@@ -1159,6 +1214,7 @@ class FixturePortalPage implements PortalBrowserPage {
   readonly #abortBlockedRequests: boolean;
   readonly #loginPostData: string;
   readonly #subresources: readonly Pick<PortalRequest, "url" | "resourceType">[];
+  readonly #screenshotFailure: Error | undefined;
   #guard: PortalRequestGuard | undefined;
   #currentUrl = "https://portal.test/login";
 
@@ -1174,6 +1230,7 @@ class FixturePortalPage implements PortalBrowserPage {
     this.#loginPostData =
       options.loginPostData ?? "email=synthetic-user%40example.test&password=synthetic-password";
     this.#subresources = options.subresources ?? [];
+    this.#screenshotFailure = options.screenshotFailure;
   }
 
   guardRequests(guard: PortalRequestGuard): void {
@@ -1267,6 +1324,9 @@ class FixturePortalPage implements PortalBrowserPage {
 
   async screenshot(): Promise<Uint8Array> {
     this.screenshotCount += 1;
+    if (this.#screenshotFailure !== undefined) {
+      throw this.#screenshotFailure;
+    }
     return new Uint8Array([1]);
   }
 
@@ -1313,7 +1373,7 @@ describe("LocalPlaywrightPortalTaskRunner evidence and warnings", () => {
     if (stored === undefined || fetched === undefined) {
       throw new Error("expected the first fixture invoice to be stored");
     }
-    expect(stored.id).toBe(`portal_conn_1_${fetched.contentHash.slice(0, 16)}`);
+    expect(stored.id).toBe(`portal_ws_1_conn_1_${fetched.contentHash.slice(0, 16)}`);
     expect(fetched.content).toEqual({
       kind: "objectRef",
       uri: `${STORED_DOCUMENT_URI_SCHEME}${stored.id}`,

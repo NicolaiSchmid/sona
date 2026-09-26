@@ -45,6 +45,7 @@ export {
   createLocalPlaywrightBrowserProvider,
 } from "./portal-tasks/playwright-adapter.js";
 export {
+  type ContentHashReservation,
   type DocumentHashKey,
   type GetPortalConnectionInput,
   InMemoryPortalConnectionRepository,

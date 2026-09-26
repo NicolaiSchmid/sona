@@ -53,6 +53,7 @@ const STATIC_ASSET_RE =
 export function isMaterialBlock(blocked: BlockedPortalRequest): boolean {
   return (
     blocked.resourceType === "document" ||
+    !IDEMPOTENT_METHODS.has(blocked.method) ||
     blocked.reason === "destructive_url" ||
     blocked.reason === "non_idempotent_method" ||
     blocked.reason === "unreviewed_body"

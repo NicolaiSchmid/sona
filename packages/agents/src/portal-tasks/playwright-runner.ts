@@ -86,14 +86,21 @@ export interface RecordContentHashInput extends DocumentHashKey {
   documentId: string;
 }
 
+export type ContentHashReservation =
+  | { reserved: true }
+  | { reserved: false; existingDocumentId: string };
+
 /**
  * Durable, workspace-scoped index of stored content hashes used for dedup.
- * `reserveContentHash` must be atomic: it returns true for exactly one caller
- * per (workspace, hash) so two concurrent runs cannot both store the same
- * bytes; `releaseContentHash` undoes a reservation whose storage failed.
+ * `reserveContentHash` must be atomic: exactly one caller per (workspace,
+ * hash) gets the reservation, every other caller learns which document
+ * already holds the bytes; `releaseContentHash` undoes a reservation whose
+ * storage failed. Durable implementations should let an unreleased
+ * reservation be reclaimed (a lease), so a release that itself failed cannot
+ * hide the bytes forever.
  */
 export interface PortalDocumentRegistry {
-  reserveContentHash(input: RecordContentHashInput): Promise<boolean>;
+  reserveContentHash(input: RecordContentHashInput): Promise<ContentHashReservation>;
   releaseContentHash(input: DocumentHashKey): Promise<void>;
 }
 
@@ -339,13 +346,14 @@ export class InMemoryPortalConnectionRepository implements PortalConnectionRepos
 export class InMemoryPortalDocumentRegistry implements PortalDocumentRegistry {
   readonly #hashes = new Map<string, string>();
 
-  async reserveContentHash(input: RecordContentHashInput): Promise<boolean> {
+  async reserveContentHash(input: RecordContentHashInput): Promise<ContentHashReservation> {
     const key = documentHashKey(input);
-    if (this.#hashes.has(key)) {
-      return false;
+    const existingDocumentId = this.#hashes.get(key);
+    if (existingDocumentId !== undefined) {
+      return { reserved: false, existingDocumentId };
     }
     this.#hashes.set(key, input.documentId);
-    return true;
+    return { reserved: true };
   }
 
   async releaseContentHash(input: DocumentHashKey): Promise<void> {
@@ -463,7 +471,14 @@ async function reportSelectorMissing(
   detail: string,
 ): Promise<PortalTaskRunStatus> {
   state.result.errors.push(`selector_missing: ${detail}`);
-  await captureFailureArtifact(state);
+  try {
+    await captureFailureArtifact(state);
+  } catch (error) {
+    // A diagnostic must not turn a terminal layout failure into a retryable one.
+    state.result.warnings.push(
+      `failure screenshot unavailable: ${describeError(state.redactor, error)}`,
+    );
+  }
   return "selector_missing";
 }
 
@@ -559,21 +574,30 @@ async function downloadLink(
   }
 
   const contentHash = sha256Hex(response.bytes);
-  const documentId = `portal_${state.input.connectionId}_${contentHash.slice(0, 16)}`;
+  // Workspace-namespaced: connection ids are only unique within a workspace
+  // while the receipts schema keys documents globally.
+  const documentId = `portal_${state.input.workspaceId}_${state.input.connectionId}_${contentHash.slice(0, 16)}`;
   const hashKey = { workspaceId: state.input.workspaceId, contentHash };
-  if (!(await state.documentRegistry.reserveContentHash({ ...hashKey, documentId }))) {
+  const filename = await resolveFilename(element, step, href, storedIndex);
+  const document = makeFetchedDocument(state, {
+    filename,
+    mimeType: response.mimeType || step.mimeType,
+    contentHash,
+    sourceUrl: response.finalUrl,
+    bytes: response.bytes,
+  });
+  const reservation = await state.documentRegistry.reserveContentHash({ ...hashKey, documentId });
+  if (!reservation.reserved) {
+    // The bytes are stored once, but this run still observed them: keep the
+    // reference so the run's provenance (connection, source URL) is traceable.
+    state.result.documents.push(referenceFetchedDocument(document, reservation.existingDocumentId));
+    state.result.warnings.push(
+      `duplicate content already stored as ${reservation.existingDocumentId}`,
+    );
     return { kind: "duplicate" };
   }
 
   try {
-    const filename = await resolveFilename(element, step, href, storedIndex);
-    const document = makeFetchedDocument(state, {
-      filename,
-      mimeType: response.mimeType || step.mimeType,
-      contentHash,
-      sourceUrl: response.finalUrl,
-      bytes: response.bytes,
-    });
     const stored = await storeDocument(state, document, documentId, storedIndex);
     await state.evidence.saveDocument({
       context: state.context,
@@ -585,11 +609,17 @@ async function downloadLink(
       }),
     });
     state.result.storedDocuments.push(stored);
-    state.result.documents.push(stripFetchedDocumentContent(document, stored));
+    state.result.documents.push(referenceFetchedDocument(document, stored.id));
     return { kind: "stored" };
   } catch (error) {
     // The reservation must not outlive a failed store, or the bytes are lost for good.
-    await state.documentRegistry.releaseContentHash(hashKey);
+    try {
+      await state.documentRegistry.releaseContentHash(hashKey);
+    } catch (releaseError) {
+      state.result.errors.push(
+        `content hash reservation ${contentHash.slice(0, 16)} could not be released and needs manual reclaim: ${describeError(state.redactor, releaseError)}`,
+      );
+    }
     throw error;
   }
 }
@@ -711,13 +741,10 @@ async function storeDocument(
   });
 }
 
-function stripFetchedDocumentContent(
-  document: FetchedDocument,
-  stored: StoredDocument,
-): FetchedDocument {
+function referenceFetchedDocument(document: FetchedDocument, storedId: string): FetchedDocument {
   return {
     ...document,
-    content: { kind: "objectRef", uri: `${STORED_DOCUMENT_URI_SCHEME}${stored.id}` },
+    content: { kind: "objectRef", uri: `${STORED_DOCUMENT_URI_SCHEME}${storedId}` },
   };
 }
 

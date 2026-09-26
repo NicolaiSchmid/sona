@@ -817,6 +817,30 @@ describe("isMaterialBlock", () => {
     expect(isMaterialBlock(blocked("document", "off_allowlist"))).toBe(true);
   });
 
+  it("treats an off-allowlist write as material even though the allowlist check came first", () => {
+    expect(isMaterialBlock({ ...blocked("xhr", "off_allowlist"), method: "POST" })).toBe(true);
+    expect(isMaterialBlock({ ...blocked("fetch", "off_allowlist"), method: "DELETE" })).toBe(true);
+  });
+
+  it("refuses account-closure style operations over GET", () => {
+    const guard = createNetworkGuard({ task });
+    for (const path of [
+      "/account/close",
+      "/subscription/terminate",
+      "/consent/revoke",
+      "/card/deactivate",
+    ]) {
+      expect(
+        guard.evaluateRequest({
+          url: `https://portal.test${path}`,
+          method: "GET",
+          resourceType: "document",
+        }),
+        path,
+      ).toEqual({ action: "abort", reason: "destructive_url" });
+    }
+  });
+
   it("treats off-allowlist subresources and refused WebSockets as incidental", () => {
     expect(isMaterialBlock(blocked("image", "off_allowlist"))).toBe(false);
     expect(isMaterialBlock(blocked("font", "off_allowlist"))).toBe(false);

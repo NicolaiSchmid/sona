@@ -18,6 +18,7 @@ import { type PortalTask, type PortalTaskStep, portalTaskDigest } from "./schema
 const runBrowserTests = process.env["SONA_RUN_PLAYWRIGHT_BROWSER_TESTS"] === "1";
 
 const SESSION_COOKIE = "sona_fixture_session=logged-in";
+const DOWNLOAD_COOKIE = "sona_fixture_dl=token";
 const OVERSIZED_LIMIT_BYTES = 64 * 1024;
 
 describe.skipIf(!runBrowserTests)("LocalPlaywrightPortalTaskRunner browser fixture", () => {
@@ -92,7 +93,7 @@ describe.skipIf(!runBrowserTests)("LocalPlaywrightPortalTaskRunner browser fixtu
       expect.objectContaining({
         url: expect.stringMatching(/\/account\/close$/),
         method: "POST",
-        reason: "non_idempotent_method",
+        reason: "destructive_url",
       }),
     ]);
     expect(result.provenance.allowedNonIdempotentRequests).toHaveLength(1);
@@ -519,7 +520,11 @@ function handleFixtureRequest(
     return;
   }
   if (url.pathname === "/dl/redirect-in" && request.method === "GET") {
-    response.writeHead(302, { location: "/invoices/three.pdf" });
+    // The redirect hands out a download token the target insists on.
+    response.writeHead(302, {
+      location: "/invoices/three.pdf",
+      "set-cookie": `${DOWNLOAD_COOKIE}; Path=/`,
+    });
     response.end();
     return;
   }
@@ -575,6 +580,14 @@ function handleFixtureRequest(
     if (request.headers.cookie?.includes(SESSION_COOKIE) !== true) {
       response.writeHead(401, { "content-type": "text/html" });
       response.end("<html>session expired</html>");
+      return;
+    }
+    if (
+      url.pathname === "/invoices/three.pdf" &&
+      request.headers.cookie?.includes(DOWNLOAD_COOKIE) !== true
+    ) {
+      response.writeHead(403, { "content-type": "text/html" });
+      response.end("<html>download token missing</html>");
       return;
     }
     response.writeHead(200, { "content-type": "application/pdf" });

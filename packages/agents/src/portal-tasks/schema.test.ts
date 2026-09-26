@@ -45,6 +45,14 @@ describe("portalTaskSchema", () => {
     expect(safeParsePortalTask({ ...raw, outputs: ["screenshot"] }).success).toBe(false);
   });
 
+  it("rejects public and shared-hosting suffixes as allowlist entries", () => {
+    const raw = loadFixture() as Record<string, unknown>;
+    for (const domain of ["co.uk", "GitHub.io", "amazonaws.com", "myshopify.com"]) {
+      expect(safeParsePortalTask({ ...raw, domains: [domain] }).success, domain).toBe(false);
+    }
+    expect(safeParsePortalTask({ ...raw, domains: ["shop.co.uk"] }).success).toBe(true);
+  });
+
   it("rejects domain entries that are not bare hostnames", () => {
     const raw = loadFixture() as Record<string, unknown>;
     expect(safeParsePortalTask({ ...raw, domains: ["*"] }).success).toBe(false);

@@ -41,6 +41,49 @@ export const PORTAL_TASK_STEP_KINDS = [
  */
 const HOSTNAME_RE = /^(localhost|(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,})$/i;
 
+/**
+ * The allowlist admits every subdomain of an entry, so an entry that is itself
+ * a public or shared-hosting suffix would admit unrelated, attacker-controlled
+ * hosts. A full public-suffix list is a follow-up; this covers the suffixes a
+ * reviewer is most likely to paste by mistake.
+ */
+const SHARED_SUFFIXES: ReadonlySet<string> = new Set([
+  "co.uk",
+  "org.uk",
+  "ac.uk",
+  "gov.uk",
+  "me.uk",
+  "com.au",
+  "net.au",
+  "org.au",
+  "co.jp",
+  "co.nz",
+  "co.za",
+  "com.br",
+  "com.mx",
+  "co.in",
+  "github.io",
+  "gitlab.io",
+  "herokuapp.com",
+  "netlify.app",
+  "vercel.app",
+  "pages.dev",
+  "workers.dev",
+  "web.app",
+  "firebaseapp.com",
+  "appspot.com",
+  "azurewebsites.net",
+  "cloudfront.net",
+  "amazonaws.com",
+  "blogspot.com",
+  "wordpress.com",
+  "myshopify.com",
+]);
+
+function isSharedSuffix(domain: string): boolean {
+  return SHARED_SUFFIXES.has(domain.toLowerCase());
+}
+
 const SAFE_PORTAL_URL_RE = /^(https:\/\/[^/?#\s]+[^\s]*|http:\/\/localhost(:[0-9]+)?[^\s]*)$/i;
 
 /**
@@ -166,7 +209,17 @@ export const portalTaskSchema = z
     version: z.number().int().positive(),
     risk: z.enum(PORTAL_TASK_RISKS),
     /** Domain allowlist of bare hostnames; the runner must not navigate elsewhere. */
-    domains: z.array(z.string().regex(HOSTNAME_RE, "must be a bare hostname")).min(1),
+    domains: z
+      .array(
+        z
+          .string()
+          .regex(HOSTNAME_RE, "must be a bare hostname")
+          .refine(
+            (domain) => !isSharedSuffix(domain),
+            "must name the portal, not a public or shared-hosting suffix",
+          ),
+      )
+      .min(1),
     requires: z.array(z.string().min(1)).default([]),
     allowedActions: z.array(z.string().min(1)).min(1),
     forbiddenActions: z.array(z.string().min(1)).default([]),
