@@ -6,7 +6,7 @@ import type {
   PortalResourceType,
 } from "./provenance.js";
 import type { PortalHttpMethodException, PortalTask } from "./schema.js";
-import { sanitizeUrl } from "./url.js";
+import { redactSensitiveUrlPath } from "./url.js";
 
 export interface PortalRequest {
   url: string;
@@ -31,6 +31,20 @@ export interface NetworkGuardSnapshot {
 }
 
 const IDEMPOTENT_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
+
+/**
+ * Static assets are exempt from the destructive-URL screen: an icon named
+ * `add.svg` is not an operation, whereas a document, XHR, or fetch to
+ * `/cancel-subscription` may well be one even when it uses GET.
+ */
+const STATIC_RESOURCE_TYPES: ReadonlySet<PortalResourceType> = new Set<PortalResourceType>([
+  "stylesheet",
+  "image",
+  "media",
+  "font",
+  "script",
+  "texttrack",
+]);
 const SECURE_PROTOCOLS = new Set(["https:", "wss:"]);
 const LOCALHOST_PROTOCOLS = new Set([...SECURE_PROTOCOLS, "http:", "ws:"]);
 
@@ -60,6 +74,15 @@ export class NetworkGuard {
       return this.block(request, method, "websocket");
     }
 
+    // Merchant portals do not reliably keep GET side-effect free, so a URL
+    // that names a forbidden operation is refused regardless of method.
+    if (
+      !STATIC_RESOURCE_TYPES.has(request.resourceType) &&
+      forbiddenConceptFor(urlPathAndQuery(request.url)) !== undefined
+    ) {
+      return this.block(request, method, "destructive_url");
+    }
+
     if (IDEMPOTENT_METHODS.has(method)) {
       return { action: "allow" };
     }
@@ -73,7 +96,7 @@ export class NetworkGuard {
     }
 
     this.#allowedNonIdempotentRequests.push({
-      url: sanitizeUrl(request.url) ?? request.url,
+      url: recordedUrl(request.url),
       method: exception.method,
       reason: exception.reason,
       justification: exception.justification,
@@ -128,7 +151,7 @@ export class NetworkGuard {
     reason: BlockedPortalRequestReason,
   ): PortalRequestDecision {
     this.#blockedRequests.push({
-      url: sanitizeUrl(request.url) ?? request.url,
+      url: recordedUrl(request.url),
       method,
       resourceType: request.resourceType,
       reason,
@@ -198,6 +221,20 @@ function parseJsonFields(body: string): Map<string, string> | undefined {
     fields.set(name, typeof value === "string" ? value : JSON.stringify(value));
   }
   return fields;
+}
+
+/** Provenance keeps host and path shape only; malformed input is kept verbatim so the record explains the block. */
+function recordedUrl(rawUrl: string): string {
+  return redactSensitiveUrlPath(rawUrl) ?? rawUrl;
+}
+
+function urlPathAndQuery(rawUrl: string): string {
+  try {
+    const url = new URL(rawUrl);
+    return `${url.pathname}${url.search}`;
+  } catch {
+    return rawUrl;
+  }
 }
 
 function exceptionMatchKey(rawUrl: string): string {

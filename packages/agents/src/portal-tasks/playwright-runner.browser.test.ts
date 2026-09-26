@@ -56,23 +56,8 @@ describe.skipIf(!runBrowserTests)("LocalPlaywrightPortalTaskRunner browser fixtu
     );
   });
 
-  it("records a navigation redirect that leaves the allowlist and stops the run as blocked", async () => {
-    const result = await runFixture((origin) =>
-      makeTask(origin, [
-        { kind: "navigate", url: `${origin}/login` },
-        { kind: "navigate", url: `${origin}/redirect-out` },
-        { kind: "waitForSelector", selector: "[data-testid='invoice-list']", timeoutMs: 2_000 },
-      ]),
-    );
-
-    expect(result.status).toBe("blocked");
-    expect(result.provenance.blockedRequests).toEqual([
-      expect.objectContaining({ url: "https://evil.example/x", reason: "off_allowlist" }),
-    ]);
-  });
-
-  it("records a method-preserving redirect onto an unreviewed endpoint and fails closed", async () => {
-    const result = await runFixture((origin) =>
+  it("aborts a method-preserving redirect onto an unreviewed endpoint before it is sent", async () => {
+    const { result, hits } = await runFixtureWithServer((origin) =>
       makeTask(origin, [
         { kind: "navigate", url: `${origin}/login` },
         { kind: "click", selector: "button.login-redirect" },
@@ -81,17 +66,31 @@ describe.skipIf(!runBrowserTests)("LocalPlaywrightPortalTaskRunner browser fixtu
     );
 
     expect(result.status).toBe("blocked");
-    expect(result.provenance.blockedRequests).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          url: expect.stringMatching(/\/account\/close$/),
-          method: "POST",
-          reason: "non_idempotent_method",
-        }),
+    expect(result.provenance.blockedRequests).toEqual([
+      expect.objectContaining({
+        url: expect.stringMatching(/\/account\/close$/),
+        method: "POST",
+        reason: "non_idempotent_method",
+      }),
+    ]);
+    expect(result.provenance.allowedNonIdempotentRequests).toHaveLength(1);
+    expect(hits.get("POST /login-redirect")).toBe(1);
+    expect(hits.has("POST /account/close")).toBe(false);
+  });
+
+  it("aborts an off-allowlist redirect hop without contacting the target", async () => {
+    const { result, hits } = await runFixtureWithServer((origin) =>
+      makeTask(origin, [
+        { kind: "navigate", url: `${origin}/login` },
+        { kind: "navigate", url: `${origin}/redirect-out` },
       ]),
     );
-    // Once a hop escaped, even allowlisted follow-up requests are aborted.
-    expect(result.provenance.allowedNonIdempotentRequests).toHaveLength(1);
+
+    expect(result.status).toBe("blocked");
+    expect(result.provenance.blockedRequests).toEqual([
+      expect.objectContaining({ url: "https://evil.example/x", reason: "off_allowlist" }),
+    ]);
+    expect(hits.get("GET /redirect-out")).toBe(1);
   });
 
   it("stops reading an oversized chunked download at the byte cap", async () => {
@@ -125,6 +124,19 @@ async function runFixture(
   taskFor: (origin: string) => PortalTask,
   options: RunFixtureOptions = {},
 ): Promise<RunPortalTaskResult> {
+  return (await runFixtureWithServer(taskFor, options)).result;
+}
+
+interface FixtureRun {
+  result: RunPortalTaskResult;
+  /** `METHOD /path` request counts the fixture server actually received. */
+  hits: ReadonlyMap<string, number>;
+}
+
+async function runFixtureWithServer(
+  taskFor: (origin: string) => PortalTask,
+  options: RunFixtureOptions = {},
+): Promise<FixtureRun> {
   const server = await startFixtureServer();
   try {
     const task = taskFor(server.origin);
@@ -150,6 +162,7 @@ async function runFixture(
           workspaceId: context.workspaceId,
           taskId: task.id,
           taskDigest: portalTaskDigest(task),
+          approvedBrowserProvider: "local-playwright",
           credentialRefs: { username: usernameRef, password: passwordRef },
         },
       ]),
@@ -158,13 +171,14 @@ async function runFixture(
         : { maxDownloadBytes: options.maxDownloadBytes }),
     });
 
-    return await runner.runTask({
+    const result = await runner.runTask({
       task,
       connectionId: "conn_browser",
       runId: "run_browser",
       workspaceId: context.workspaceId,
       now: "2026-02-01T00:00:00Z",
     });
+    return { result, hits: server.hits };
   } finally {
     await server.close();
   }
@@ -172,11 +186,17 @@ async function runFixture(
 
 interface FixtureServer {
   origin: string;
+  hits: ReadonlyMap<string, number>;
   close(): Promise<void>;
 }
 
 async function startFixtureServer(): Promise<FixtureServer> {
-  const server = createServer(handleFixtureRequest);
+  const hits = new Map<string, number>();
+  const server = createServer((request, response) => {
+    const key = `${request.method} ${new URL(request.url ?? "/", "http://localhost").pathname}`;
+    hits.set(key, (hits.get(key) ?? 0) + 1);
+    handleFixtureRequest(request, response);
+  });
   await new Promise<void>((resolve) => {
     server.listen(0, "127.0.0.1", resolve);
   });
@@ -186,6 +206,7 @@ async function startFixtureServer(): Promise<FixtureServer> {
   }
   return {
     origin: `http://localhost:${address.port}`,
+    hits,
     close: async () => {
       server.closeAllConnections();
       await new Promise<void>((resolve, reject) => {

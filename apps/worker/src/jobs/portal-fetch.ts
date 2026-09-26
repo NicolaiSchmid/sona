@@ -71,8 +71,12 @@ export interface PortalFetchRunRecorder {
 
 export interface RunPortalFetchJobInput {
   jobId: string;
-  /** Delivery attempt of this job id, starting at 1; each attempt gets its own run id. */
-  attempt?: number;
+  /**
+   * Delivery attempt of this job id, starting at 1. Every attempt gets its own
+   * run id because the run history is append-only and a failed attempt is
+   * recorded before its lease is released.
+   */
+  attempt: number;
   context: WorkspaceContext;
   connectionId: string;
   now: string;
@@ -136,7 +140,7 @@ export async function runPortalFetchJob(
     return { ...base, status: reservation.status, cooldownUntil: reservation.cooldownUntil };
   }
 
-  const runId = runIdFor(input.jobId, input.attempt ?? 1);
+  const runId = `${input.jobId}:${input.attempt}`;
   const runInput: RunPortalTaskInput = {
     task: connection.task,
     connectionId: input.connectionId,
@@ -187,10 +191,6 @@ function settledJobStatus(
     return "completed";
   }
   return TERMINAL_RUN_STATUSES.has(status) ? "rejected" : undefined;
-}
-
-function runIdFor(jobId: string, attempt: number): string {
-  return attempt <= 1 ? jobId : `${jobId}:${attempt}`;
 }
 
 async function releaseQuietly(

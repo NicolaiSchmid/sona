@@ -127,11 +127,13 @@ Implemented controls and their known limits:
 
 - Credentials are only filled into the task revision the connection was
   approved for (bound by content digest), never into a same-id rewrite.
+- Credential approval also names the browser provider; credentials approved
+  for a local browser are never loaded into a managed remote one.
 - The network guard runs on the browser context and refuses off-allowlist,
-  cleartext, WebSocket, and unreviewed non-idempotent traffic before it leaves
-  the browser. Redirect hops the browser follows on its own can be observed
-  but not aborted; an escaping hop marks the run `blocked` and aborts every
-  further request in that session.
+  cleartext, destructive-URL, WebSocket, and unreviewed non-idempotent traffic
+  before it is sent. Requests are issued by the worker with redirects disabled
+  so every hop is evaluated first; should the browser ever follow a redirect on
+  its own, the hop is recorded and the session fails closed.
 - Domain allowlists are hostname-based. They do not protect against DNS
   rebinding or portals resolving to private addresses, so browsers and
   workers must run in an egress-isolated network with no route to internal

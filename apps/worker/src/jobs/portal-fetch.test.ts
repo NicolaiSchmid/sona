@@ -44,6 +44,7 @@ function jobInput(
 ): RunPortalFetchJobInput {
   return {
     jobId: "job_1",
+    attempt: 1,
     context: { workspaceId: "ws_1" },
     connectionId: "conn_1",
     now: "2026-02-01T00:00:00Z",
@@ -65,7 +66,7 @@ describe("portal_fetch job", () => {
     );
 
     expect(first.status).toBe("completed");
-    expect(first.runResult?.runId).toBe("job_1");
+    expect(first.runResult?.runId).toBe("job_1:1");
     expect(second.status).toBe("duplicate");
     expect(second.runResult).toBeUndefined();
   });
@@ -187,8 +188,8 @@ describe("portal_fetch job", () => {
     expect(
       recorder.listRuns({ workspaceId: "ws_1" }).map((run) => [run.runId, run.status]),
     ).toEqual([
-      ["job_1", "completed"],
-      ["job_2", "blocked"],
+      ["job_1:1", "completed"],
+      ["job_2:1", "blocked"],
     ]);
     expect(recorder.listRuns({ workspaceId: "ws_other" })).toEqual([]);
   });
@@ -224,7 +225,7 @@ describe("portal_fetch job", () => {
       jobInput({ ...base, attempt: 2, now: "2026-02-01T00:01:00Z" }),
     );
 
-    expect(first.runId).toBe("job_1");
+    expect(first.runId).toBe("job_1:1");
     expect(second.runId).toBe("job_1:2");
     expect(second.runResult?.provenance.runId).toBe("job_1:2");
   });

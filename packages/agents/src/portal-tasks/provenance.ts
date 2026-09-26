@@ -28,6 +28,7 @@ export interface TaskRunProvenance {
 
 export type BlockedPortalRequestReason =
   | "off_allowlist"
+  | "destructive_url"
   | "non_idempotent_method"
   | "unreviewed_body"
   | "websocket";
@@ -52,7 +53,7 @@ export const PORTAL_RESOURCE_TYPES = [
 export type PortalResourceType = (typeof PORTAL_RESOURCE_TYPES)[number];
 
 export interface BlockedPortalRequest {
-  /** Sanitized: no query, fragment, or userinfo. */
+  /** Sanitized: no query, fragment, userinfo, or identifier-like path segments. */
   url: string;
   method: string;
   resourceType: PortalResourceType;
@@ -62,7 +63,7 @@ export interface BlockedPortalRequest {
 export type AllowedNonIdempotentRequestReason = (typeof ALLOWED_NON_IDEMPOTENT_REASONS)[number];
 
 export interface AllowedNonIdempotentPortalRequest {
-  /** Sanitized: no query, fragment, or userinfo. */
+  /** Sanitized: no query, fragment, userinfo, or identifier-like path segments. */
   url: string;
   method: PortalHttpMethodException["method"];
   reason: AllowedNonIdempotentRequestReason;
