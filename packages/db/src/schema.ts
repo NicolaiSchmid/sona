@@ -527,3 +527,35 @@ export interface EmailSyncCursorRow {
 export const EMAIL_TABLES = ["email_sync_cursors"] as const;
 
 export type EmailTableName = (typeof EMAIL_TABLES)[number];
+
+// --- External adapters schema (migrations/0010_adapters.sql) ------------------
+
+export interface PaperlessSyncCursorRow {
+  run_id: string;
+  workspace_id: string;
+  source_id: string;
+  last_modified: string;
+  last_document_id: number;
+  policy_hash: string;
+  recorded_at: string;
+}
+
+export interface AccountantShareLinkRow {
+  id: string;
+  workspace_id: string;
+  package_document_id: string;
+  package_sha256: string;
+  tax_year: number;
+  token_hash: string;
+  created_by: string;
+  created_at: string;
+  expires_at: string;
+  max_downloads: number;
+  download_count: number;
+  revoked_at: string | null;
+}
+
+/** Names of every table created by the external adapters migration. */
+export const ADAPTER_TABLES = ["paperless_sync_cursors", "accountant_share_links"] as const;
+
+export type AdapterTableName = (typeof ADAPTER_TABLES)[number];

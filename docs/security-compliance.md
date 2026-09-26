@@ -153,6 +153,22 @@ Implemented controls and their known limits:
 
 The IMAP source is read-only by design: the client interface has no flag, move, copy, delete, or expunge operation, folders are opened with `EXAMINE`, and the test fake fails if any mutating command is issued. Only server-parsed envelopes, body structures, and selected attachment parts are downloaded; bodies are never fetched, and of the envelope only sender, subject, date, and Message-ID are kept — recipient lists are discarded in memory and never stored. The app password is resolved from the secret store at connect time and every client error is re-thrown with addresses and credentials redacted. Sync summaries carry counts, redacted error messages, and the UID cursor (which names the configured folder) — no addresses, subjects, filenames, or content.
 
+## Paperless-ngx access
+
+The Paperless source is import-only: the client interface has no create, update, tag, note, or delete operation, the real client only issues `GET`s, and the test fake fails if any mutating endpoint is reached. The base URL must be HTTPS (plain HTTP only for loopback) and its host must be on the source's allowlist; the API token is resolved from the secret store per request, sent only in the `Authorization` header, and redacted from every error. The OCR `content` field is never requested. Raw records and document rows carry Paperless ids, titles, dates, tag/correspondent/type names, and hashes — never the archive's text — and sync summaries carry counts, redacted messages, and the `(modified, id)` cursor.
+
+## Accountant share links
+
+Accountant packages leave the workspace as a ZIP whose `MANIFEST.sha256` lets the recipient verify every file. In hosted mode a package may be handed out through a share link with these properties:
+
+- bearer token of 32 random bytes; only its SHA-256 is stored, and comparison is constant-time on the hashes,
+- expiry (default 7 days, hard cap 30 days) and a download cap (default 5),
+- revocation by the owner; a revoked, expired, or exhausted link denies with a reason, a wrong token denies without revealing link state,
+- append-only audit events for creation, every download, every denial on a known link, and revocation, written in the same transaction as the state change,
+- read-only: the link can never upload, replace, or delete the package, and the package it points at is pinned by document id and SHA-256.
+
+Archive paths inside the package are document ids; original filenames appear only in `documents.csv`. The optional recipient label is free text that should not contain personal data. Serving the bytes over HTTP, rate limiting, and IP logging belong to the hosted cloud layer.
+
 ## Early launch posture
 
 For early friend users:

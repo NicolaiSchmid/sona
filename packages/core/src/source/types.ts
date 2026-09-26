@@ -15,6 +15,7 @@ export type SourceKind =
   | "email"
   | "upload"
   | "portal"
+  | "paperless"
   | "portfolio"
   | "manual";
 

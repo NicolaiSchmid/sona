@@ -17,6 +17,7 @@
   },
   "dependencies": {
     "@sona/core": "workspace:*",
-    "@sona/receipts": "workspace:*"
+    "@sona/receipts": "workspace:*",
+    "@sona/tax-de": "workspace:*"
   }
 }
