@@ -119,4 +119,22 @@ describe("assetEventSchema", () => {
     const { componentId: _omitted, ...withoutComponent } = SAMPLE_IMPROVEMENT;
     expect(assetEventSchema.safeParse(withoutComponent).success).toBe(false);
   });
+
+  it("accepts a retraction and requires the retracted event id", () => {
+    const retraction = {
+      kind: "retraction",
+      id: "evt_retract",
+      workspaceId: "ws_1",
+      assetId: "asset_flat",
+      retractsEventId: "evt_bath_2026",
+      occurredOn: "2026-09-01",
+      description: "Booked as maintenance instead",
+      evidenceDocumentIds: [],
+      createdAt: "2026-09-01T00:00:00Z",
+    };
+    expect(assetEventSchema.safeParse(retraction).success).toBe(true);
+    const { retractsEventId: _omitted, ...withoutTarget } = retraction;
+    expect(assetEventSchema.safeParse(withoutTarget).success).toBe(false);
+    expect(assetEventSchema.safeParse({ ...retraction, retractsEventId: "" }).success).toBe(false);
+  });
 });

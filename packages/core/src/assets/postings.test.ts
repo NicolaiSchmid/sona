@@ -474,3 +474,66 @@ describe("buildDepreciationDraft — every schedule row", () => {
     expect(draftAfter.transaction.postings[0]?.amount.amount).toBe("7360.00");
   });
 });
+
+describe("planDepreciationDrafts — supersession history", () => {
+  it("counts every superseded recording of a year into the regenerated id", () => {
+    const plan = planDepreciationDrafts({
+      asset: SAMPLE_PROPERTY,
+      config: SAMPLE_PROPERTY_CONFIG,
+      schedule,
+      recorded: [
+        {
+          year: 2024,
+          transactionId: depreciationTransactionId("asset_flat", 1, 2024),
+          amount: { amount: "3180.00", commodity: "EUR" },
+          reviewState: "superseded",
+        },
+        {
+          year: 2024,
+          transactionId: depreciationTransactionId("asset_flat", 1, 2024, 1),
+          amount: { amount: "3180.00", commodity: "EUR" },
+          reviewState: "superseded",
+        },
+      ],
+      throughYear: 2024,
+      createdAt: CREATED_AT,
+    });
+    expect(plan.create.map((d) => d.transaction.id)).toEqual(["depr:asset_flat:v1:2024:r2"]);
+    expect(plan.create[0]?.transaction.postings.map((p) => p.id)).toEqual([
+      "depr:asset_flat:v1:2024:r2:expense",
+      "depr:asset_flat:v1:2024:r2:accumulated",
+    ]);
+    expect(plan.skipped).toEqual([]);
+    expect(plan.discrepancies).toEqual([]);
+    expect(depreciationTransactionId("asset_flat", 1, 2024, 2)).toBe("depr:asset_flat:v1:2024:r2");
+  });
+
+  it("lets the live recording of a year win over its superseded predecessor without a discrepancy", () => {
+    const plan = planDepreciationDrafts({
+      asset: SAMPLE_PROPERTY,
+      config: SAMPLE_PROPERTY_CONFIG,
+      schedule,
+      recorded: [
+        {
+          year: 2024,
+          transactionId: "depr:asset_flat:v1:2024",
+          amount: { amount: "1.00", commodity: "EUR" },
+          reviewState: "superseded",
+        },
+        {
+          year: 2024,
+          transactionId: "depr:asset_flat:v1:2024:r1",
+          amount: { amount: "3180.00", commodity: "EUR" },
+          reviewState: "user_reviewed",
+        },
+      ],
+      throughYear: 2024,
+      createdAt: CREATED_AT,
+    });
+    expect(plan.create).toEqual([]);
+    expect(plan.skipped).toEqual([
+      { year: 2024, transactionId: "depr:asset_flat:v1:2024:r1", reason: "already_recorded" },
+    ]);
+    expect(plan.discrepancies).toEqual([]);
+  });
+});

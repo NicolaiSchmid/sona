@@ -252,6 +252,61 @@ describe("generateExportPackage", () => {
     });
   });
 
+  it("writes recorded amount and version columns, leaving them empty for a planned year", () => {
+    const final2026 = generateExportPackage({
+      year: 2026,
+      postings: SAMPLE_POSTINGS,
+      template: PRIVATE_DE_TEMPLATE,
+      mode: "final",
+      depreciation: [SAMPLE_DEPRECIATION],
+    });
+    const [, recorded] = (
+      final2026.files.find((f) => f.path === "depreciation-schedules.csv")?.content ?? ""
+    ).split("\n");
+    // status,transactionId,postingIds,recordedAmount,recordedConfigVersion,evidenceDocumentIds
+    expect(recorded).toContain(
+      ",user_reviewed,t_depr,p_depr;p_depr_accumulated,6360.00,1,doc_2;doc_notary,",
+    );
+
+    const draft2027 = generateExportPackage({
+      year: 2027,
+      postings: [],
+      template: PRIVATE_DE_TEMPLATE,
+      mode: "draft",
+      depreciation: [SAMPLE_DEPRECIATION],
+    });
+    const [, planned] = (
+      draft2027.files.find((f) => f.path === "depreciation-schedules.csv")?.content ?? ""
+    ).split("\n");
+    expect(planned).toContain(",not_generated,,,,,doc_2;doc_notary,");
+  });
+
+  it("lists a shared document once per referencing record in the manifest and links", () => {
+    // doc_2 substantiates both the ledger posting p_depr and the schedule row
+    // that points at the same posting, so it is listed under each reference.
+    const p = generateExportPackage({
+      year: 2026,
+      postings: SAMPLE_POSTINGS,
+      template: PRIVATE_DE_TEMPLATE,
+      mode: "final",
+      depreciation: [SAMPLE_DEPRECIATION],
+    });
+    const manifest = (p.files.find((f) => f.path === "receipt-manifest.csv")?.content ?? "").split(
+      "\n",
+    );
+    expect(manifest.filter((l) => l.startsWith("doc_2,"))).toEqual([
+      "doc_2,p_depr,Expenses:RealEstate:Depreciation,depreciation",
+      "doc_2,p_depr,asset:asset_flat,depreciation",
+    ]);
+    const links = JSON.parse(
+      p.files.find((f) => f.path === "evidence-links.json")?.content ?? "[]",
+    ) as Array<{ postingId: string; transactionId: string; documentIds: string[] }>;
+    expect(links.filter((l) => l.postingId === "p_depr")).toEqual([
+      { postingId: "p_depr", transactionId: "t_depr", documentIds: ["doc_2"] },
+      { postingId: "p_depr", transactionId: "t_depr", documentIds: ["doc_2", "doc_notary"] },
+    ]);
+  });
+
   it("neutralizes spreadsheet formula injection in text fields", () => {
     const p = generateExportPackage({
       year: 2026,

@@ -976,3 +976,281 @@ describe("computeDepreciationSchedule — disposal variants", () => {
     expect(lastRow(s).closingBookValue).toBe("0.00");
   });
 });
+
+describe("allocateAcquisitionCosts — largest remainder", () => {
+  function withSplit(costs: readonly string[], sideCost: string): Asset {
+    return {
+      ...SAMPLE_PROPERTY,
+      components: costs.map((amount, index) => ({
+        id: `cmp_${index}`,
+        role: "other" as const,
+        label: `Part ${index}`,
+        cost: { amount, commodity: "EUR" },
+        depreciable: true,
+      })),
+      acquisitionSideCosts: [
+        {
+          id: "sc",
+          label: "Fee",
+          amount: { amount: sideCost, commodity: "EUR" },
+          evidenceDocumentIds: [],
+        },
+      ],
+    };
+  }
+
+  it("hands leftover units to the largest fractional remainders, not to the first component", () => {
+    // 0.07 over a 3:1:1 split floors to 0.04/0.01/0.01. The two 1-share
+    // components carry the larger remainder, so the first of them gets the cent.
+    const allocation = allocateAcquisitionCosts(withSplit(["3.00", "1.00", "1.00"], "0.07"));
+    expect(allocation.components.map((c) => c.allocatedSideCosts)).toEqual([
+      "0.04",
+      "0.02",
+      "0.01",
+    ]);
+    expect(sumDecimals(allocation.components.map((c) => c.allocatedSideCosts))).toBe("0.07");
+  });
+
+  it("spreads a few cents across many equal components deterministically", () => {
+    const sevenParts = Array.from({ length: 7 }, () => "1.00");
+    const oneCent = withSplit(sevenParts, "0.01");
+    const first = allocateAcquisitionCosts(oneCent);
+    expect(first.components.map((c) => c.allocatedSideCosts)).toEqual([
+      "0.01",
+      "0.00",
+      "0.00",
+      "0.00",
+      "0.00",
+      "0.00",
+      "0.00",
+    ]);
+    expect(allocateAcquisitionCosts(oneCent)).toEqual(first);
+
+    const fiveCents = allocateAcquisitionCosts(withSplit(sevenParts, "0.05"));
+    expect(fiveCents.components.map((c) => c.allocatedSideCosts)).toEqual([
+      "0.01",
+      "0.01",
+      "0.01",
+      "0.01",
+      "0.01",
+      "0.00",
+      "0.00",
+    ]);
+    expect(sumDecimals(fiveCents.components.map((c) => c.allocatedSideCosts))).toBe("0.05");
+  });
+
+  it("allocates nothing when there are no side costs", () => {
+    const allocation = allocateAcquisitionCosts({ ...SAMPLE_PROPERTY, acquisitionSideCosts: [] });
+    expect(allocation.sideCosts).toBe("0.00");
+    expect(allocation.components.map((c) => c.allocatedSideCosts)).toEqual(["0.00", "0.00"]);
+    expect(allocation.components.map((c) => c.total)).toEqual(["300000.00", "100000.00"]);
+    expect(allocation.totalAcquisitionCost).toBe("400000.00");
+    expect(allocation.depreciableBasis).toBe("300000.00");
+  });
+
+  it("gives zero-cost components nothing while the others split the whole amount", () => {
+    const allocation = allocateAcquisitionCosts(
+      withSplit(["0.00", "2.00", "0.00", "2.00"], "0.03"),
+    );
+    expect(allocation.components.map((c) => c.allocatedSideCosts)).toEqual([
+      "0.00",
+      "0.02",
+      "0.00",
+      "0.01",
+    ]);
+  });
+});
+
+describe("computeDepreciationSchedule — retraction provenance", () => {
+  const retractSale = {
+    kind: "retraction" as const,
+    id: "evt_retract_sale",
+    workspaceId: "ws_1",
+    assetId: "asset_flat",
+    retractsEventId: "evt_sale_2027",
+    occurredOn: "2027-05-01",
+    description: "Sale fell through",
+    evidenceDocumentIds: ["doc_retraction_memo"],
+    createdAt: "2027-05-01T00:00:00Z",
+  };
+
+  it("runs to completion when a disposal is retracted without a replacement", () => {
+    const plain = computeDepreciationSchedule({
+      asset: SAMPLE_PROPERTY,
+      config: SAMPLE_PROPERTY_CONFIG,
+    });
+    const s = computeDepreciationSchedule({
+      asset: SAMPLE_PROPERTY,
+      config: SAMPLE_PROPERTY_CONFIG,
+      events: [SAMPLE_DISPOSAL, retractSale],
+    });
+    expect(s.disposedOn).toBeUndefined();
+    expect(s.rows).toEqual(plain.rows);
+    expect(s.complete).toBe(true);
+    expect(totalOf(s)).toBe("318000.00");
+  });
+
+  it("keeps the evidence of a retraction and of the retracted event off every row", () => {
+    const s = computeDepreciationSchedule({
+      asset: SAMPLE_PROPERTY,
+      config: SAMPLE_PROPERTY_CONFIG,
+      events: [
+        SAMPLE_IMPROVEMENT,
+        SAMPLE_DISPOSAL,
+        retractSale,
+        {
+          ...retractSale,
+          id: "evt_retract_bath",
+          retractsEventId: "evt_bath_2026",
+          evidenceDocumentIds: ["doc_maintenance_memo"],
+        },
+      ],
+    });
+    expect(s.rows.length).toBeGreaterThan(4);
+    for (const row of s.rows) {
+      expect(row.appliedEventIds).toEqual([]);
+      expect(row.evidenceDocumentIds).toEqual([
+        "doc_purchase_contract",
+        "doc_transfer_tax",
+        "doc_notary",
+      ]);
+      expect(row.missingEvidenceFor).toEqual([]);
+    }
+  });
+
+  it("rejects a retraction that targets another asset's event", () => {
+    const laptopUpgrade = {
+      ...SAMPLE_IMPROVEMENT,
+      id: "evt_laptop_upgrade",
+      assetId: "asset_laptop",
+      componentId: "cmp_laptop",
+    };
+    const crossRetraction = {
+      ...retractSale,
+      id: "evt_cross",
+      retractsEventId: "evt_laptop_upgrade",
+    };
+    expect(() =>
+      computeDepreciationSchedule({
+        asset: SAMPLE_PROPERTY,
+        config: SAMPLE_PROPERTY_CONFIG,
+        events: [laptopUpgrade, crossRetraction],
+      }),
+    ).toThrow(/does not belong to asset asset_flat/);
+    // Without the foreign event in this asset's history the target is simply unknown.
+    expect(() =>
+      computeDepreciationSchedule({
+        asset: SAMPLE_PROPERTY,
+        config: SAMPLE_PROPERTY_CONFIG,
+        events: [crossRetraction],
+      }),
+    ).toThrow(DepreciationError);
+  });
+
+  it("leaves a fully depreciated schedule closed when the re-opening improvement is retracted", () => {
+    const s = computeDepreciationSchedule({
+      asset: SAMPLE_EQUIPMENT,
+      config: { ...SAMPLE_EQUIPMENT_CONFIG, proRataTemporis: false },
+      events: [
+        {
+          ...SAMPLE_IMPROVEMENT,
+          id: "evt_late",
+          assetId: "asset_laptop",
+          componentId: "cmp_laptop",
+          occurredOn: "2031-02-01",
+          amount: { amount: "600.00", commodity: "EUR" },
+        },
+        {
+          ...retractSale,
+          id: "evt_retract_late",
+          assetId: "asset_laptop",
+          retractsEventId: "evt_late",
+          occurredOn: "2031-03-01",
+        },
+      ],
+    });
+    expect(s.rows.map((r) => r.year)).toEqual([2025, 2026, 2027]);
+    expect(lastRow(s).notes).not.toContain("post_completion_improvement");
+    expect(totalOf(s)).toBe("12000.00");
+    expect(s.complete).toBe(true);
+  });
+});
+
+describe("computeDepreciationSchedule — disposal provenance", () => {
+  it("names an unevidenced disposal only on the disposal-year row", () => {
+    const s = computeDepreciationSchedule({
+      asset: SAMPLE_PROPERTY,
+      config: SAMPLE_PROPERTY_CONFIG,
+      events: [{ ...SAMPLE_DISPOSAL, evidenceDocumentIds: [] }],
+    });
+    expect(rowFor(s, 2026).missingEvidenceFor).toEqual([]);
+    expect(rowFor(s, 2027).appliedEventIds).toEqual(["evt_sale_2027"]);
+    expect(rowFor(s, 2027).missingEvidenceFor).toEqual(["event:evt_sale_2027"]);
+    expect(rowFor(s, 2027).evidenceDocumentIds).toEqual(rowFor(s, 2026).evidenceDocumentIds);
+  });
+
+  it("depreciates a single month when the asset is disposed in its acquisition month", () => {
+    const s = computeDepreciationSchedule({
+      asset: SAMPLE_PROPERTY,
+      config: SAMPLE_PROPERTY_CONFIG,
+      events: [{ ...SAMPLE_DISPOSAL, occurredOn: "2024-07-31" }],
+    });
+    expect(s.rows).toHaveLength(1);
+    const only = lastRow(s);
+    expect(only.monthsInService).toBe(1);
+    // 318 000 × 2 % / 12 — one month is still a positive amount, not a zero-amount error.
+    expect(only.amount).toBe("530.00");
+    expect(only.notes).toEqual(["pro_rata", "disposal_year"]);
+    expect(only.closingBookValue).toBe("317470.00");
+    expect(s.complete).toBe(true);
+  });
+});
+
+describe("computeDepreciationSchedule — re-opened percentage schedule and fine scales", () => {
+  it("flags the re-opening year of a percentage schedule and nothing before it", () => {
+    const s = computeDepreciationSchedule({
+      asset: SAMPLE_EQUIPMENT,
+      config: {
+        ...SAMPLE_EQUIPMENT_CONFIG,
+        proRataTemporis: false,
+        method: { kind: "linear_percentage", annualRatePercent: "50" },
+      },
+      events: [
+        {
+          ...SAMPLE_IMPROVEMENT,
+          id: "evt_late",
+          assetId: "asset_laptop",
+          componentId: "cmp_laptop",
+          occurredOn: "2030-02-01",
+          amount: { amount: "600.00", commodity: "EUR" },
+        },
+      ],
+    });
+    expect(rowFor(s, 2025).notes).toEqual([]);
+    expect(rowFor(s, 2026).notes).toEqual(["final_remainder"]);
+    // 50 % of the raised basis exceeds the 600 left, so the re-opening year is also a remainder.
+    expect(rowFor(s, 2030).notes).toEqual(["post_completion_improvement", "final_remainder"]);
+    expect(rowFor(s, 2030).openingBookValue).toBe("600.00");
+  });
+
+  it("keeps a tiny basis alive at a finer rounding scale where cents would round to zero", () => {
+    const asset: Asset = {
+      ...SAMPLE_EQUIPMENT,
+      components: [
+        { ...componentOf(SAMPLE_EQUIPMENT, 0), cost: { amount: "0.10", commodity: "EUR" } },
+      ],
+    };
+    const config: DepreciationScheduleConfig = {
+      ...SAMPLE_EQUIPMENT_CONFIG,
+      method: { kind: "linear_percentage", annualRatePercent: "2" },
+    };
+    expect(() => computeDepreciationSchedule({ asset, config })).toThrow(/at scale 2/);
+    const fine = computeDepreciationSchedule({ asset, config: { ...config, roundingScale: 4 } });
+    expect(fine.scale).toBe(4);
+    // 0.10 × 2 % × 3/12 for the October acquisition.
+    expect(fine.rows[0]?.amount).toBe("0.0005");
+    expect(fine.rows.every((r) => r.amount !== "0.0000")).toBe(true);
+    expect(totalOf(fine)).toBe("0.1000");
+    expect(fine.complete).toBe(true);
+  });
+});

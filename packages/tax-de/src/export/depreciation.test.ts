@@ -325,6 +325,61 @@ describe("generateDepreciationSection", () => {
     ]);
   });
 
+  it("labels a disposal year and names an unevidenced disposal event in the notes", () => {
+    const disposed = {
+      ...SAMPLE_DEPRECIATION,
+      transactions: [],
+      schedule: computeDepreciationSchedule({
+        asset: SAMPLE_ASSET,
+        config: SAMPLE_SCHEDULE_CONFIG,
+        events: [
+          {
+            kind: "disposal",
+            id: "evt_sale",
+            workspaceId: "ws_1",
+            assetId: "asset_flat",
+            occurredOn: "2026-06-30",
+            description: "Sold",
+            evidenceDocumentIds: [],
+            createdAt: "2026-07-01T00:00:00Z",
+          },
+        ],
+      }),
+    };
+    const { rows, excluded, missingEvidence } = generateDepreciationSection([disposed], {
+      year: 2026,
+      mode: "draft",
+    });
+    expect(excluded).toEqual([]);
+    expect(rows[0]).toMatchObject({
+      monthsInService: 6,
+      amount: "3180.00",
+      status: "not_generated",
+      recordedAmount: undefined,
+      recordedConfigVersion: undefined,
+      evidenceDocumentIds: ["doc_2", "doc_notary"],
+    });
+    expect(rows[0]?.notes).toContain("disposal year");
+    expect(rows[0]?.notes).toContain("missing evidence for event:evt_sale");
+    expect(missingEvidence).toEqual([
+      {
+        postingId: "schedule:cfg_flat_v1:2026",
+        transactionId: "schedule:cfg_flat_v1:2026",
+        date: "2026-12-31",
+        account: "asset:asset_flat",
+        sectionId: "depreciation",
+        amount: "3180.00",
+        currency: "EUR",
+      },
+    ]);
+    // The year after the disposal is outside the schedule and has nothing recorded.
+    expect(generateDepreciationSection([disposed], { year: 2027, mode: "draft" })).toEqual({
+      rows: [],
+      excluded: [],
+      missingEvidence: [],
+    });
+  });
+
   it("never uses legal-certainty wording", () => {
     const { rows } = generateDepreciationSection([SAMPLE_DEPRECIATION], {
       year: 2026,
