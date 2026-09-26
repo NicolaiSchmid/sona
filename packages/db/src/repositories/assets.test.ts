@@ -6,6 +6,7 @@ import {
   computeDepreciationSchedule,
   type DepreciationScheduleConfig,
   planDepreciationDrafts,
+  type RecordedDepreciationEntry,
 } from "@sona/core";
 import { describe, expect, it } from "vitest";
 import { CORE_MIGRATIONS } from "../migrations/index.js";
@@ -15,7 +16,7 @@ import {
   type DbClient,
   type SqliteDatabase,
 } from "../runner.js";
-import { type RecordedDepreciationEntry, SqliteAssetRepository } from "./assets.js";
+import { SqliteAssetRepository } from "./assets.js";
 
 const require = createRequire(import.meta.url);
 const { DatabaseSync } = require("node:sqlite") as typeof import("node:sqlite");

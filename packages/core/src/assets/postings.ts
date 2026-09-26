@@ -15,8 +15,8 @@
 import type { EvidenceLink } from "../evidence/types";
 import { validateBalancedTransaction } from "../ledger/balance";
 import type { LedgerPosting, LedgerTransaction } from "../ledger/types";
-import { decimalsEqual, negateDecimal } from "../money/decimal";
-import type { MoneyAmount } from "../money/types";
+import { negateDecimal } from "../money/decimal";
+import { type MoneyAmount, moneyAmountsEqual } from "../money/types";
 import type { ReviewState } from "../review/types";
 import {
   type DepreciationSchedule,
@@ -70,12 +70,12 @@ export interface BuildDepreciationDraftInput {
   attempt?: number;
 }
 
-/** Booking date: the disposal date in a disposal year, otherwise 31 December. */
-function bookedOnFor(schedule: DepreciationSchedule, row: DepreciationScheduleRow): string {
-  if (schedule.disposedOn?.startsWith(`${row.year}-`)) {
-    return schedule.disposedOn;
-  }
-  return `${row.year}-12-31`;
+/** Booking date of a schedule year: the disposal date in a disposal year, otherwise 31 December. */
+export function depreciationBookedOn(
+  schedule: Pick<DepreciationSchedule, "disposedOn">,
+  year: number,
+): string {
+  return schedule.disposedOn?.startsWith(`${year}-`) ? schedule.disposedOn : `${year}-12-31`;
 }
 
 export function buildDepreciationDraft(input: BuildDepreciationDraftInput): DepreciationDraft {
@@ -122,7 +122,7 @@ export function buildDepreciationDraft(input: BuildDepreciationDraftInput): Depr
   const transaction: LedgerTransaction = {
     id: transactionId,
     workspaceId: asset.workspaceId,
-    bookedOn: bookedOnFor(schedule, row),
+    bookedOn: depreciationBookedOn(schedule, row.year),
     description: `Suggested depreciation ${row.year}: ${asset.name} (configured schedule v${config.version}, review required)`,
     postings,
     reviewState: "draft",
@@ -284,8 +284,10 @@ export function planDepreciationDrafts(input: PlanDepreciationDraftsInput): Depr
       reason: "already_recorded",
     });
     if (
-      existing.amount.commodity !== input.schedule.commodity ||
-      !decimalsEqual(existing.amount.amount, row.amount)
+      !moneyAmountsEqual(existing.amount, {
+        amount: row.amount,
+        commodity: input.schedule.commodity,
+      })
     ) {
       plan.discrepancies.push(discrepancyFor(existing, "amount_mismatch", row.amount));
     }

@@ -18,10 +18,11 @@ import {
   type AssetKind,
   type DepreciationRowNote,
   type DepreciationSchedule,
-  decimalsEqual,
+  depreciationBookedOn,
   describeDepreciationMethod,
   type MoneyAmount,
   meetsReviewState,
+  moneyAmountsEqual,
   type ReviewState,
 } from "@sona/core";
 import { REQUIRED_STATE } from "./generate.js";
@@ -135,10 +136,7 @@ function reviewGap(
   if (!meetsReviewState(transaction.reviewState, required)) {
     return `review state "${transaction.reviewState}" below required "${required}"`;
   }
-  const same =
-    transaction.amount.commodity === scheduled.commodity &&
-    decimalsEqual(transaction.amount.amount, scheduled.amount);
-  if (!same) {
+  if (!moneyAmountsEqual(transaction.amount, scheduled)) {
     return `recorded amount ${transaction.amount.amount} ${transaction.amount.commodity} (config v${transaction.configVersion}) differs from configured schedule ${scheduled.amount} ${scheduled.commodity}; adjustment review required`;
   }
   return undefined;
@@ -176,7 +174,7 @@ export function generateDepreciationSection(
       (t): t is LiveDepreciationTransactionRef =>
         t.year === options.year && t.reviewState !== "superseded",
     );
-    const [transaction, ...duplicates] = live;
+    const [transaction] = live;
     const row = schedule.rows.find((r) => r.year === options.year);
     if (row === undefined) {
       if (transaction !== undefined) {
@@ -194,7 +192,7 @@ export function generateDepreciationSection(
 
     const status: DepreciationRowStatus = transaction?.reviewState ?? "not_generated";
     const gap =
-      duplicates.length > 0
+      live.length > 1
         ? `more than one live transaction recorded for this year (${live.map((t) => t.transactionId).join(", ")}); review required`
         : reviewGap(transaction, { amount: row.amount, commodity: schedule.commodity });
     if (options.mode === "final" && gap !== undefined) {
@@ -244,10 +242,7 @@ export function generateDepreciationSection(
     if (missingEvidence) {
       result.missingEvidence.push({
         ...depreciationRowReference(exportRow),
-        // Same booking date the draft transaction uses.
-        date: schedule.disposedOn?.startsWith(`${row.year}-`)
-          ? schedule.disposedOn
-          : `${row.year}-12-31`,
+        date: depreciationBookedOn(schedule, row.year),
         amount: row.amount,
         currency: schedule.commodity,
       });
