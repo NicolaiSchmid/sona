@@ -95,6 +95,10 @@ Email is the preferred invoice channel before browser automation. The email sour
 
 Mailbox credentials live in the secret store and never in config or logs.
 
+## Paperless-ngx import
+
+Users with an existing Paperless-ngx archive can add it as a read-only source. The import lists documents in `(modified, id)` order from the last cursor, applies a tag allowlist and MIME/size policy, downloads originals (never the OCR text), verifies the bytes carry the declared type's signature, and stores them through the document storage boundary with content-hash dedup. Each imported document gets a raw source record with the Paperless id, title, dates, resolved tag/correspondent/type names, and the stored hash; a retagged or renamed document gets a superseding record and its bytes are deduplicated. Paperless is never written to. See `docs/adapters.md`.
+
 ## Auto-apply policy
 
 Auto-apply should be configurable and conservative.

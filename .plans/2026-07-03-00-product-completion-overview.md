@@ -30,7 +30,7 @@ Index and sequencing for all Sona implementation plans, from foundation to a com
 | 18 | `2026-07-03-18-web-review-ui.md` | planned |
 | 19 | `2026-07-03-19-auth-tenancy.md` | planned |
 | 20 | `2026-07-03-20-hosted-cloud-mvp.md` | planned |
-| 21 | `2026-07-03-21-external-adapters.md` | planned |
+| 21 | `2026-07-03-21-external-adapters.md` | done |
 
 ## Sequencing Rationale
 

@@ -88,6 +88,7 @@ The first implementation should be TypeScript, strict, test-first, and exposed t
 - [Receipt reconciliation](docs/receipt-reconciliation.md)
 - [Agent receipt fetching](docs/agent-receipt-fetching.md)
 - [Tax exports](docs/tax-exports.md)
+- [Adapters](docs/adapters.md)
 - [Security, privacy, and compliance](docs/security-compliance.md)
 - [Roadmap](docs/roadmap.md)
 
