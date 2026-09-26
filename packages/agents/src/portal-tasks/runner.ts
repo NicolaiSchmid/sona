@@ -18,6 +18,7 @@ import type { FetchedDocument, TaskRunProvenance } from "./provenance.js";
 import type { PortalTask } from "./schema.js";
 
 export interface RunPortalTaskInput {
+  /** Treated as untrusted: runners re-validate it and execute the parsed copy. */
   task: PortalTask;
   connectionId: string;
   runId: string;
@@ -31,7 +32,9 @@ export interface RunPortalTaskResult {
   runId: string;
   taskId: string;
   taskVersion: number;
+  /** Fetched documents with content replaced by a `stored-document:` reference. */
   documents: FetchedDocument[];
+  /** `@sona/core` storage records of the persisted originals (not the `@sona/receipts` evidence record `toStoredDocument` builds). */
   storedDocuments: StoredDocument[];
   provenance: TaskRunProvenance;
   warnings: string[];
@@ -50,12 +53,12 @@ export type PortalTaskRunStatus =
   | "failed";
 
 /**
- * The result skeleton every runner starts from. It is built before the task is
- * validated so a malformed definition still yields a structured
- * `policy_refused` result; task identity is therefore read defensively from
- * the unvalidated input.
+ * The result skeleton every runner starts from. Status starts optimistic and
+ * runners only ever downgrade it. It is built before the task is validated so
+ * a malformed definition still yields a structured `policy_refused` result;
+ * task identity is therefore read defensively from the unvalidated input.
  */
-export function createBaseRunResult(
+export function createInitialRunResult(
   input: RunPortalTaskInput,
   provider: string,
 ): RunPortalTaskResult {
@@ -107,11 +110,12 @@ function isObject(value: unknown): value is Record<string, unknown> {
 /**
  * A deterministic fake runner. It re-checks the read-only policy (defense in
  * depth), then returns a single placeholder invoice document with provenance.
- * It performs no network or browser I/O.
+ * It performs no network or browser I/O and, unlike the Playwright runner,
+ * does not re-parse the task: tests hand it already-typed definitions.
  */
 export class FakePortalTaskRunner implements PortalTaskRunner {
   async runTask(input: RunPortalTaskInput): Promise<RunPortalTaskResult> {
-    const result = createBaseRunResult(input, "fake");
+    const result = createInitialRunResult(input, "fake");
 
     const policy = validateReadOnlyActions(input.task.allowedActions);
     if (!policy.valid) {

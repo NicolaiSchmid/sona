@@ -118,6 +118,7 @@ pnpm typecheck  # tsc -b only
 pnpm lint       # biome check .
 pnpm format     # biome format --write .
 pnpm test       # vitest run
+pnpm test:portal-browser  # real-Chromium portal runner fixtures (needs `playwright install chromium-headless-shell`)
 ```
 
 ### Workspace layout

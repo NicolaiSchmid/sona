@@ -108,6 +108,6 @@ export function validateReadOnlyActions(actions: readonly string[]): ReadOnlyPol
 }
 
 /** Returns the destructive concept a selector implies, or `undefined` if safe. */
-export function destructiveSelectorConceptFor(selector: string): string | undefined {
+export function forbiddenSelectorConceptFor(selector: string): string | undefined {
   return forbiddenConcept(selector, FORBIDDEN_SELECTOR_PHRASES);
 }

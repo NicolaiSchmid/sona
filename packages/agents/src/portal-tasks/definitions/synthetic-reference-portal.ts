@@ -16,6 +16,7 @@ export const syntheticReferencePortalTask = {
       urlPattern: "https://portal.test/login",
       reason: "login",
       justification: "Portal login form requires POST before read-only invoice access.",
+      allowedBodyFields: ["email", "password"],
     },
   ],
   steps: [

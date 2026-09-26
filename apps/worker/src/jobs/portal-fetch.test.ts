@@ -9,6 +9,7 @@ import { describe, expect, it } from "vitest";
 import {
   InMemoryPortalFetchConnectionRepository,
   InMemoryPortalFetchJobStateStore,
+  InMemoryPortalFetchRunRecorder,
   type PortalFetchConnection,
   type PortalFetchConnectionRepository,
   type PortalFetchJobStateStore,
@@ -29,12 +30,14 @@ const task: PortalTask = {
   steps: [],
 };
 
+const runs = new InMemoryPortalFetchRunRecorder();
+
 describe("portal_fetch job", () => {
   it("runs a portal task by connection ID and treats repeated job IDs as idempotent", async () => {
     const state = new InMemoryPortalFetchJobStateStore();
     const connections = new InMemoryPortalFetchConnectionRepository([
       {
-        connectionId: "conn_1",
+        id: "conn_1",
         workspaceId: "ws_1",
         task,
       },
@@ -49,6 +52,7 @@ describe("portal_fetch job", () => {
       runner: new FakePortalTaskRunner(),
       connections,
       state,
+      runs,
     });
     const second = await runPortalFetchJob({
       jobId: "job_1",
@@ -59,6 +63,7 @@ describe("portal_fetch job", () => {
       runner: new FakePortalTaskRunner(),
       connections,
       state,
+      runs,
     });
 
     expect(first.status).toBe("completed");
@@ -71,7 +76,7 @@ describe("portal_fetch job", () => {
     const state = new InMemoryPortalFetchJobStateStore();
     const connections = new InMemoryPortalFetchConnectionRepository([
       {
-        connectionId: "conn_1",
+        id: "conn_1",
         workspaceId: "ws_1",
         task,
       },
@@ -86,6 +91,7 @@ describe("portal_fetch job", () => {
       runner: new FakePortalTaskRunner(),
       connections,
       state,
+      runs,
     });
     const blocked = await runPortalFetchJob({
       jobId: "job_2",
@@ -96,6 +102,7 @@ describe("portal_fetch job", () => {
       runner: new FakePortalTaskRunner(),
       connections,
       state,
+      runs,
     });
 
     expect(blocked.status).toBe("cooldown");
@@ -106,7 +113,7 @@ describe("portal_fetch job", () => {
     const state = new InMemoryPortalFetchJobStateStore();
     const connections = new InMemoryPortalFetchConnectionRepository([
       {
-        connectionId: "conn_1",
+        id: "conn_1",
         workspaceId: "ws_1",
         task,
       },
@@ -122,6 +129,7 @@ describe("portal_fetch job", () => {
       runner,
       connections,
       state,
+      runs,
     });
     await runner.started;
     const second = await runPortalFetchJob({
@@ -133,6 +141,7 @@ describe("portal_fetch job", () => {
       runner: new FakePortalTaskRunner(),
       connections,
       state,
+      runs,
     });
     runner.resolve();
     const firstResult = await first;
@@ -145,7 +154,7 @@ describe("portal_fetch job", () => {
   it("releases the job lease after a failed run so a retry can run after the cooldown", async () => {
     const state = new InMemoryPortalFetchJobStateStore();
     const connections = new InMemoryPortalFetchConnectionRepository([
-      { connectionId: "conn_1", workspaceId: "ws_1", task },
+      { id: "conn_1", workspaceId: "ws_1", task },
     ]);
     const base = {
       jobId: "job_1",
@@ -154,12 +163,13 @@ describe("portal_fetch job", () => {
       cooldownMs: 60_000,
       connections,
       state,
+      runs,
     };
 
     const failed = await runPortalFetchJob({
       ...base,
       now: "2026-02-01T00:00:00Z",
-      runner: new StatusPortalTaskRunner("blocked"),
+      runner: new StatusPortalTaskRunner("failed"),
     });
     const duringCooldown = await runPortalFetchJob({
       ...base,
@@ -186,7 +196,7 @@ describe("portal_fetch job", () => {
   it("releases the job lease when the runner throws", async () => {
     const state = new InMemoryPortalFetchJobStateStore();
     const connections = new InMemoryPortalFetchConnectionRepository([
-      { connectionId: "conn_1", workspaceId: "ws_1", task },
+      { id: "conn_1", workspaceId: "ws_1", task },
     ]);
     const base = {
       jobId: "job_1",
@@ -195,6 +205,7 @@ describe("portal_fetch job", () => {
       cooldownMs: 60_000,
       connections,
       state,
+      runs,
     };
 
     const thrown = await runPortalFetchJob({
@@ -213,14 +224,164 @@ describe("portal_fetch job", () => {
     expect(retried.status).toBe("completed");
   });
 
-  it("propagates non-success runner statuses as failed jobs", async () => {
+  it.each([
+    "blocked",
+    "policy_refused",
+    "selector_missing",
+  ] as const)("consumes the job id for the terminal runner status %s instead of retrying", async (status) => {
     const state = new InMemoryPortalFetchJobStateStore();
     const connections = new InMemoryPortalFetchConnectionRepository([
-      {
-        connectionId: "conn_1",
-        workspaceId: "ws_1",
-        task,
+      { id: "conn_1", workspaceId: "ws_1", task },
+    ]);
+    const base = {
+      jobId: "job_1",
+      context: { workspaceId: "ws_1" },
+      connectionId: "conn_1",
+      cooldownMs: 60_000,
+      connections,
+      state,
+      runs,
+    };
+
+    const result = await runPortalFetchJob({
+      ...base,
+      now: "2026-02-01T00:00:00Z",
+      runner: new StatusPortalTaskRunner(status),
+    });
+    const retry = await runPortalFetchJob({
+      ...base,
+      now: "2026-02-01T00:05:00Z",
+      runner: new FakePortalTaskRunner(),
+    });
+
+    expect(result.status).toBe("rejected");
+    expect(result.runResult?.status).toBe(status);
+    expect(retry.status).toBe("duplicate");
+  });
+
+  it("records every run that produced a result before settling the lease", async () => {
+    const state = new InMemoryPortalFetchJobStateStore();
+    const recorder = new InMemoryPortalFetchRunRecorder();
+    const connections = new InMemoryPortalFetchConnectionRepository([
+      { id: "conn_1", workspaceId: "ws_1", task },
+    ]);
+    const base = {
+      context: { workspaceId: "ws_1" },
+      connectionId: "conn_1",
+      cooldownMs: 1,
+      connections,
+      state,
+      runs: recorder,
+    };
+
+    await runPortalFetchJob({
+      ...base,
+      jobId: "job_1",
+      now: "2026-02-01T00:00:00Z",
+      runner: new FakePortalTaskRunner(),
+    });
+    await runPortalFetchJob({
+      ...base,
+      jobId: "job_2",
+      now: "2026-02-01T00:01:00Z",
+      runner: new StatusPortalTaskRunner("blocked"),
+    });
+    await runPortalFetchJob({
+      ...base,
+      jobId: "job_3",
+      now: "2026-02-01T00:02:00Z",
+      runner: new ThrowingPortalTaskRunner(),
+    });
+
+    expect(
+      recorder.listRuns({ workspaceId: "ws_1" }).map((run) => [run.runId, run.status]),
+    ).toEqual([
+      ["job_1", "completed"],
+      ["job_2", "blocked"],
+    ]);
+    expect(recorder.listRuns({ workspaceId: "ws_other" })).toEqual([]);
+  });
+
+  it("hands the job back to the queue when the run cannot be recorded", async () => {
+    const state = new InMemoryPortalFetchJobStateStore();
+    const connections = new InMemoryPortalFetchConnectionRepository([
+      { id: "conn_1", workspaceId: "ws_1", task },
+    ]);
+    const failingRecorder = {
+      async recordRun(): Promise<void> {
+        throw new Error("run history unavailable");
       },
+    };
+    const base = {
+      jobId: "job_1",
+      context: { workspaceId: "ws_1" },
+      connectionId: "conn_1",
+      cooldownMs: 60_000,
+      connections,
+      state,
+    };
+
+    await expect(
+      runPortalFetchJob({
+        ...base,
+        now: "2026-02-01T00:00:00Z",
+        runner: new FakePortalTaskRunner(),
+        runs: failingRecorder,
+      }),
+    ).rejects.toThrow("run history unavailable");
+    const retried = await runPortalFetchJob({
+      ...base,
+      now: "2026-02-01T00:01:00Z",
+      runner: new FakePortalTaskRunner(),
+      runs,
+    });
+
+    expect(retried.status).toBe("completed");
+  });
+
+  it("gives each delivery attempt of a job id its own run id", async () => {
+    const state = new InMemoryPortalFetchJobStateStore();
+    const connections = new InMemoryPortalFetchConnectionRepository([
+      { id: "conn_1", workspaceId: "ws_1", task },
+    ]);
+    const base = {
+      jobId: "job_1",
+      context: { workspaceId: "ws_1" },
+      connectionId: "conn_1",
+      cooldownMs: 1,
+      connections,
+      state,
+      runs,
+    };
+
+    const first = await runPortalFetchJob({
+      ...base,
+      now: "2026-02-01T00:00:00Z",
+      runner: new StatusPortalTaskRunner("failed"),
+    });
+    const second = await runPortalFetchJob({
+      ...base,
+      attempt: 2,
+      now: "2026-02-01T00:01:00Z",
+      runner: new FakePortalTaskRunner(),
+    });
+
+    expect(first.runId).toBe("job_1");
+    expect(second.runId).toBe("job_1:2");
+    expect(second.runResult?.provenance.runId).toBe("job_1:2");
+  });
+
+  it("reports a release failure alongside the run error without throwing", async () => {
+    const state = new InMemoryPortalFetchJobStateStore();
+    const brokenRelease = {
+      acquire: state.acquire.bind(state),
+      complete: state.complete.bind(state),
+      async release(): Promise<void> {
+        throw new Error("lease store offline");
+      },
+    };
+    const connections = new InMemoryPortalFetchConnectionRepository([
+      { id: "conn_1", workspaceId: "ws_1", task },
     ]);
 
     const result = await runPortalFetchJob({
@@ -229,19 +390,20 @@ describe("portal_fetch job", () => {
       connectionId: "conn_1",
       now: "2026-02-01T00:00:00Z",
       cooldownMs: 60_000,
-      runner: new StatusPortalTaskRunner("blocked"),
+      runner: new ThrowingPortalTaskRunner(),
       connections,
-      state,
+      state: brokenRelease,
+      runs,
     });
 
     expect(result.status).toBe("failed");
-    expect(result.runResult?.status).toBe("blocked");
+    expect(result.error).toBe("browser crashed; lease release failed: lease store offline");
   });
 
   it("never invokes the runner for duplicate or cooling-down reservations", async () => {
     const state = new InMemoryPortalFetchJobStateStore();
     const connections = new InMemoryPortalFetchConnectionRepository([
-      { connectionId: "conn_1", workspaceId: "ws_1", task },
+      { id: "conn_1", workspaceId: "ws_1", task },
     ]);
     const counting = new CountingPortalTaskRunner();
     const base = {
@@ -250,6 +412,7 @@ describe("portal_fetch job", () => {
       cooldownMs: 60_000,
       connections,
       state,
+      runs,
     };
 
     await runPortalFetchJob({
@@ -282,7 +445,7 @@ describe("portal_fetch job", () => {
     const state = new CountingJobStateStore();
     const leaky: PortalFetchConnectionRepository = {
       async getConnection(input): Promise<PortalFetchConnection> {
-        return { connectionId: input.connectionId, workspaceId: "ws_other", task };
+        return { id: input.connectionId, workspaceId: "ws_other", task };
       },
     };
 
@@ -295,13 +458,16 @@ describe("portal_fetch job", () => {
       runner: counting,
       connections: leaky,
       state,
+      runs,
     });
 
     expect(result).toEqual({
       status: "failed",
       connectionId: "conn_1",
+      runId: undefined,
       cooldownUntil: undefined,
       runResult: undefined,
+      error: "portal connection belongs to another workspace",
     });
     expect(counting.runCount).toBe(0);
     expect(state.acquireCount).toBe(0);
@@ -311,7 +477,7 @@ describe("portal_fetch job", () => {
     const counting = new CountingPortalTaskRunner();
     const state = new CountingJobStateStore();
     const connections = new InMemoryPortalFetchConnectionRepository([
-      { connectionId: "conn_1", workspaceId: "ws_1", task },
+      { id: "conn_1", workspaceId: "ws_1", task },
     ]);
 
     await expect(
@@ -324,6 +490,7 @@ describe("portal_fetch job", () => {
         runner: counting,
         connections,
         state,
+        runs,
       }),
     ).rejects.toThrow("Portal fetch connection not found: conn_1");
     expect(counting.runCount).toBe(0);
@@ -334,7 +501,7 @@ describe("portal_fetch job", () => {
     const counting = new CountingPortalTaskRunner();
     const state = new CountingJobStateStore();
     const connections = new InMemoryPortalFetchConnectionRepository([
-      { connectionId: "conn_1", workspaceId: "ws_1", task },
+      { id: "conn_1", workspaceId: "ws_1", task },
     ]);
 
     await expect(
@@ -347,6 +514,7 @@ describe("portal_fetch job", () => {
         runner: counting,
         connections,
         state,
+        runs,
       }),
     ).rejects.toThrow(/workspace context/i);
     expect(counting.runCount).toBe(0);
@@ -356,7 +524,7 @@ describe("portal_fetch job", () => {
   it("keeps the portal cooldown even when the run fails", async () => {
     const state = new InMemoryPortalFetchJobStateStore();
     const connections = new InMemoryPortalFetchConnectionRepository([
-      { connectionId: "conn_1", workspaceId: "ws_1", task },
+      { id: "conn_1", workspaceId: "ws_1", task },
     ]);
 
     const failed = await runPortalFetchJob({
@@ -368,6 +536,7 @@ describe("portal_fetch job", () => {
       runner: new ThrowingPortalTaskRunner(),
       connections,
       state,
+      runs,
     });
     const reservation = await state.acquire({
       jobId: "job_2",

@@ -13,7 +13,7 @@ import type {
   PortalElementHandle,
 } from "./browser.js";
 import { isSelectorTimeoutError } from "./browser.js";
-import { isExpectedMimeType, isSuccessfulStatus } from "./download.js";
+import { documentBytesProblem, isExpectedMimeType, isSuccessfulStatus } from "./download.js";
 import {
   createNetworkGuard,
   type NetworkGuard,
@@ -21,22 +21,28 @@ import {
 } from "./network-guard.js";
 import { createLocalPlaywrightBrowserProvider } from "./playwright-adapter.js";
 import { validateReadOnlyActions } from "./policy.js";
-import type { FetchedDocument } from "./provenance.js";
+import { type FetchedDocument, STORED_DOCUMENT_URI_SCHEME } from "./provenance.js";
 import { PortalSecretRedactor } from "./redaction.js";
 import {
-  createBaseRunResult,
+  createInitialRunResult,
   type PortalTaskRunner,
   type PortalTaskRunStatus,
   type RunPortalTaskInput,
   type RunPortalTaskResult,
 } from "./runner.js";
-import { type PortalTaskStep, safeParsePortalTask } from "./schema.js";
-import { resolveUrl, sanitizeUrl } from "./url.js";
+import { type PortalTaskStep, portalTaskDigest, safeParsePortalTask } from "./schema.js";
+import { redactSensitiveUrlPath, resolveUrl, sanitizeUrl, sanitizeUrlsInText } from "./url.js";
 
+/**
+ * A user's approval to run one reviewed task revision with stored credentials.
+ * `taskDigest` pins the exact definition (domains and steps included) so a
+ * later revision cannot reuse the credentials without a fresh approval.
+ */
 export interface PortalConnection {
   id: string;
   workspaceId: string;
   taskId: string;
+  taskDigest: string;
   credentialRefs: Readonly<Record<string, SecretRef>>;
 }
 
@@ -49,19 +55,26 @@ export interface PortalConnectionRepository {
   getConnection(input: GetPortalConnectionInput): Promise<PortalConnection>;
 }
 
+export interface DocumentHashKey {
+  workspaceId: string;
+  contentHash: string;
+}
+
+export interface RecordContentHashInput extends DocumentHashKey {
+  documentId: string;
+}
+
+/** Durable, workspace-scoped index of stored content hashes used for dedup. */
 export interface PortalDocumentRegistry {
-  hasContentHash(input: { workspaceId: string; contentHash: string }): Promise<boolean>;
-  recordContentHash(input: {
-    workspaceId: string;
-    contentHash: string;
-    documentId: string;
-  }): Promise<void>;
+  hasContentHash(input: DocumentHashKey): Promise<boolean>;
+  recordContentHash(input: RecordContentHashInput): Promise<void>;
 }
 
 export interface LocalPlaywrightPortalTaskRunnerOptions {
   browserProvider?: PortalBrowserProvider;
   documentStorage: DocumentStorage;
-  documentRegistry?: PortalDocumentRegistry;
+  /** Required: an in-process default would silently lose dedup across restarts. */
+  documentRegistry: PortalDocumentRegistry;
   secretStore: SecretStore;
   connections: PortalConnectionRepository;
   /** Per-document byte cap for downloads; defaults to 10 MiB. */
@@ -70,7 +83,7 @@ export interface LocalPlaywrightPortalTaskRunnerOptions {
 
 const MAX_DOWNLOAD_DOCUMENTS_PER_RUN = 50;
 const DEFAULT_MAX_DOWNLOAD_BYTES = 10 * 1024 * 1024;
-const MAX_DOWNLOAD_REDIRECTS = 5;
+const DEFAULT_SELECTOR_TIMEOUT_MS = 15_000;
 
 interface ExecutionState {
   input: RunPortalTaskInput;
@@ -83,6 +96,10 @@ interface ExecutionState {
   documentStorage: DocumentStorage;
   documentRegistry: PortalDocumentRegistry;
   maxDownloadBytes: number;
+  /**
+   * One-way latch: once a sensitive step ran, later pages may still show the
+   * authenticated session, so failure screenshots stay off for the whole run.
+   */
   sensitivePageSeen: boolean;
 }
 
@@ -97,14 +114,14 @@ export class LocalPlaywrightPortalTaskRunner implements PortalTaskRunner {
   constructor(options: LocalPlaywrightPortalTaskRunnerOptions) {
     this.#browserProvider = options.browserProvider ?? createLocalPlaywrightBrowserProvider();
     this.#documentStorage = options.documentStorage;
-    this.#documentRegistry = options.documentRegistry ?? new InMemoryPortalDocumentRegistry();
+    this.#documentRegistry = options.documentRegistry;
     this.#secretStore = options.secretStore;
     this.#connections = options.connections;
     this.#maxDownloadBytes = options.maxDownloadBytes ?? DEFAULT_MAX_DOWNLOAD_BYTES;
   }
 
   async runTask(input: RunPortalTaskInput): Promise<RunPortalTaskResult> {
-    const result = createBaseRunResult(input, this.#browserProvider.providerName);
+    const result = createInitialRunResult(input, this.#browserProvider.providerName);
     const parsedTask = safeParsePortalTask(input.task);
     if (!parsedTask.success) {
       result.status = "policy_refused";
@@ -126,18 +143,14 @@ export class LocalPlaywrightPortalTaskRunner implements PortalTaskRunner {
       }
       return result;
     }
-
-    const context: WorkspaceContext = { workspaceId: input.workspaceId };
-    const connection = await this.#connections.getConnection({
-      context,
-      connectionId: input.connectionId,
-    });
-    if (connection.workspaceId !== input.workspaceId || connection.taskId !== task.id) {
-      result.status = "failed";
-      result.errors.push("portal connection does not match the requested workspace/task");
+    if (task.steps.length === 0) {
+      // Launching a browser to do nothing would report a successful fetch.
+      result.status = "policy_refused";
+      result.errors.push("refused: portal task defines no executable steps");
       return result;
     }
 
+    const context: WorkspaceContext = { workspaceId: input.workspaceId };
     const redactor = new PortalSecretRedactor();
     for (const value of this.#browserProvider.sensitiveValues ?? []) {
       redactor.addSecret(value);
@@ -147,11 +160,24 @@ export class LocalPlaywrightPortalTaskRunner implements PortalTaskRunner {
     let blockedBeforeStep = 0;
 
     try {
-      const credentials = await this.loadCredentials(context, connection, redactor);
-      session = await this.#browserProvider.createSession({
-        task,
-        runId: input.runId,
+      const connection = await this.#connections.getConnection({
+        context,
+        connectionId: input.connectionId,
       });
+      if (
+        connection.workspaceId !== input.workspaceId ||
+        connection.taskId !== task.id ||
+        connection.taskDigest !== portalTaskDigest(task)
+      ) {
+        result.status = "failed";
+        result.errors.push(
+          "portal connection is not bound to this workspace and reviewed task revision",
+        );
+        return result;
+      }
+
+      const credentials = await this.loadCredentials(context, connection, redactor);
+      session = await this.#browserProvider.createSession({ task, runId: input.runId });
 
       const state: ExecutionState = {
         input: runInput,
@@ -167,10 +193,24 @@ export class LocalPlaywrightPortalTaskRunner implements PortalTaskRunner {
         sensitivePageSeen: false,
       };
 
-      await wireNetworkGuard(state);
+      await session.guardRequests((request) => {
+        const decision = guard.evaluateRequest(request);
+        if (decision.action === "abort") {
+          throw new Error(
+            `blocked request: ${decision.reason} ${request.method} ${sanitizeUrl(request.url) ?? "[unparseable url]"}`,
+          );
+        }
+      });
       for (const step of task.steps) {
         blockedBeforeStep = guard.snapshot().blockedRequests.length;
         const status = await executeStep(state, step);
+        // A click whose navigation the guard aborted resolves normally and
+        // only a later step would notice; stop at the block itself instead of
+        // reporting the symptom or contacting the portal any further.
+        if (blockedDuring(guard, blockedBeforeStep)) {
+          result.status = "blocked";
+          break;
+        }
         if (status !== "completed") {
           result.status = status;
           break;
@@ -179,16 +219,15 @@ export class LocalPlaywrightPortalTaskRunner implements PortalTaskRunner {
     } catch (error) {
       // A route abort surfaces as a rejected goto/click; report it as the
       // policy block it is rather than a generic execution failure.
-      result.status =
-        guard.snapshot().blockedRequests.length > blockedBeforeStep ? "blocked" : "failed";
-      result.errors.push(redactor.redactText(errorMessage(error)));
+      result.status = blockedDuring(guard, blockedBeforeStep) ? "blocked" : "failed";
+      result.errors.push(describeError(redactor, error));
     } finally {
       if (session !== undefined) {
         try {
           await session.close();
         } catch (error) {
           result.status = "failed";
-          result.errors.push(redactor.redactText(errorMessage(error)));
+          result.errors.push(describeError(redactor, error));
         }
       }
       const snapshot = guard.snapshot();
@@ -244,26 +283,17 @@ export class InMemoryPortalConnectionRepository implements PortalConnectionRepos
 export class InMemoryPortalDocumentRegistry implements PortalDocumentRegistry {
   readonly #hashes = new Map<string, string>();
 
-  async hasContentHash(input: { workspaceId: string; contentHash: string }): Promise<boolean> {
-    return this.#hashes.has(documentHashKey(input.workspaceId, input.contentHash));
+  async hasContentHash(input: DocumentHashKey): Promise<boolean> {
+    return this.#hashes.has(documentHashKey(input));
   }
 
-  async recordContentHash(input: {
-    workspaceId: string;
-    contentHash: string;
-    documentId: string;
-  }): Promise<void> {
-    this.#hashes.set(documentHashKey(input.workspaceId, input.contentHash), input.documentId);
+  async recordContentHash(input: RecordContentHashInput): Promise<void> {
+    this.#hashes.set(documentHashKey(input), input.documentId);
   }
 }
 
-async function wireNetworkGuard(state: ExecutionState): Promise<void> {
-  await state.session.route("**/*", async (request) => {
-    const decision = state.guard.evaluateRequest(request);
-    if (decision.action === "abort") {
-      throw new Error(`blocked request: ${decision.reason} ${request.method} ${request.url}`);
-    }
-  });
+function blockedDuring(guard: NetworkGuard, blockedBefore: number): boolean {
+  return guard.snapshot().blockedRequests.length > blockedBefore;
 }
 
 async function executeStep(
@@ -284,33 +314,61 @@ async function executeStep(
         state.result.errors.push(`missing credential: ${step.credentialKey}`);
         return "failed";
       }
-      await state.session.page.fill(step.selector, value);
-      return "completed";
+      return await selectorStep(state, step.selector, () =>
+        state.session.page.fill(step.selector, value, selectorOptions()),
+      );
     }
     case "click":
-      await state.session.page.click(step.selector);
-      return "completed";
-    case "waitForSelector": {
-      let found: boolean;
-      try {
-        found = await state.session.page.waitForSelector(step.selector, {
-          timeoutMs: step.timeoutMs,
-        });
-      } catch (error) {
-        if (!isSelectorTimeoutError(error)) {
-          throw error;
+      return await selectorStep(state, step.selector, () =>
+        state.session.page.click(step.selector, selectorOptions()),
+      );
+    case "waitForSelector":
+      return await selectorStep(state, step.selector, async () => {
+        const found = await state.session.page.waitForSelector(
+          step.selector,
+          selectorOptions(step.timeoutMs),
+        );
+        if (!found) {
+          throw new SelectorMissingError(step.selector);
         }
-        found = false;
-      }
-      if (!found) {
-        state.result.errors.push(`selector_missing: ${step.selector}`);
-        await captureFailureArtifact(state);
-        return "selector_missing";
-      }
-      return "completed";
-    }
+      });
     case "downloadLinks":
       return await downloadLinks(state, step);
+  }
+}
+
+class SelectorMissingError extends Error {
+  constructor(selector: string) {
+    super(`selector not found: ${selector}`);
+    this.name = "SelectorMissingError";
+  }
+}
+
+function selectorOptions(timeoutMs: number | undefined = DEFAULT_SELECTOR_TIMEOUT_MS): {
+  timeoutMs: number;
+} {
+  return { timeoutMs };
+}
+
+/**
+ * A missing element is a portal layout change, not a crash: it is reported as
+ * `selector_missing` exactly once, with a failure artifact, and never retried.
+ */
+async function selectorStep(
+  state: ExecutionState,
+  selector: string,
+  action: () => Promise<void>,
+): Promise<PortalTaskRunStatus> {
+  try {
+    await action();
+    return "completed";
+  } catch (error) {
+    if (!(error instanceof SelectorMissingError) && !isSelectorTimeoutError(error)) {
+      throw error;
+    }
+    state.result.errors.push(`selector_missing: ${selector}`);
+    await captureFailureArtifact(state);
+    return "selector_missing";
   }
 }
 
@@ -347,36 +405,22 @@ async function downloadLinks(
       state.result.warnings.push(`download blocked: ${decision.reason}`);
       continue;
     }
-    const blockedCountBeforeDownload = state.guard.snapshot().blockedRequests.length;
+    const blockedBeforeDownload = state.guard.snapshot().blockedRequests.length;
     let response: PortalDownloadResponse;
     try {
       response = await state.session.page.requestBytes(href, {
         expectedMimeType: step.mimeType,
         maxBytes: state.maxDownloadBytes,
-        maxRedirects: MAX_DOWNLOAD_REDIRECTS,
-        onRedirect: (redirectUrl) => evaluateDownloadUrl(state, redirectUrl).action === "allow",
       });
     } catch (error) {
-      state.result.errors.push(state.redactor.redactText(errorMessage(error)));
-      return state.guard.snapshot().blockedRequests.length > blockedCountBeforeDownload
-        ? "blocked"
-        : "failed";
+      state.result.errors.push(describeError(state.redactor, error));
+      return blockedDuring(state.guard, blockedBeforeDownload) ? "blocked" : "failed";
     }
 
-    const finalDecision = evaluateDownloadUrl(state, response.finalUrl);
-    if (finalDecision.action === "abort") {
-      state.result.warnings.push(`download blocked after redirect: ${finalDecision.reason}`);
-      return "blocked";
-    }
-    if (!isSuccessfulStatus(response.status)) {
-      state.result.errors.push(`download failed with status ${response.status}`);
-      return "failed";
-    }
-    if (!isExpectedMimeType(response.mimeType, step.mimeType)) {
-      state.result.errors.push(
-        `download returned unexpected content type ${response.mimeType}; expected ${step.mimeType}`,
-      );
-      return "failed";
+    const problem = downloadProblem(state, step, response, blockedBeforeDownload);
+    if (problem !== undefined) {
+      state.result.errors.push(problem.message);
+      return problem.status;
     }
 
     const contentHash = sha256Hex(response.bytes);
@@ -421,6 +465,40 @@ async function downloadLinks(
   return "completed";
 }
 
+interface DownloadProblem {
+  status: Extract<PortalTaskRunStatus, "blocked" | "failed">;
+  message: string;
+}
+
+/** The runner is the single policy authority over what a download may store. */
+function downloadProblem(
+  state: ExecutionState,
+  step: DownloadLinksStep,
+  response: PortalDownloadResponse,
+  blockedBeforeDownload: number,
+): DownloadProblem | undefined {
+  if (
+    evaluateDownloadUrl(state, response.finalUrl).action === "abort" ||
+    blockedDuring(state.guard, blockedBeforeDownload)
+  ) {
+    return { status: "blocked", message: "download blocked: redirect left the portal policy" };
+  }
+  if (!isSuccessfulStatus(response.status)) {
+    return { status: "failed", message: `download failed with status ${response.status}` };
+  }
+  if (!isExpectedMimeType(response.mimeType, step.mimeType)) {
+    return {
+      status: "failed",
+      message: `download returned unexpected content type ${response.mimeType}; expected ${step.mimeType}`,
+    };
+  }
+  const bytesProblem = documentBytesProblem(response.bytes, step.mimeType);
+  if (bytesProblem !== undefined) {
+    return { status: "failed", message: bytesProblem };
+  }
+  return undefined;
+}
+
 function evaluateDownloadUrl(state: ExecutionState, url: string): PortalRequestDecision {
   return state.guard.evaluateRequest({ url, method: "GET", resourceType: "document" });
 }
@@ -444,7 +522,7 @@ interface FetchedDocumentInput {
 
 function makeFetchedDocument(state: ExecutionState, input: FetchedDocumentInput): FetchedDocument {
   const domain = state.input.task.domains[0] ?? "unknown";
-  const sourceUrl = sanitizeUrl(input.sourceUrl);
+  const sourceUrl = retainedSourceUrl(state.redactor, input.sourceUrl);
   const filename = state.redactor.redactText(input.filename);
   return {
     filename,
@@ -466,6 +544,12 @@ function makeFetchedDocument(state: ExecutionState, input: FetchedDocumentInput)
       extractionStatus: "pending",
     },
   };
+}
+
+/** Query, userinfo, identifier-like path segments, and known secrets are all removed. */
+function retainedSourceUrl(redactor: PortalSecretRedactor, rawUrl: string): string | undefined {
+  const redacted = redactSensitiveUrlPath(rawUrl);
+  return redacted === undefined ? undefined : redactor.redactText(redacted);
 }
 
 async function storeDocument(
@@ -502,7 +586,7 @@ function stripFetchedDocumentContent(
 ): FetchedDocument {
   return {
     ...document,
-    content: { kind: "objectRef", uri: `stored-document:${stored.id}` },
+    content: { kind: "objectRef", uri: `${STORED_DOCUMENT_URI_SCHEME}${stored.id}` },
   };
 }
 
@@ -531,8 +615,8 @@ function connectionKey(workspaceId: string, connectionId: string): string {
   return `${workspaceId}:${connectionId}`;
 }
 
-function documentHashKey(workspaceId: string, contentHash: string): string {
-  return `${workspaceId}:${contentHash}`;
+function documentHashKey(input: DocumentHashKey): string {
+  return `${input.workspaceId}:${input.contentHash}`;
 }
 
 function freezeConnection(connection: PortalConnection): PortalConnection {
@@ -542,6 +626,12 @@ function freezeConnection(connection: PortalConnection): PortalConnection {
   });
 }
 
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+/**
+ * Browser errors embed target URLs, which may carry session ids. Known secrets
+ * are removed first (a CDP endpoint is registered whole, query included), then
+ * any remaining URL loses its query string.
+ */
+function describeError(redactor: PortalSecretRedactor, error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  return sanitizeUrlsInText(redactor.redactText(message));
 }

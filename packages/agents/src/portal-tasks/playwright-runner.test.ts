@@ -13,6 +13,7 @@ import type {
   PortalDownloadRequestOptions,
   PortalDownloadResponse,
   PortalElementHandle,
+  PortalRequestGuard,
 } from "./browser.js";
 import { syntheticReferencePortalTask } from "./definitions/synthetic-reference-portal.js";
 import type { PortalRequest } from "./network-guard.js";
@@ -26,7 +27,7 @@ import {
   type PortalConnectionRepository,
 } from "./playwright-runner.js";
 import type { RunPortalTaskInput } from "./runner.js";
-import { type PortalTask, parsePortalTask } from "./schema.js";
+import { type PortalTask, parsePortalTask, portalTaskDigest } from "./schema.js";
 
 const now = "2026-02-01T00:00:00Z";
 const context = { workspaceId: "ws_1", userId: "user_1" };
@@ -125,12 +126,12 @@ describe("LocalPlaywrightPortalTaskRunner", () => {
 
   it("reports a route-aborted navigation as blocked rather than failed", async () => {
     const page = new FixturePortalPage({ abortBlockedRequests: true });
-    const runner = await makeRunner({ page });
     const offAllowlist: PortalTask = {
       ...task,
       steps: [{ kind: "navigate", url: "https://portal.test/login" }],
       domains: ["other.test"],
     };
+    const runner = await makeRunner({ page, connectionTask: offAllowlist });
 
     const result = await runner.runTask(input({ task: offAllowlist }));
 
@@ -141,13 +142,13 @@ describe("LocalPlaywrightPortalTaskRunner", () => {
 
   it("returns selector_missing when download matches carry no usable link", async () => {
     const page = new FixturePortalPage({ hrefAttribute: "data-missing" });
-    const runner = await makeRunner({ page });
     const buttonLinks: PortalTask = {
       ...task,
       steps: task.steps.map((step) =>
         step.kind === "downloadLinks" ? { ...step, hrefAttribute: "data-missing" } : step,
       ),
     };
+    const runner = await makeRunner({ page, connectionTask: buttonLinks });
 
     const result = await runner.runTask(input({ task: buttonLinks }));
 
@@ -195,13 +196,147 @@ describe("LocalPlaywrightPortalTaskRunner", () => {
   });
 
   it("executes the parsed task so schema defaults are applied", async () => {
-    const { steps: _steps, httpMethodExceptions: _exceptions, ...rawTask } = task;
+    const rawTask = {
+      ...task,
+      steps: task.steps.map((step) =>
+        step.kind === "downloadLinks"
+          ? { kind: "downloadLinks", selector: step.selector, filenameAttribute: "data-filename" }
+          : step,
+      ),
+    } as unknown as PortalTask;
     const runner = await makeRunner({ page: new FixturePortalPage() });
 
-    const result = await runner.runTask(input({ task: rawTask as unknown as PortalTask }));
+    const result = await runner.runTask(input({ task: rawTask }));
 
     expect(result.status).toBe("completed");
-    expect(result.documents).toEqual([]);
+    expect(result.documents).toHaveLength(2);
+    expect(result.documents[0]?.mimeType).toBe("application/pdf");
+  });
+
+  it("refuses a task that defines no executable steps instead of reporting an empty success", async () => {
+    const provider = new FixtureBrowserProvider({ page: new FixturePortalPage() });
+    const runner = await makeRunner({ page: new FixturePortalPage(), provider });
+
+    const result = await runner.runTask(input({ task: { ...task, steps: [] } }));
+
+    expect(result.status).toBe("policy_refused");
+    expect(result.errors).toEqual(["refused: portal task defines no executable steps"]);
+    expect(provider.sessionCount).toBe(0);
+  });
+
+  it("refuses to fill credentials into a task revision the connection was not approved for", async () => {
+    const secretStore = new CountingSecretStore();
+    const provider = new FixtureBrowserProvider({ page: new FixturePortalPage() });
+    const runner = await makeRunner({ page: new FixturePortalPage(), provider, secretStore });
+    const retargeted: PortalTask = { ...task, domains: ["attacker.test"] };
+
+    const result = await runner.runTask(input({ task: retargeted }));
+
+    expect(result.status).toBe("failed");
+    expect(result.errors[0]).toContain("reviewed task revision");
+    expect(secretStore.getCount).toBe(0);
+    expect(provider.sessionCount).toBe(0);
+  });
+
+  it("reports a fill or click that times out as selector_missing", async () => {
+    const page = new FixturePortalPage({ timeoutSelectors: new Set(["#email"]) });
+    const runner = await makeRunner({ page });
+
+    const result = await runner.runTask(input());
+
+    expect(result.status).toBe("selector_missing");
+    expect(result.errors).toEqual(["selector_missing: #email"]);
+    expect(page.waitCounts.size).toBe(0);
+  });
+
+  it("stops as blocked when a click triggers a request the guard refuses", async () => {
+    const page = new FixturePortalPage();
+    const noException: PortalTask = { ...task, httpMethodExceptions: [] };
+    const runner = await makeRunner({ page, connectionTask: noException });
+
+    const result = await runner.runTask(input({ task: noException }));
+
+    expect(result.status).toBe("blocked");
+    expect(result.provenance.blockedRequests).toEqual([
+      {
+        url: "https://portal.test/login",
+        method: "POST",
+        resourceType: "document",
+        reason: "non_idempotent_method",
+      },
+    ]);
+    expect(page.waitCounts.size).toBe(0);
+    expect(page.requestCount).toBe(0);
+  });
+
+  it("refuses a login POST whose body carries fields outside the reviewed form", async () => {
+    const page = new FixturePortalPage({
+      loginPostData: "email=a%40b.test&password=x&action=delete_account",
+    });
+    const runner = await makeRunner({ page });
+
+    const result = await runner.runTask(input());
+
+    expect(result.status).toBe("blocked");
+    expect(result.provenance.blockedRequests[0]).toMatchObject({
+      url: "https://portal.test/login",
+      reason: "unreviewed_body",
+    });
+    expect(result.provenance.allowedNonIdempotentRequests).toEqual([]);
+  });
+
+  it("rejects bytes that do not carry the declared document signature", async () => {
+    const storage = new CountingDocumentStorage();
+    const page = new FixturePortalPage({
+      download: (url) => ({
+        bytes: new TextEncoder().encode("<html>proxy error</html>"),
+        mimeType: "application/pdf",
+        finalUrl: url,
+        status: 200,
+      }),
+    });
+    const runner = await makeRunner({ page, storage });
+
+    const result = await runner.runTask(input());
+
+    expect(result.status).toBe("failed");
+    expect(result.errors).toEqual(["download payload does not carry a PDF signature"]);
+    expect(storage.putCount).toBe(0);
+  });
+
+  it("redacts identifier-like path segments from retained source URLs", async () => {
+    const page = new FixturePortalPage({
+      linkHrefs: [
+        "https://portal.test/accounts/12345678/invoice.pdf",
+        "https://portal.test/u/user%40example.test/inv.pdf?sig=abc",
+      ],
+    });
+    const runner = await makeRunner({ page });
+
+    const result = await runner.runTask(input());
+
+    expect(result.status).toBe("completed");
+    expect(result.documents.map((document) => document.sourceUrl)).toEqual([
+      "https://portal.test/accounts/[REDACTED_SEGMENT]/invoice.pdf",
+      "https://portal.test/u/[REDACTED_SEGMENT]/inv.pdf",
+    ]);
+    expect(result.storedDocuments[0]?.metadata["portal.sourceUrl"]).toBe(
+      "https://portal.test/accounts/[REDACTED_SEGMENT]/invoice.pdf",
+    );
+  });
+
+  it("strips query strings from URLs embedded in browser error messages", async () => {
+    const page = new FixturePortalPage({
+      download: () => {
+        throw new Error("net::ERR_FAILED at https://portal.test/dl?session=abc123&x=1");
+      },
+    });
+    const runner = await makeRunner({ page });
+
+    const result = await runner.runTask(input());
+
+    expect(result.status).toBe("failed");
+    expect(result.errors).toEqual(["net::ERR_FAILED at https://portal.test/dl"]);
   });
 
   it("returns a failed result when browser startup fails", async () => {
@@ -220,12 +355,12 @@ describe("LocalPlaywrightPortalTaskRunner", () => {
   it("blocks redirected downloads whose final target leaves the allowlist", async () => {
     const storage = new CountingDocumentStorage();
     const page = new FixturePortalPage({
-      download: (_url, options) => {
-        if (!options.onRedirect("https://evil.test/invoice.pdf")) {
-          throw new Error("download redirect blocked by portal network policy");
-        }
-        throw new Error("unexpected allowed redirect");
-      },
+      download: () => ({
+        bytes: new TextEncoder().encode("%PDF-1.4 exfiltrated"),
+        mimeType: "application/pdf",
+        finalUrl: "https://evil.test/invoice.pdf",
+        status: 200,
+      }),
     });
     const runner = await makeRunner({ page, storage });
 
@@ -234,7 +369,7 @@ describe("LocalPlaywrightPortalTaskRunner", () => {
     expect(result.status).toBe("blocked");
     expect(result.storedDocuments).toEqual([]);
     expect(storage.putCount).toBe(0);
-    expect(result.provenance.blockedRequests?.[0]).toMatchObject({
+    expect(result.provenance.blockedRequests[0]).toMatchObject({
       url: "https://evil.test/invoice.pdf",
       reason: "off_allowlist",
     });
@@ -300,11 +435,11 @@ describe("LocalPlaywrightPortalTaskRunner", () => {
     const page = new FixturePortalPage({
       missingSelectors: new Set(["[data-testid='invoice-list']"]),
     });
-    const runner = await makeRunner({ page });
     const nonSensitive: PortalTask = {
       ...task,
       steps: task.steps.map((step) => ({ ...step, sensitive: false })),
     };
+    const runner = await makeRunner({ page, connectionTask: nonSensitive });
 
     const result = await runner.runTask(input({ task: nonSensitive }));
 
@@ -331,7 +466,7 @@ describe("LocalPlaywrightPortalTaskRunner", () => {
     expect(
       result.warnings.filter((warning) => warning === "download blocked: off_allowlist"),
     ).toHaveLength(2);
-    expect(result.provenance.blockedRequests?.map((request) => request.url)).toEqual([
+    expect(result.provenance.blockedRequests.map((request) => request.url)).toEqual([
       "https://evil.test/a.pdf",
       "https://portal.test.evil.example/b.pdf",
     ]);
@@ -348,7 +483,7 @@ describe("LocalPlaywrightPortalTaskRunner", () => {
     expect(result.status).toBe("blocked");
     expect(page.requestCount).toBe(0);
     expect(result.storedDocuments).toEqual([]);
-    expect(result.provenance.blockedRequests?.map((request) => request.reason)).toEqual([
+    expect(result.provenance.blockedRequests.map((request) => request.reason)).toEqual([
       "off_allowlist",
       "off_allowlist",
     ]);
@@ -416,7 +551,7 @@ describe("LocalPlaywrightPortalTaskRunner", () => {
 
     expect(result.status).toBe("failed");
     expect(result.errors).toEqual([
-      "portal connection does not match the requested workspace/task",
+      "portal connection is not bound to this workspace and reviewed task revision",
     ]);
     expect(secretStore.getCount).toBe(0);
     expect(provider.sessionCount).toBe(0);
@@ -431,6 +566,7 @@ describe("LocalPlaywrightPortalTaskRunner", () => {
           id: request.connectionId,
           workspaceId: "ws_other",
           taskId: task.id,
+          taskDigest: portalTaskDigest(task),
           credentialRefs: {},
         };
       },
@@ -445,7 +581,7 @@ describe("LocalPlaywrightPortalTaskRunner", () => {
     const result = await runner.runTask(input());
 
     expect(result.status).toBe("failed");
-    expect(result.errors[0]).toContain("does not match the requested workspace");
+    expect(result.errors[0]).toContain("not bound to this workspace");
     expect(secretStore.getCount).toBe(0);
     expect(provider.sessionCount).toBe(0);
   });
@@ -455,9 +591,10 @@ describe("LocalPlaywrightPortalTaskRunner", () => {
     const provider = new FixtureBrowserProvider({ page: new FixturePortalPage() });
     const runner = await makeRunner({ page: new FixturePortalPage(), provider, secretStore });
 
-    await expect(runner.runTask(input({ workspaceId: "ws_2" }))).rejects.toThrow(
-      "Portal connection not found: conn_1",
-    );
+    const result = await runner.runTask(input({ workspaceId: "ws_2" }));
+
+    expect(result.status).toBe("failed");
+    expect(result.errors).toEqual(["Portal connection not found: conn_1"]);
     expect(secretStore.getCount).toBe(0);
     expect(provider.sessionCount).toBe(0);
   });
@@ -562,6 +699,8 @@ interface MakeRunnerInput {
   secretStore?: InMemorySecretStore;
   /** Task id the in-memory connection is bound to (default: the synthetic task). */
   connectionTaskId?: string;
+  /** Task revision the in-memory connection is bound to (default: the synthetic task). */
+  connectionTask?: PortalTask;
   /** Overrides the in-memory connection repository entirely. */
   connections?: PortalConnectionRepository;
   closeFailure?: Error;
@@ -586,6 +725,7 @@ async function makeRunner(inputValue: MakeRunnerInput): Promise<LocalPlaywrightP
         id: "conn_1",
         workspaceId: context.workspaceId,
         taskId: inputValue.connectionTaskId ?? task.id,
+        taskDigest: portalTaskDigest(inputValue.connectionTask ?? task),
         credentialRefs: {
           username: usernameRef,
           password: passwordRef,
@@ -638,8 +778,8 @@ class FixtureBrowserProvider implements PortalBrowserProvider {
     this.sessionCount += 1;
     return {
       page: this.#page,
-      route: async (pattern, handler) => {
-        await this.#page.route(pattern, handler);
+      guardRequests: async (guard) => {
+        this.#page.guardRequests(guard);
       },
       close: async () => {
         if (this.#closeFailure !== undefined) {
@@ -649,8 +789,6 @@ class FixtureBrowserProvider implements PortalBrowserProvider {
     };
   }
 }
-
-type FixtureRouteHandler = (request: PortalRequest) => void | Promise<void>;
 
 interface FixturePortalPageOptions {
   missingSelectors?: ReadonlySet<string>;
@@ -663,6 +801,8 @@ interface FixturePortalPageOptions {
   abortBlockedRequests?: boolean;
   /** Raw href values for the fixture links; overrides `linkCount` when set. */
   linkHrefs?: readonly string[];
+  /** Body the fixture login form posts (default: the reviewed email/password fields). */
+  loginPostData?: string;
 }
 
 class FixturePortalPage implements PortalBrowserPage {
@@ -679,7 +819,8 @@ class FixturePortalPage implements PortalBrowserPage {
   readonly #linkCount: number;
   readonly #hrefAttribute: string;
   readonly #abortBlockedRequests: boolean;
-  #routeHandler: FixtureRouteHandler | undefined;
+  readonly #loginPostData: string;
+  #guard: PortalRequestGuard | undefined;
   #currentUrl = "https://portal.test/login";
 
   constructor(options: FixturePortalPageOptions = {}) {
@@ -690,10 +831,12 @@ class FixturePortalPage implements PortalBrowserPage {
     this.#hrefAttribute = options.hrefAttribute ?? "href";
     this.#abortBlockedRequests = options.abortBlockedRequests ?? false;
     this.#linkHrefs = options.linkHrefs;
+    this.#loginPostData =
+      options.loginPostData ?? "email=synthetic-user%40example.test&password=synthetic-password";
   }
 
-  async route(_pattern: string, handler: FixtureRouteHandler): Promise<void> {
-    this.#routeHandler = handler;
+  guardRequests(guard: PortalRequestGuard): void {
+    this.#guard = guard;
   }
 
   async goto(url: string): Promise<void> {
@@ -701,22 +844,30 @@ class FixturePortalPage implements PortalBrowserPage {
     this.#currentUrl = url;
   }
 
-  async fill(): Promise<void> {
-    return;
+  async fill(selector: string): Promise<void> {
+    this.throwIfTimingOut(selector);
   }
 
-  async click(_selector: string): Promise<void> {
+  async click(selector: string): Promise<void> {
+    this.throwIfTimingOut(selector);
     await this.emitRequest({
       url: "https://portal.test/login",
       method: "POST",
       resourceType: "document",
+      postData: this.#loginPostData,
     });
     this.#currentUrl = "https://portal.test/invoices";
   }
 
+  private throwIfTimingOut(selector: string): void {
+    if (this.#timeoutSelectors.has(selector)) {
+      throw new Error("Timeout 15000ms exceeded");
+    }
+  }
+
   private async emitRequest(request: PortalRequest): Promise<void> {
     try {
-      await this.#routeHandler?.(request);
+      await this.#guard?.(request);
     } catch (error) {
       if (this.#abortBlockedRequests) {
         throw error;

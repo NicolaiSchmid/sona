@@ -3,10 +3,11 @@
  * to fetch receipts/invoices from a merchant portal; it must declare a domain
  * allowlist, only read-only actions, and known output types.
  */
+import { sha256Hex } from "@sona/core";
 import { z } from "zod";
 import {
-  destructiveSelectorConceptFor,
   forbiddenConceptFor,
+  forbiddenSelectorConceptFor,
   validateReadOnlyActions,
 } from "./policy.js";
 
@@ -29,7 +30,7 @@ export const PORTAL_TASK_STEP_KINDS = [
   "click",
   "waitForSelector",
   "downloadLinks",
-] as const;
+] as const satisfies readonly PortalTaskStep["kind"][];
 
 /**
  * A bare hostname: dot-separated labels, no scheme, path, port, userinfo, or
@@ -98,6 +99,12 @@ export const portalHttpMethodExceptionSchema = z
     urlPattern: safePortalUrlSchema,
     reason: z.enum(ALLOWED_NON_IDEMPOTENT_REASONS),
     justification: z.string().trim().min(12),
+    /**
+     * Body field names the reviewed form sends. The guard refuses a matching
+     * POST that carries any other field, so a multiplexed endpoint cannot be
+     * repurposed for a mutation under this exception.
+     */
+    allowedBodyFields: z.array(z.string().min(1)).min(1),
   })
   .strict();
 
@@ -142,7 +149,7 @@ export const portalTaskSchema = z
 
     for (const [index, step] of task.steps.entries()) {
       if ("selector" in step) {
-        const concept = destructiveSelectorConceptFor(step.selector);
+        const concept = forbiddenSelectorConceptFor(step.selector);
         if (concept !== undefined) {
           ctx.addIssue({
             code: z.ZodIssueCode.custom,
@@ -175,4 +182,27 @@ export function parsePortalTask(input: unknown): PortalTask {
 /** Safe parse variant returning a discriminated result. */
 export function safeParsePortalTask(input: unknown): z.SafeParseReturnType<unknown, PortalTask> {
   return portalTaskSchema.safeParse(input);
+}
+
+/**
+ * Content digest of a task definition. A portal connection is bound to the
+ * digest of the definition the user approved, so credentials are only ever
+ * filled into the exact reviewed revision, domains and steps included.
+ */
+export function portalTaskDigest(task: PortalTask): string {
+  return sha256Hex(new TextEncoder().encode(canonicalJson(task)));
+}
+
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map(canonicalJson).join(",")}]`;
+  }
+  if (typeof value === "object" && value !== null) {
+    const entries = Object.entries(value)
+      .filter(([, entryValue]) => entryValue !== undefined)
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+      .map(([key, entryValue]) => `${JSON.stringify(key)}:${canonicalJson(entryValue)}`);
+    return `{${entries.join(",")}}`;
+  }
+  return JSON.stringify(value);
 }

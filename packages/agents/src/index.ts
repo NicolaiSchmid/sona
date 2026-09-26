@@ -9,19 +9,24 @@
 /** Package version marker, used to verify wiring and test discovery. */
 export const sonaAgentsVersion = "0.0.0" as const;
 
-export type {
-  PortalBrowserPage,
-  PortalBrowserProvider,
-  PortalBrowserSession,
-  PortalBrowserSessionInput,
-  PortalDownloadResponse,
-  PortalElementHandle,
+export {
+  isSelectorTimeoutError,
+  type PortalBrowserPage,
+  type PortalBrowserProvider,
+  type PortalBrowserSession,
+  type PortalBrowserSessionInput,
+  type PortalDownloadRequestOptions,
+  type PortalDownloadResponse,
+  type PortalElementHandle,
+  type PortalRequestGuard,
+  type PortalSelectorOptions,
 } from "./portal-tasks/browser.js";
 export {
   BrowserbasePortalTaskRunner,
   type BrowserbasePortalTaskRunnerOptions,
 } from "./portal-tasks/browserbase.js";
 export { syntheticReferencePortalTask } from "./portal-tasks/definitions/synthetic-reference-portal.js";
+export { DownloadTooLargeError } from "./portal-tasks/download.js";
 export {
   createNetworkGuard,
   NetworkGuard,
@@ -35,6 +40,7 @@ export {
   createLocalPlaywrightBrowserProvider,
 } from "./portal-tasks/playwright-adapter.js";
 export {
+  type DocumentHashKey,
   type GetPortalConnectionInput,
   InMemoryPortalConnectionRepository,
   InMemoryPortalDocumentRegistry,
@@ -43,21 +49,26 @@ export {
   type PortalConnection,
   type PortalConnectionRepository,
   type PortalDocumentRegistry,
+  type RecordContentHashInput,
 } from "./portal-tasks/playwright-runner.js";
 export {
-  destructiveSelectorConceptFor,
   forbiddenConceptFor,
+  forbiddenSelectorConceptFor,
   type PolicyViolation,
   type ReadOnlyPolicyResult,
   validateReadOnlyActions,
 } from "./portal-tasks/policy.js";
 export {
   type AllowedNonIdempotentPortalRequest,
+  type AllowedNonIdempotentRequestReason,
   type BlockedPortalRequest,
+  type BlockedPortalRequestReason,
   type ExtractionStatus,
   type FetchedContent,
   type FetchedDocument,
   type FetchedDocumentProvenance,
+  type PortalResourceType,
+  STORED_DOCUMENT_URI_SCHEME,
   type TaskRunProvenance,
   type ToStoredDocumentInput,
   toStoredDocument,
@@ -80,6 +91,7 @@ export {
   type PortalTaskStep,
   parsePortalTask,
   portalHttpMethodExceptionSchema,
+  portalTaskDigest,
   portalTaskSchema,
   portalTaskStepSchema,
   safeParsePortalTask,
