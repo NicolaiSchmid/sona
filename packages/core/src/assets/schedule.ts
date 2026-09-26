@@ -18,17 +18,25 @@ import {
   type AssetEvent,
   type AssetImprovementEvent,
   DEFAULT_DEPRECIATION_ROUNDING_SCALE,
+  DEPRECIATION_RATE_SCALE,
+  DepreciationError,
   type DepreciationMethod,
   type DepreciationScheduleConfig,
 } from "./types";
 
-/** Hard stop so a mis-configured tiny rate cannot loop indefinitely. */
+/** Hard stop so a mis-configured schedule cannot loop indefinitely. */
 const MAX_SCHEDULE_YEARS = 200;
 
-export class DepreciationScheduleError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "DepreciationScheduleError";
+/** Parses `value` at `scale`, reporting precision/format problems as domain errors. */
+function scaled(value: string, scale: number, label: string): bigint {
+  try {
+    return toScaledBigInt(value, scale);
+  } catch (error) {
+    // Both InvalidDecimalError and the precision error are plain Errors.
+    if (error instanceof Error) {
+      throw new DepreciationError(`${label}: ${error.message}`);
+    }
+    throw error;
   }
 }
 
@@ -67,13 +75,13 @@ export function allocateAcquisitionCosts(
   asset: Asset,
   scale: number = DEFAULT_DEPRECIATION_ROUNDING_SCALE,
 ): AcquisitionCostAllocation {
-  const costs = asset.components.map((c) => toScaledBigInt(c.cost.amount, scale));
+  const costs = asset.components.map((c) => scaled(c.cost.amount, scale, `Component ${c.id}`));
   const purchasePrice = costs.reduce((sum, c) => sum + c, 0n);
   if (purchasePrice <= 0n) {
-    throw new DepreciationScheduleError(`Asset ${asset.id} has no positive component cost`);
+    throw new DepreciationError(`Asset ${asset.id} has no positive component cost`);
   }
   const sideCosts = asset.acquisitionSideCosts
-    .map((s) => toScaledBigInt(s.amount.amount, scale))
+    .map((s) => scaled(s.amount.amount, scale, `Side cost ${s.id}`))
     .reduce((sum, s) => sum + s, 0n);
 
   let allocated = 0n;
@@ -114,7 +122,18 @@ export function allocateAcquisitionCosts(
 // --- Schedule ----------------------------------------------------------------
 
 /** Why a row's amount deviates from a plain full-year amount. */
-export type DepreciationRowNote = "pro_rata" | "final_remainder" | "disposal_year";
+export const DEPRECIATION_ROW_NOTES = [
+  /** Fewer than 12 months counted (acquisition or disposal year). */
+  "pro_rata",
+  /** Amount capped at the remaining depreciable book value. */
+  "final_remainder",
+  /** The asset was disposed of in this year. */
+  "disposal_year",
+  /** An improvement re-opened a schedule that was already fully depreciated. */
+  "post_completion_improvement",
+] as const;
+
+export type DepreciationRowNote = (typeof DEPRECIATION_ROW_NOTES)[number];
 
 export interface DepreciationScheduleRow {
   year: number;
@@ -128,7 +147,10 @@ export interface DepreciationScheduleRow {
   closingBookValue: string;
   accumulatedDepreciation: string;
   notes: DepreciationRowNote[];
-  /** Improvement event ids whose amounts are part of this year's basis. */
+  /**
+   * Improvement events applied so far. Their evidence carries onto the row;
+   * only improvements to depreciable components raise the basis.
+   */
   appliedEventIds: string[];
   /** Acquisition, side-cost, and applied-improvement documents substantiating this row. */
   evidenceDocumentIds: string[];
@@ -168,14 +190,18 @@ interface YearMonth {
 function parseYearMonth(date: string, label: string): YearMonth {
   const match = /^(\d{4})-(\d{2})-\d{2}$/.exec(date);
   if (match === null) {
-    throw new DepreciationScheduleError(`${label} must be an ISO date (YYYY-MM-DD): ${date}`);
+    throw new DepreciationError(`${label} must be an ISO date (YYYY-MM-DD): ${date}`);
   }
   const year = Number(match[1]);
   const month = Number(match[2]);
   if (month < 1 || month > 12) {
-    throw new DepreciationScheduleError(`${label} has an invalid month: ${date}`);
+    throw new DepreciationError(`${label} has an invalid month: ${date}`);
   }
   return { year, month };
+}
+
+function isBefore(a: YearMonth, b: YearMonth): boolean {
+  return a.year < b.year || (a.year === b.year && a.month < b.month);
 }
 
 function unique(values: readonly string[]): string[] {
@@ -189,11 +215,11 @@ function requireMoneyInCommodity(
   label: string,
 ): bigint {
   if (money.commodity !== commodity) {
-    throw new DepreciationScheduleError(
+    throw new DepreciationError(
       `${label} is denominated in ${money.commodity}, expected ${commodity}`,
     );
   }
-  return toScaledBigInt(money.amount, scale);
+  return scaled(money.amount, scale, label);
 }
 
 interface ValidatedDisposal {
@@ -213,45 +239,44 @@ function validateEvents(
   acquired: YearMonth,
 ): ValidatedEvents {
   const componentIds = new Set(asset.components.map((c) => c.id));
-  const improvementsByYear = new Map<number, AssetImprovementEvent[]>();
+  const improvements: Array<{ event: AssetImprovementEvent; on: YearMonth }> = [];
   let disposal: ValidatedDisposal | undefined;
 
   for (const event of events) {
     if (event.assetId !== asset.id || event.workspaceId !== asset.workspaceId) {
-      throw new DepreciationScheduleError(`Event ${event.id} does not belong to asset ${asset.id}`);
+      throw new DepreciationError(`Event ${event.id} does not belong to asset ${asset.id}`);
     }
-    const occurred = parseYearMonth(event.occurredOn, `Event ${event.id} occurredOn`);
-    if (occurred.year < acquired.year) {
-      throw new DepreciationScheduleError(
+    const on = parseYearMonth(event.occurredOn, `Event ${event.id} occurredOn`);
+    if (isBefore(on, acquired)) {
+      throw new DepreciationError(
         `Event ${event.id} occurred before the asset was acquired (${asset.acquiredOn})`,
       );
     }
     if (event.kind === "improvement") {
       if (!componentIds.has(event.componentId)) {
-        throw new DepreciationScheduleError(
+        throw new DepreciationError(
           `Improvement ${event.id} references unknown component ${event.componentId}`,
         );
       }
-      const bucket = improvementsByYear.get(occurred.year) ?? [];
-      bucket.push(event);
-      improvementsByYear.set(occurred.year, bucket);
+      improvements.push({ event, on });
     } else {
       if (disposal !== undefined) {
-        throw new DepreciationScheduleError(`Asset ${asset.id} has more than one disposal event`);
+        throw new DepreciationError(`Asset ${asset.id} has more than one disposal event`);
       }
-      disposal = { event, on: occurred };
+      disposal = { event, on };
     }
   }
 
-  if (disposal !== undefined) {
-    for (const [year, improvements] of improvementsByYear) {
-      if (year > disposal.on.year) {
-        const ids = improvements.map((i) => i.id).join(", ");
-        throw new DepreciationScheduleError(
-          `Improvement ${ids} occurred after disposal on ${disposal.event.occurredOn}`,
-        );
-      }
+  const improvementsByYear = new Map<number, AssetImprovementEvent[]>();
+  for (const { event, on } of improvements) {
+    if (disposal !== undefined && isBefore(disposal.on, on)) {
+      throw new DepreciationError(
+        `Improvement ${event.id} occurred after disposal on ${disposal.event.occurredOn}`,
+      );
     }
+    const bucket = improvementsByYear.get(on.year) ?? [];
+    bucket.push(event);
+    improvementsByYear.set(on.year, bucket);
   }
 
   return { improvementsByYear, disposal };
@@ -273,14 +298,15 @@ function validateEvents(
  *   over the remaining life.
  *
  * Improvements raise the basis of their component from their year onward as
- * a full-year amount; earlier rows are unaffected.
+ * a full-year amount; earlier rows are unaffected. An improvement after the
+ * asset is fully depreciated re-opens the schedule and is flagged.
  */
 export function computeDepreciationSchedule(
   input: ComputeDepreciationScheduleInput,
 ): DepreciationSchedule {
   const { asset, config } = input;
   if (config.assetId !== asset.id || config.workspaceId !== asset.workspaceId) {
-    throw new DepreciationScheduleError(`Config ${config.id} does not belong to asset ${asset.id}`);
+    throw new DepreciationError(`Config ${config.id} does not belong to asset ${asset.id}`);
   }
 
   const scale = config.roundingScale ?? DEFAULT_DEPRECIATION_ROUNDING_SCALE;
@@ -294,7 +320,7 @@ export function computeDepreciationSchedule(
       : requireMoneyInCommodity(config.residualValue, asset.commodity, scale, "Residual value");
   const acquisitionBasis = toScaledBigInt(allocation.depreciableBasis, scale);
   if (acquisitionBasis < residual) {
-    throw new DepreciationScheduleError(
+    throw new DepreciationError(
       `Residual value ${config.residualValue?.amount} exceeds depreciable basis ${allocation.depreciableBasis}`,
     );
   }
@@ -316,13 +342,15 @@ export function computeDepreciationSchedule(
   let monthsElapsed = 0;
 
   for (let year = acquired.year; ; year++) {
-    if (rows.length >= MAX_SCHEDULE_YEARS) {
-      throw new DepreciationScheduleError(
+    if (year - acquired.year >= MAX_SCHEDULE_YEARS) {
+      throw new DepreciationError(
         `Schedule for asset ${asset.id} did not terminate within ${MAX_SCHEDULE_YEARS} years`,
       );
     }
 
-    for (const improvement of improvementsByYear.get(year) ?? []) {
+    const exhaustedBefore = rows.length > 0 && basis - residual - accumulated <= 0n;
+    const improvements = improvementsByYear.get(year) ?? [];
+    for (const improvement of improvements) {
       appliedEventIds.push(improvement.id);
       appliedEvidence.push(...improvement.evidenceDocumentIds);
       if (depreciableComponentIds.has(improvement.componentId)) {
@@ -354,16 +382,22 @@ export function computeDepreciationSchedule(
         notes.push("pro_rata");
       }
     }
+    if (months < 1) {
+      throw new DepreciationError(`Asset ${asset.id} has no months in service in ${year}`);
+    }
     if (isDisposalYear) {
       notes.push("disposal_year");
     }
+    if (exhaustedBefore && improvements.length > 0) {
+      notes.push("post_completion_improvement");
+    }
 
-    let amount = yearAmount(config.method, {
-      basis,
-      remaining,
-      months,
-      monthsElapsed,
-    });
+    let amount = yearAmount(config.method, { basis, remaining, months, monthsElapsed });
+    if (amount <= 0n) {
+      throw new DepreciationError(
+        `Configured rule for asset ${asset.id} rounds to zero in ${year} at scale ${scale}`,
+      );
+    }
     if (amount >= remaining) {
       amount = remaining;
       if (!isDisposalYear) {
@@ -427,11 +461,9 @@ interface YearAmountContext {
 function yearAmount(method: DepreciationMethod, ctx: YearAmountContext): bigint {
   switch (method.kind) {
     case "linear_percentage": {
-      // rate is a decimal string like "2.5"; scale it to an integer numerator.
-      const rateScale = (method.annualRatePercent.split(".")[1] ?? "").length;
-      const rate = toScaledBigInt(method.annualRatePercent, rateScale);
+      const rate = toScaledBigInt(method.annualRatePercent, DEPRECIATION_RATE_SCALE);
       const numerator = ctx.basis * rate * BigInt(ctx.months);
-      const denominator = 10n ** BigInt(rateScale) * 100n * 12n;
+      const denominator = 10n ** BigInt(DEPRECIATION_RATE_SCALE) * 100n * 12n;
       return divideRoundHalfAwayFromZero(numerator, denominator);
     }
     case "linear_useful_life": {

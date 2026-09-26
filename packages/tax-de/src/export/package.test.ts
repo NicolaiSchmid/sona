@@ -94,7 +94,7 @@ describe("generateExportPackage", () => {
   it("writes an empty depreciation schedule file when no assets are configured", () => {
     const csv = byPath.get("depreciation-schedules.csv") ?? "";
     expect(csv.split("\n")).toHaveLength(1);
-    expect(csv).toContain("assetId,assetName,assetKind,year,scheduleConfigId,scheduleVersion");
+    expect(csv).toContain("assetId,assetName,assetKind,year,configId,configVersion");
     expect(byPath.get("summary.md")).toContain("## Depreciation schedules: 0 row(s)");
   });
 
@@ -110,7 +110,9 @@ describe("generateExportPackage", () => {
     const final2026 = withAssets("final", 2026);
     const csv = final2026.files.find((f) => f.path === "depreciation-schedules.csv")?.content ?? "";
     const [header, row] = csv.split("\n");
-    expect(header).toContain("transactionId,postingIds,evidenceDocumentIds,notes");
+    expect(header).toContain(
+      "transactionId,postingIds,recordedAmount,recordedConfigVersion,evidenceDocumentIds,notes",
+    );
     expect(row).toContain("asset_flat");
     expect(row).toContain("cfg_flat_v1");
     expect(row).toContain("t_depr");

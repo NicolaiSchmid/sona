@@ -407,7 +407,7 @@ export interface AssetDepreciationEntryRow {
   id: string;
   workspace_id: string;
   asset_id: string;
-  schedule_id: string;
+  config_id: string;
   year: number;
   transaction_id: string;
   amount: string;

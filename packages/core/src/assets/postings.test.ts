@@ -206,12 +206,101 @@ describe("planDepreciationDrafts", () => {
       {
         year: 2025,
         transactionId: "tx_manual_2025",
+        reason: "amount_mismatch",
         recordedAmount: "6000.00",
         scheduledAmount: "6360.00",
         reviewState: "user_reviewed",
         resolution: "adjustment_posting_required",
       },
     ]);
+  });
+
+  it("reports live recordings for years the current schedule no longer covers", () => {
+    const disposed = computeDepreciationSchedule({
+      asset: SAMPLE_PROPERTY,
+      config: SAMPLE_PROPERTY_CONFIG,
+      events: [SAMPLE_DISPOSAL],
+    });
+    const plan = planDepreciationDrafts({
+      asset: SAMPLE_PROPERTY,
+      config: SAMPLE_PROPERTY_CONFIG,
+      schedule: disposed,
+      recorded: [
+        {
+          year: 2028,
+          transactionId: "tx_2028",
+          amount: { amount: "6360.00", commodity: "EUR" },
+          reviewState: "user_reviewed",
+        },
+        {
+          year: 2040,
+          transactionId: "tx_2040_future",
+          amount: { amount: "6360.00", commodity: "EUR" },
+          reviewState: "draft",
+        },
+      ],
+      throughYear: 2030,
+      createdAt: CREATED_AT,
+    });
+    expect(plan.discrepancies).toEqual([
+      {
+        year: 2028,
+        transactionId: "tx_2028",
+        reason: "not_in_schedule",
+        recordedAmount: "6360.00",
+        scheduledAmount: "0",
+        reviewState: "user_reviewed",
+        resolution: "adjustment_posting_required",
+      },
+    ]);
+  });
+
+  it("reports duplicate live recordings for one year instead of picking one silently", () => {
+    const plan = planDepreciationDrafts({
+      asset: SAMPLE_PROPERTY,
+      config: SAMPLE_PROPERTY_CONFIG,
+      schedule,
+      recorded: [
+        {
+          year: 2025,
+          transactionId: "tx_a",
+          amount: { amount: "6360.00", commodity: "EUR" },
+          reviewState: "user_reviewed",
+        },
+        {
+          year: 2025,
+          transactionId: "tx_b",
+          amount: { amount: "6360.00", commodity: "EUR" },
+          reviewState: "draft",
+        },
+      ],
+      throughYear: 2025,
+      createdAt: CREATED_AT,
+    });
+    expect(plan.skipped.map((s) => s.transactionId)).toEqual(["tx_a"]);
+    expect(plan.discrepancies).toEqual([
+      expect.objectContaining({ transactionId: "tx_b", reason: "duplicate_recording" }),
+    ]);
+  });
+
+  it("gives a regenerated year a fresh id that cannot collide with its superseded predecessor", () => {
+    const plan = planDepreciationDrafts({
+      asset: SAMPLE_PROPERTY,
+      config: SAMPLE_PROPERTY_CONFIG,
+      schedule,
+      recorded: [
+        {
+          year: 2024,
+          transactionId: depreciationTransactionId("asset_flat", 1, 2024),
+          amount: { amount: "3180.00", commodity: "EUR" },
+          reviewState: "superseded",
+        },
+      ],
+      throughYear: 2024,
+      createdAt: CREATED_AT,
+    });
+    expect(plan.create.map((d) => d.transaction.id)).toEqual(["depr:asset_flat:v1:2024:r1"]);
+    expect(depreciationTransactionId("a", 1, 2024, 0)).toBe("depr:a:v1:2024");
   });
 
   it("treats a superseded recording as absent so the year can be regenerated", () => {
@@ -268,6 +357,7 @@ describe("planDepreciationDrafts", () => {
       {
         year: 2025,
         transactionId: "tx_usd_2025",
+        reason: "amount_mismatch",
         recordedAmount: "6360.00",
         scheduledAmount: "6360.00",
         reviewState: "user_reviewed",

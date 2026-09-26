@@ -5,6 +5,11 @@
 -- Same portable conventions as earlier migrations: app-owned TEXT ids and
 -- timestamps, decimal strings as TEXT, JSON as TEXT, INTEGER 0/1 booleans, and
 -- composite (workspace_id, parent_id) foreign keys for tenant isolation.
+--
+-- Shape choices: components are a table because asset_events must reference
+-- them by foreign key and they carry positional identity; acquisition side
+-- costs and evidence document ids are JSON columns because they are only ever
+-- read and written as a whole together with the asset.
 
 CREATE TABLE IF NOT EXISTS assets (
   id                          TEXT PRIMARY KEY,
@@ -23,8 +28,10 @@ CREATE TABLE IF NOT EXISTS assets (
 
 CREATE INDEX IF NOT EXISTS idx_assets_workspace ON assets(workspace_id, kind);
 
+-- Component ids are scoped to their asset (the domain model only requires
+-- uniqueness within one asset), hence the composite primary key.
 CREATE TABLE IF NOT EXISTS asset_components (
-  id            TEXT PRIMARY KEY,
+  id            TEXT NOT NULL,
   workspace_id  TEXT NOT NULL REFERENCES workspaces(id),
   asset_id      TEXT NOT NULL,
   position      INTEGER NOT NULL,
@@ -32,13 +39,14 @@ CREATE TABLE IF NOT EXISTS asset_components (
   label         TEXT NOT NULL,
   cost          TEXT NOT NULL,
   depreciable   INTEGER NOT NULL CHECK (depreciable IN (0, 1)),
-  UNIQUE (workspace_id, id),
+  PRIMARY KEY (workspace_id, asset_id, id),
   UNIQUE (workspace_id, asset_id, position),
   FOREIGN KEY (workspace_id, asset_id) REFERENCES assets(workspace_id, id)
 );
 
 -- Append-only history: improvements (nachträgliche Herstellungskosten) and
--- disposals. Rows are never updated; corrections append new events.
+-- disposals. Rows are never updated; corrections append new events. An
+-- improvement's component must belong to the same asset.
 CREATE TABLE IF NOT EXISTS asset_events (
   id                          TEXT PRIMARY KEY,
   workspace_id                TEXT NOT NULL REFERENCES workspaces(id),
@@ -53,7 +61,8 @@ CREATE TABLE IF NOT EXISTS asset_events (
   created_at                  TEXT NOT NULL,
   UNIQUE (workspace_id, id),
   FOREIGN KEY (workspace_id, asset_id) REFERENCES assets(workspace_id, id),
-  FOREIGN KEY (workspace_id, component_id) REFERENCES asset_components(workspace_id, id)
+  FOREIGN KEY (workspace_id, asset_id, component_id)
+    REFERENCES asset_components(workspace_id, asset_id, id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_asset_events_asset
@@ -79,25 +88,28 @@ CREATE TABLE IF NOT EXISTS asset_depreciation_schedules (
   FOREIGN KEY (workspace_id, asset_id) REFERENCES assets(workspace_id, id)
 );
 
--- One generated depreciation transaction per asset-year. Insert-only: a
--- recorded year is never rewritten by recomputation; corrections happen via
--- explicit adjustment postings. transaction_id references the ledger
--- polymorphically (like evidence_links), so it carries no SQL foreign key.
+-- Insert-only log of generated depreciation transactions, one row per
+-- transaction. A year may accumulate several rows over time (a superseded
+-- draft and its replacement); which one is live is the ledger transaction's
+-- review state. Recorded rows are never rewritten by recomputation;
+-- corrections happen via explicit adjustment postings. transaction_id
+-- references the ledger polymorphically (like evidence_links), so it carries
+-- no SQL foreign key.
 CREATE TABLE IF NOT EXISTS asset_depreciation_entries (
   id              TEXT PRIMARY KEY,
   workspace_id    TEXT NOT NULL REFERENCES workspaces(id),
   asset_id        TEXT NOT NULL,
-  schedule_id     TEXT NOT NULL,
+  config_id       TEXT NOT NULL,
   year            INTEGER NOT NULL,
   transaction_id  TEXT NOT NULL,
   amount          TEXT NOT NULL,
   commodity       TEXT NOT NULL,
   created_at      TEXT NOT NULL,
   UNIQUE (workspace_id, id),
-  UNIQUE (workspace_id, asset_id, year),
+  UNIQUE (workspace_id, transaction_id),
   FOREIGN KEY (workspace_id, asset_id) REFERENCES assets(workspace_id, id),
-  FOREIGN KEY (workspace_id, schedule_id) REFERENCES asset_depreciation_schedules(workspace_id, id)
+  FOREIGN KEY (workspace_id, config_id) REFERENCES asset_depreciation_schedules(workspace_id, id)
 );
 
-CREATE INDEX IF NOT EXISTS idx_asset_depreciation_entries_transaction
-  ON asset_depreciation_entries(workspace_id, transaction_id);
+CREATE INDEX IF NOT EXISTS idx_asset_depreciation_entries_year
+  ON asset_depreciation_entries(workspace_id, asset_id, year);
