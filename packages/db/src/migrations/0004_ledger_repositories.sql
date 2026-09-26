@@ -30,6 +30,23 @@ CREATE TABLE IF NOT EXISTS ledger_transaction_supersessions (
   FOREIGN KEY (workspace_id, supersedes_transaction_id) REFERENCES ledger_transactions(workspace_id, id)
 );
 
--- Evidence links are deduplicated on their full typed edge.
+-- Evidence links are deduplicated on their full typed edge. Earlier schemas
+-- allowed duplicate edges, so drop all but the earliest row of each edge
+-- before the unique index is created. Re-running finds nothing to delete.
+DELETE FROM evidence_links
+WHERE EXISTS (
+  SELECT 1 FROM evidence_links earlier
+  WHERE earlier.workspace_id = evidence_links.workspace_id
+    AND earlier.from_type = evidence_links.from_type
+    AND earlier.from_id = evidence_links.from_id
+    AND earlier.to_type = evidence_links.to_type
+    AND earlier.to_id = evidence_links.to_id
+    AND earlier.kind = evidence_links.kind
+    AND (
+      earlier.created_at < evidence_links.created_at
+      OR (earlier.created_at = evidence_links.created_at AND earlier.id < evidence_links.id)
+    )
+);
+
 CREATE UNIQUE INDEX IF NOT EXISTS uq_evidence_links_edge
   ON evidence_links(workspace_id, from_type, from_id, to_type, to_id, kind);

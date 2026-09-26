@@ -3,6 +3,10 @@
  * delete API: an audit event, once written, is immutable. Callers are
  * responsible for keeping `metadata` to a redacted summary — never raw
  * credentials, tokens, or full financial payloads.
+ *
+ * Timestamps are stored in canonical `toISOString()` form so that the
+ * `(created_at, id)` keyset order is chronological even when writers pass
+ * different offsets or precisions.
  */
 import type { AuditEvent } from "@sona/core";
 import type { DbClient, DbValue } from "../runner.js";
@@ -70,7 +74,7 @@ export class SqliteAuditEventRepository {
         event.targetType ?? null,
         event.targetId ?? null,
         event.metadata === undefined ? null : stringifyJson(event.metadata),
-        event.createdAt,
+        canonicalTimestamp(event.createdAt),
       );
   }
 
@@ -87,8 +91,9 @@ export class SqliteAuditEventRepository {
     const clauses = ["workspace_id = ?"];
     const params: DbValue[] = [workspaceId];
     if (options.after !== undefined) {
+      const after = canonicalTimestamp(options.after.createdAt);
       clauses.push("(created_at > ? OR (created_at = ? AND id > ?))");
-      params.push(options.after.createdAt, options.after.createdAt, options.after.id);
+      params.push(after, after, options.after.id);
     }
     // Fetch one extra row to learn whether another page exists.
     params.push(limit + 1);
@@ -109,6 +114,16 @@ export class SqliteAuditEventRepository {
       nextCursor: last === undefined ? undefined : { createdAt: last.createdAt, id: last.id },
     };
   }
+}
+
+function canonicalTimestamp(value: string): string {
+  const time = Date.parse(value);
+  if (Number.isNaN(time)) {
+    throw new Error(
+      `audit event timestamp is not a valid ISO-8601 date-time: ${JSON.stringify(value)}`,
+    );
+  }
+  return new Date(time).toISOString();
 }
 
 function pageSize(limit: number | undefined): number {
