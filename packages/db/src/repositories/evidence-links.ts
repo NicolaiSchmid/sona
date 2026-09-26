@@ -114,7 +114,6 @@ export class SqliteEvidenceLinkRepository {
 }
 
 function linkFromRow(source: Row): EvidenceLink {
-  const notes = optionalString(source, "notes");
   return {
     id: requiredString(source, "id"),
     workspaceId: requiredString(source, "workspace_id"),
@@ -123,7 +122,7 @@ function linkFromRow(source: Row): EvidenceLink {
     toType: requiredString(source, "to_type"),
     toId: requiredString(source, "to_id"),
     kind: requiredString(source, "kind") as EvidenceLink["kind"],
-    ...(notes === undefined ? {} : { notes }),
+    notes: optionalString(source, "notes"),
     createdAt: requiredString(source, "created_at"),
   };
 }

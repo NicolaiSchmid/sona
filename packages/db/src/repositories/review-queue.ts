@@ -1,7 +1,15 @@
 import type { JsonValue, ReviewState } from "@sona/core";
 import type { DbClient } from "../runner.js";
 import type { ReviewItem } from "../schema.js";
-import { parseJson, requiredString, row, rows, stringifyJson, withTransaction } from "./helpers.js";
+import {
+  insertReviewEvent,
+  parseJson,
+  requiredString,
+  row,
+  rows,
+  stringifyJson,
+  withTransaction,
+} from "./helpers.js";
 
 export interface ReviewTransitionInput {
   id: string;
@@ -46,21 +54,17 @@ export class SqliteReviewQueueRepository {
           "UPDATE review_items SET state = ?, updated_at = ? WHERE workspace_id = ? AND id = ?",
         )
         .run(input.toState, input.at, workspaceId, input.id);
-      this.#db
-        .prepare(
-          "INSERT INTO review_events (id, workspace_id, target_type, target_id, from_state, to_state, actor, notes, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        )
-        .run(
-          `review_event:${input.id}:${input.at}`,
-          workspaceId,
-          current.targetType,
-          current.targetId,
-          current.state,
-          input.toState,
-          input.actor,
-          input.notes ?? null,
-          input.at,
-        );
+      insertReviewEvent(this.#db, {
+        id: `review_event:${input.id}:${input.at}`,
+        workspaceId,
+        targetType: current.targetType,
+        targetId: current.targetId,
+        fromState: current.state,
+        toState: input.toState,
+        actor: input.actor,
+        notes: input.notes,
+        createdAt: input.at,
+      });
     });
   }
 
