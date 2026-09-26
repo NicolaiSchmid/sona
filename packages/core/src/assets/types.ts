@@ -12,7 +12,7 @@
  * so each generated row can name the exact configuration that produced it.
  */
 import { z } from "zod";
-import { isValidDecimalString } from "../money/decimal";
+import { isValidDecimalString, isZeroDecimal } from "../money/decimal";
 import type { MoneyAmount } from "../money/types";
 
 /** ISO calendar date, YYYY-MM-DD. */
@@ -31,9 +31,8 @@ export const moneyAmountSchema = z.object({
   commodity: z.string().min(1),
 }) satisfies z.ZodType<MoneyAmount>;
 
-const nonNegativeMoneySchema = z.object({
+const nonNegativeMoneySchema = moneyAmountSchema.extend({
   amount: nonNegativeDecimalSchema,
-  commodity: z.string().min(1),
 }) satisfies z.ZodType<MoneyAmount>;
 
 export const ASSET_KINDS = [
@@ -177,11 +176,6 @@ export type AssetDisposalEvent = z.infer<typeof assetDisposalEventSchema>;
 export type AssetEvent = z.infer<typeof assetEventSchema>;
 export type AssetEventKind = AssetEvent["kind"];
 
-export const ASSET_EVENT_KINDS = [
-  "improvement",
-  "disposal",
-] as const satisfies readonly AssetEventKind[];
-
 /**
  * How the annual amount is derived. Both are user-configured data: Sona does
  * not pick a rate or useful life on the user's behalf.
@@ -190,7 +184,7 @@ export const depreciationMethodSchema = z.discriminatedUnion("kind", [
   z.object({
     kind: z.literal("linear_percentage"),
     /** Annual rate in percent of the depreciable basis, e.g. "2", "2.5", "3". */
-    annualRatePercent: nonNegativeDecimalSchema.refine((v) => !/^[0.]*$/.test(v), {
+    annualRatePercent: nonNegativeDecimalSchema.refine((v) => !isZeroDecimal(v), {
       message: "annual rate must be greater than zero",
     }),
   }),
@@ -201,12 +195,6 @@ export const depreciationMethodSchema = z.discriminatedUnion("kind", [
 ]);
 
 export type DepreciationMethod = z.infer<typeof depreciationMethodSchema>;
-export type DepreciationMethodKind = DepreciationMethod["kind"];
-
-export const DEPRECIATION_METHOD_KINDS = [
-  "linear_percentage",
-  "linear_useful_life",
-] as const satisfies readonly DepreciationMethodKind[];
 
 /**
  * Versioned schedule configuration for one asset. A new version is appended

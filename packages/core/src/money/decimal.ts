@@ -62,7 +62,7 @@ export function sumDecimals(values: readonly string[]): string {
   const parsed = values.map(parseScaled);
   const scale = parsed.reduce((max, p) => Math.max(max, p.scale), 0);
   const total = parsed.reduce((acc, p) => acc + rescale(p, scale), 0n);
-  return formatScaled(total, scale);
+  return fromScaledBigInt(total, scale);
 }
 
 /** Returns true if the decimal string equals zero (e.g. "0", "0.00", "-0"). */
@@ -84,11 +84,6 @@ export function toScaledBigInt(value: string, scale: number): bigint {
   return rescale(parsed, scale);
 }
 
-/** Formats a signed integer at `scale` fractional digits as a canonical decimal string. */
-export function fromScaledBigInt(value: bigint, scale: number): string {
-  return formatScaled(value, scale);
-}
-
 /**
  * Divides `numerator` by `denominator` rounding half away from zero. Both
  * operands are plain integers; callers scale them first so the quotient lands
@@ -105,7 +100,8 @@ export function divideRoundHalfAwayFromZero(numerator: bigint, denominator: bigi
   return negative ? -quotient : quotient;
 }
 
-function formatScaled(value: bigint, scale: number): string {
+/** Formats a signed integer at `scale` fractional digits as a canonical decimal string. */
+export function fromScaledBigInt(value: bigint, scale: number): string {
   if (scale === 0) {
     return value.toString();
   }

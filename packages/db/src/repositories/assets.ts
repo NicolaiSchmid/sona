@@ -2,16 +2,14 @@ import {
   type Asset,
   type AssetComponent,
   type AssetEvent,
-  acquisitionSideCostSchema,
   assetEventSchema,
   assetSchema,
   type DepreciationScheduleConfig,
-  depreciationMethodSchema,
   depreciationScheduleConfigSchema,
   type MoneyAmount,
 } from "@sona/core";
 import type { DbClient } from "../runner.js";
-import { optionalString, requiredNumber, requiredString, row, rows } from "./helpers.js";
+import { optionalString, parseJson, requiredNumber, requiredString, row, rows } from "./helpers.js";
 
 /** A generated depreciation transaction recorded for one asset-year. */
 export interface RecordedDepreciationEntry {
@@ -23,17 +21,6 @@ export interface RecordedDepreciationEntry {
   transactionId: string;
   amount: MoneyAmount;
   createdAt: string;
-}
-
-const sideCostsSchema = acquisitionSideCostSchema.array();
-
-/** Parses a stored JSON array of non-empty string ids. */
-function parseStringIds(json: string, column: string): string[] {
-  const parsed: unknown = JSON.parse(json);
-  if (!Array.isArray(parsed) || !parsed.every((v) => typeof v === "string" && v.length > 0)) {
-    throw new Error(`database column ${column} was not a JSON array of ids`);
-  }
-  return parsed;
 }
 
 /**
@@ -292,7 +279,8 @@ export class SqliteAssetRepository {
         )
         .all(workspaceId, id),
     ).map((r) => componentFromRow(r, commodity));
-    // assetSchema re-validates commodity consistency of the stored side costs.
+    // assetSchema validates the stored JSON (side costs, evidence ids) and
+    // re-checks commodity consistency on the way out.
     return assetSchema.parse({
       id,
       workspaceId,
@@ -301,13 +289,8 @@ export class SqliteAssetRepository {
       commodity,
       acquiredOn: requiredString(source, "acquired_on"),
       components,
-      acquisitionSideCosts: sideCostsSchema.parse(
-        JSON.parse(requiredString(source, "acquisition_side_costs_json")),
-      ),
-      evidenceDocumentIds: parseStringIds(
-        requiredString(source, "evidence_document_ids_json"),
-        "evidence_document_ids_json",
-      ),
+      acquisitionSideCosts: parseJson(requiredString(source, "acquisition_side_costs_json")),
+      evidenceDocumentIds: parseJson(requiredString(source, "evidence_document_ids_json")),
       createdAt: requiredString(source, "created_at"),
     });
   }
@@ -346,10 +329,7 @@ function eventFromRow(source: Record<string, unknown>): AssetEvent {
     assetId: requiredString(source, "asset_id"),
     occurredOn: requiredString(source, "occurred_on"),
     description: requiredString(source, "description"),
-    evidenceDocumentIds: parseStringIds(
-      requiredString(source, "evidence_document_ids_json"),
-      "evidence_document_ids_json",
-    ),
+    evidenceDocumentIds: parseJson(requiredString(source, "evidence_document_ids_json")),
     createdAt: requiredString(source, "created_at"),
   };
   const amount = optionalString(source, "amount");
@@ -370,19 +350,18 @@ function eventFromRow(source: Record<string, unknown>): AssetEvent {
 function configFromRow(source: Record<string, unknown>): DepreciationScheduleConfig {
   const residualValue = optionalString(source, "residual_value");
   const residualCommodity = optionalString(source, "residual_commodity");
-  const roundingScale = source["rounding_scale"];
   return depreciationScheduleConfigSchema.parse({
     id: requiredString(source, "id"),
     workspaceId: requiredString(source, "workspace_id"),
     assetId: requiredString(source, "asset_id"),
     version: requiredNumber(source, "version"),
-    method: depreciationMethodSchema.parse(JSON.parse(requiredString(source, "method_json"))),
+    method: parseJson(requiredString(source, "method_json")),
     proRataTemporis: requiredNumber(source, "pro_rata_temporis") === 1,
     residualValue:
       residualValue === undefined || residualCommodity === undefined
         ? undefined
         : { amount: residualValue, commodity: residualCommodity },
-    roundingScale: typeof roundingScale === "number" ? roundingScale : undefined,
+    roundingScale: source["rounding_scale"] ?? undefined,
     expenseAccount: requiredString(source, "expense_account"),
     accumulatedDepreciationAccount: requiredString(source, "accumulated_depreciation_account"),
     createdAt: requiredString(source, "created_at"),
