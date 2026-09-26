@@ -1,7 +1,7 @@
 import type { JsonValue, ReviewState } from "@sona/core";
 import type { DbClient } from "../runner.js";
 import type { ReviewItem } from "../schema.js";
-import { parseJson, requiredString, row, rows, stringifyJson } from "./helpers.js";
+import { parseJson, requiredString, row, rows, stringifyJson, withTransaction } from "./helpers.js";
 
 export interface ReviewTransitionInput {
   id: string;
@@ -40,8 +40,7 @@ export class SqliteReviewQueueRepository {
     if (current === undefined) {
       throw new Error("review item not found in workspace");
     }
-    this.#db.exec("BEGIN");
-    try {
+    withTransaction(this.#db, () => {
       this.#db
         .prepare(
           "UPDATE review_items SET state = ?, updated_at = ? WHERE workspace_id = ? AND id = ?",
@@ -62,15 +61,7 @@ export class SqliteReviewQueueRepository {
           input.notes ?? null,
           input.at,
         );
-      this.#db.exec("COMMIT");
-    } catch (error) {
-      try {
-        this.#db.exec("ROLLBACK");
-      } catch {
-        // Surface the original write failure.
-      }
-      throw error;
-    }
+    });
   }
 
   async getById(workspaceId: string, id: string): Promise<ReviewItem | undefined> {

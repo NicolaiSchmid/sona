@@ -323,3 +323,25 @@ export interface ReviewItem {
   createdAt: string;
   updatedAt: string;
 }
+
+// --- Ledger repository schema (migrations/0004_ledger_repositories.sql) -----
+
+export interface LedgerTransactionIdempotencyKeyRow {
+  workspace_id: string;
+  idempotency_key: string;
+  transaction_id: string;
+}
+
+export interface LedgerTransactionSupersessionRow {
+  workspace_id: string;
+  transaction_id: string;
+  supersedes_transaction_id: string;
+  superseded_at: string;
+}
+
+export const LEDGER_REPOSITORY_TABLES = [
+  "ledger_transaction_idempotency_keys",
+  "ledger_transaction_supersessions",
+] as const;
+
+export type LedgerRepositoryTableName = (typeof LEDGER_REPOSITORY_TABLES)[number];

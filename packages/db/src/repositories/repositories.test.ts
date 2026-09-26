@@ -1,4 +1,3 @@
-import { createRequire } from "node:module";
 import { createRawSourceRecord, type JsonValue, type ReviewState } from "@sona/core";
 import type {
   DocumentExtraction,
@@ -7,13 +6,6 @@ import type {
   StoredDocument,
 } from "@sona/receipts";
 import { describe, expect, it } from "vitest";
-import { CORE_MIGRATIONS } from "../migrations/index.js";
-import {
-  applyMigrations,
-  createSqliteDbClient,
-  type DbClient,
-  type SqliteDatabase,
-} from "../runner.js";
 import { createWorkspaceBankRecordStore, SqliteBankRecordRepository } from "./bank-records.js";
 import { SqliteDocumentExtractionRepository, SqliteDocumentRepository } from "./documents.js";
 import { SqliteMatchCandidateRepository } from "./matches.js";
@@ -21,51 +13,13 @@ import { SqlitePortalTaskRunRepository } from "./portal-task-runs.js";
 import { SqliteRawRecordRepository } from "./raw-records.js";
 import { SqliteReviewQueueRepository } from "./review-queue.js";
 import { createWorkspaceSyncRunStore, SqliteSyncRunRepository } from "./sync-runs.js";
+import { createTestDatabase } from "./test-support.js";
 import type {
   NormalizedAccount,
   NormalizedBalance,
   NormalizedTransaction,
   TaskRunProvenance,
 } from "./types.js";
-
-const require = createRequire(import.meta.url);
-const { DatabaseSync } = require("node:sqlite") as typeof import("node:sqlite");
-
-interface TestDatabase {
-  db: DbClient;
-  close: () => void;
-}
-
-function createTestDatabase(): TestDatabase {
-  const sqlite = new DatabaseSync(":memory:") as SqliteDatabase;
-  sqlite.exec("PRAGMA foreign_keys = ON");
-  const db = createSqliteDbClient(sqlite);
-  applyMigrations(db, CORE_MIGRATIONS);
-  seedTenant(db, "ws_1", "src_1");
-  seedTenant(db, "ws_2", "src_2");
-  return {
-    db,
-    close: () => sqlite.close(),
-  };
-}
-
-function seedTenant(db: DbClient, workspaceId: string, sourceId: string): void {
-  db.prepare("INSERT INTO workspaces (id, name, created_at) VALUES (?, ?, ?)").run(
-    workspaceId,
-    `Workspace ${workspaceId}`,
-    "2026-01-01T00:00:00Z",
-  );
-  db.prepare(
-    "INSERT INTO sources (id, workspace_id, kind, display_name, status, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-  ).run(
-    sourceId,
-    workspaceId,
-    "enable_banking",
-    `Source ${sourceId}`,
-    "active",
-    "2026-01-01T00:00:00Z",
-  );
-}
 
 function rawRecord(input: {
   id: string;
