@@ -3,8 +3,13 @@
  * writing can come later; the content here (Markdown/CSV/JSON) is already
  * reviewable and traceable to ledger postings and evidence documents.
  */
+import {
+  type DepreciationExportRow,
+  type DepreciationScheduleExportInput,
+  generateDepreciationSection,
+} from "./depreciation.js";
 import { generateExportLines } from "./generate.js";
-import { generateMissingEvidenceReport } from "./missing-evidence.js";
+import { generateMissingEvidenceReport, type MissingEvidenceRow } from "./missing-evidence.js";
 import type { ExportMode, TaxExportLine, TaxPostingInput, TaxTemplate } from "./types.js";
 
 export interface ExportFile {
@@ -24,6 +29,8 @@ export interface GeneratePackageInput {
   postings: readonly TaxPostingInput[];
   template: TaxTemplate;
   mode: ExportMode;
+  /** Configured depreciation schedules to report on; omit if the workspace has no assets. */
+  depreciation?: readonly DepreciationScheduleExportInput[];
 }
 
 /** File paths a generated package always contains. */
@@ -33,6 +40,7 @@ export const PACKAGE_FILES = [
   "missing-evidence.csv",
   "receipt-manifest.csv",
   "evidence-links.json",
+  "depreciation-schedules.csv",
 ] as const;
 
 /**
@@ -105,6 +113,51 @@ function evidenceLinksJson(lines: readonly TaxExportLine[]): string {
   return JSON.stringify(links, null, 2);
 }
 
+function depreciationSchedulesCsv(rows: readonly DepreciationExportRow[]): string {
+  return csv(
+    [
+      "assetId",
+      "assetName",
+      "assetKind",
+      "year",
+      "scheduleConfigId",
+      "scheduleVersion",
+      "configuredMethod",
+      "monthsInService",
+      "depreciableBasis",
+      "openingBookValue",
+      "amount",
+      "closingBookValue",
+      "currency",
+      "status",
+      "transactionId",
+      "postingIds",
+      "evidenceDocumentIds",
+      "notes",
+    ],
+    rows.map((r) => [
+      r.assetId,
+      r.assetName,
+      r.assetKind,
+      String(r.year),
+      r.scheduleConfigId,
+      String(r.scheduleVersion),
+      r.configuredMethod,
+      String(r.monthsInService),
+      r.depreciableBasis,
+      r.openingBookValue,
+      r.amount,
+      r.closingBookValue,
+      r.currency,
+      r.status,
+      r.transactionId ?? "",
+      r.postingIds.join(";"),
+      r.evidenceDocumentIds.join(";"),
+      r.notes,
+    ]),
+  );
+}
+
 function receiptManifestCsv(lines: readonly TaxExportLine[]): string {
   const rows: string[][] = [];
   for (const line of lines) {
@@ -119,6 +172,7 @@ function summaryMd(
   input: GeneratePackageInput,
   lines: readonly TaxExportLine[],
   missing: number,
+  depreciationRows: number,
 ): string {
   const totals = new Map<string, number>();
   for (const line of lines) {
@@ -140,6 +194,11 @@ function summaryMd(
     `## Missing evidence: ${missing} posting(s)`,
     "See missing-evidence.csv.",
     "",
+    `## Depreciation schedules: ${depreciationRows} row(s)`,
+    "Suggested amounts computed from user-configured schedule rules; each row names",
+    "its schedule version, ledger transaction, and review status. Review required.",
+    "See depreciation-schedules.csv.",
+    "",
   ].join("\n");
 }
 
@@ -155,10 +214,24 @@ export function generateExportPackage(input: GeneratePackageInput): TaxExportPac
   // a final package only reports gaps for postings that are actually in it.
   const includedIds = new Set(lines.map((l) => l.sourcePostingId));
   const gatedPostings = postings.filter((p) => includedIds.has(p.postingId));
-  const missing = generateMissingEvidenceReport(gatedPostings, input.template);
+  const postingMissing = generateMissingEvidenceReport(gatedPostings, input.template);
+
+  const depreciation = generateDepreciationSection(input.depreciation ?? [], {
+    year: input.year,
+    mode: input.mode,
+  });
+  // A depreciation posting already in the ledger export reports its gap once.
+  const reportedPostingIds = new Set(postingMissing.map((m) => m.postingId));
+  const missing: MissingEvidenceRow[] = [
+    ...postingMissing,
+    ...depreciation.missingEvidence.filter((m) => !reportedPostingIds.has(m.postingId)),
+  ];
 
   const files: ExportFile[] = [
-    { path: "summary.md", content: summaryMd(input, lines, missing.length) },
+    {
+      path: "summary.md",
+      content: summaryMd(input, lines, missing.length, depreciation.rows.length),
+    },
     { path: "tax-categories.csv", content: taxCategoriesCsv(lines) },
     {
       path: "missing-evidence.csv",
@@ -177,6 +250,7 @@ export function generateExportPackage(input: GeneratePackageInput): TaxExportPac
     },
     { path: "receipt-manifest.csv", content: receiptManifestCsv(lines) },
     { path: "evidence-links.json", content: evidenceLinksJson(lines) },
+    { path: "depreciation-schedules.csv", content: depreciationSchedulesCsv(depreciation.rows) },
   ];
 
   return { year: input.year, templateId: input.template.id, mode: input.mode, files };

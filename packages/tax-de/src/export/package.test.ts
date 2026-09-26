@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { PRIVATE_DE_TEMPLATE } from "../templates/private-de.js";
-import { SAMPLE_POSTINGS } from "./fixtures.js";
+import { SAMPLE_DEPRECIATION, SAMPLE_POSTINGS } from "./fixtures.js";
 import { generateExportPackage, PACKAGE_FILES } from "./package.js";
 import type { TaxPostingInput } from "./types.js";
 
@@ -89,6 +89,86 @@ describe("generateExportPackage", () => {
     expect(byPath.get("missing-evidence.csv")).not.toContain("p_donation");
     // p_maint is user_reviewed and missing evidence → reported.
     expect(byPath.get("missing-evidence.csv")).toContain("p_maint");
+  });
+
+  it("writes an empty depreciation schedule file when no assets are configured", () => {
+    const csv = byPath.get("depreciation-schedules.csv") ?? "";
+    expect(csv.split("\n")).toHaveLength(1);
+    expect(csv).toContain("assetId,assetName,assetKind,year,scheduleConfigId,scheduleVersion");
+    expect(byPath.get("summary.md")).toContain("## Depreciation schedules: 0 row(s)");
+  });
+
+  it("adds traceable depreciation schedule rows and gates them like the ledger export", () => {
+    const withAssets = (mode: "draft" | "final", year: number) =>
+      generateExportPackage({
+        year,
+        postings: SAMPLE_POSTINGS,
+        template: PRIVATE_DE_TEMPLATE,
+        mode,
+        depreciation: [SAMPLE_DEPRECIATION],
+      });
+    const final2026 = withAssets("final", 2026);
+    const csv = final2026.files.find((f) => f.path === "depreciation-schedules.csv")?.content ?? "";
+    const [header, row] = csv.split("\n");
+    expect(header).toContain("transactionId,postingIds,evidenceDocumentIds,notes");
+    expect(row).toContain("asset_flat");
+    expect(row).toContain("cfg_flat_v1");
+    expect(row).toContain("t_depr");
+    expect(row).toContain("p_depr;p_depr_accumulated");
+    expect(row).toContain("6360.00");
+    expect(row).toContain("user_reviewed");
+    expect(row).toContain("configured rule");
+    expect(final2026.files.find((f) => f.path === "summary.md")?.content).toContain(
+      "## Depreciation schedules: 1 row(s)",
+    );
+
+    // 2025 is only a draft: absent from a final package, present (flagged) in a draft package.
+    const final2025 = withAssets("final", 2025);
+    expect(
+      final2025.files.find((f) => f.path === "depreciation-schedules.csv")?.content.split("\n"),
+    ).toHaveLength(1);
+    const draft2025 = withAssets("draft", 2025);
+    const draftCsv =
+      draft2025.files.find((f) => f.path === "depreciation-schedules.csv")?.content ?? "";
+    expect(draftCsv).toContain("depr:asset_flat:v1:2025");
+    expect(draftCsv).toContain("review required");
+  });
+
+  it("merges schedule rows without evidence into missing-evidence.csv without duplicates", () => {
+    const schedule = SAMPLE_DEPRECIATION.schedule;
+    const noEvidence = {
+      ...SAMPLE_DEPRECIATION,
+      schedule: {
+        ...schedule,
+        rows: schedule.rows.map((r) => ({ ...r, evidenceDocumentIds: [] })),
+      },
+    };
+    // p_depr is user_reviewed with evidence in the ledger fixture, so the ledger
+    // path reports nothing for it; the schedule path adds exactly one row.
+    const p = generateExportPackage({
+      year: 2026,
+      postings: SAMPLE_POSTINGS,
+      template: PRIVATE_DE_TEMPLATE,
+      mode: "final",
+      depreciation: [noEvidence],
+    });
+    const missing = p.files.find((f) => f.path === "missing-evidence.csv")?.content ?? "";
+    expect(missing.split("\n").filter((l) => l.includes("p_depr"))).toHaveLength(1);
+    expect(missing).toContain("asset:asset_flat");
+
+    // If the ledger path already reports the posting, the schedule path does not repeat it.
+    const stripped = SAMPLE_POSTINGS.map((posting) =>
+      posting.postingId === "p_depr" ? { ...posting, evidenceDocumentIds: [] } : posting,
+    );
+    const p2 = generateExportPackage({
+      year: 2026,
+      postings: stripped,
+      template: PRIVATE_DE_TEMPLATE,
+      mode: "final",
+      depreciation: [noEvidence],
+    });
+    const missing2 = p2.files.find((f) => f.path === "missing-evidence.csv")?.content ?? "";
+    expect(missing2.split("\n").filter((l) => l.includes("p_depr"))).toHaveLength(1);
   });
 
   it("neutralizes spreadsheet formula injection in text fields", () => {
