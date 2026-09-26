@@ -495,6 +495,37 @@ describe("SqliteAssetRepository", () => {
     }
   });
 
+  it("scopes component ids to their asset so two assets in one workspace may share them", async () => {
+    const { db, close } = createTestDatabase();
+    try {
+      const repo = new SqliteAssetRepository(db);
+      await repo.create(property());
+      await repo.create(
+        property({
+          id: "asset_b",
+          name: "B",
+          components: property().components.map((c) => ({ ...c, label: `${c.label} B` })),
+        }),
+      );
+      const flat = await repo.getById("ws_1", "asset_flat");
+      const b = await repo.getById("ws_1", "asset_b");
+      expect(flat?.components.map((c) => [c.id, c.label])).toEqual([
+        ["cmp_building", "Building"],
+        ["cmp_land", "Land"],
+      ]);
+      expect(b?.components.map((c) => [c.id, c.label])).toEqual([
+        ["cmp_building", "Building B"],
+        ["cmp_land", "Land B"],
+      ]);
+      // An improvement on B's building lands in B's history only.
+      await repo.appendEvent({ ...improvement, id: "evt_b", assetId: "asset_b" });
+      expect(await repo.listEvents("ws_1", "asset_flat")).toEqual([]);
+      expect((await repo.listEvents("ws_1", "asset_b")).map((e) => e.id)).toEqual(["evt_b"]);
+    } finally {
+      close();
+    }
+  });
+
   it("rolls back the asset row when a component insert fails", async () => {
     const { db, close } = createTestDatabase();
     try {
