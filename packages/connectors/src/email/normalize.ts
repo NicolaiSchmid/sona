@@ -88,16 +88,14 @@ export function policyFingerprint(policy: ResolvedEmailSourcePolicy): string {
 const ISO_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2})?)?$/;
 
 function isIsoDate(value: string): boolean {
-  if (!ISO_DATE_PATTERN.test(value)) {
+  if (!ISO_DATE_PATTERN.test(value) || Number.isNaN(Date.parse(value))) {
     return false;
   }
-  const parsed = new Date(value);
-  if (Number.isNaN(parsed.getTime())) {
-    return false;
-  }
-  // `Date` rolls impossible calendar dates over (2026-02-30 → March 2); a
-  // date-only value must survive the round trip unchanged.
-  return value.length > 10 || parsed.toISOString().startsWith(value);
+  // `Date` rolls impossible calendar dates over (2026-02-30 → March 2). The
+  // calendar part is checked on its own so a time zone offset in a timestamp
+  // form cannot mask or fake the shift.
+  const calendarDate = value.slice(0, 10);
+  return new Date(calendarDate).toISOString().startsWith(calendarDate);
 }
 
 function normalizeAllowlistEntry(entry: string): string {

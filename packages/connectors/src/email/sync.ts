@@ -250,6 +250,10 @@ export async function runEmailSync(input: RunEmailSyncInput): Promise<EmailSyncS
   const policy = resolveEmailSourcePolicy(input.policy);
   const policyHash = policyFingerprint(policy);
   const batchSize = input.batchSize ?? DEFAULT_BATCH_SIZE;
+  if (!Number.isInteger(batchSize) || batchSize <= 0) {
+    // A zero page would report every mailbox as empty and "succeeded".
+    throw new Error("batchSize must be a positive integer");
+  }
   const context = createWorkspaceContext({ workspaceId });
 
   const runId = env.ids();
@@ -305,8 +309,19 @@ export async function runEmailSync(input: RunEmailSyncInput): Promise<EmailSyncS
     const filename = attachmentFilename(message, part);
     const documentId = env.ids();
     const createdAt = env.nowIso();
-    const dropBlob = (): Promise<void> =>
-      documentStorage.delete({ context, id: documentId }).catch(() => undefined);
+    /** Removes our unreferenced blob; a failure is recorded, never silently ignored. */
+    const dropBlob = async (): Promise<void> => {
+      try {
+        await documentStorage.delete({ context, id: documentId });
+      } catch (error) {
+        await fail(
+          message.uid,
+          new Error(
+            `removing the orphaned blob for part ${part.partId} failed: ${errorMessageRedacted(error, [filename])}`,
+          ),
+        );
+      }
+    };
     try {
       await documentStorage.put({
         context,
@@ -344,6 +359,12 @@ export async function runEmailSync(input: RunEmailSyncInput): Promise<EmailSyncS
       } catch (error) {
         // No row means no reference: drop the blob so the retry does not leave an orphan.
         await dropBlob();
+        // Two concurrent imports can both miss the hash lookup; the loser's
+        // INSERT then hits the unique index. If the bytes are referenced now,
+        // that is a dedupe, not a failure.
+        if ((await documentStore.findByContentHash(workspaceId, contentHash)) !== undefined) {
+          return "deduplicated";
+        }
         throw error;
       }
       if (saved.id !== documentId) {
