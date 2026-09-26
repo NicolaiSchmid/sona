@@ -22,6 +22,7 @@ import {
   type GetPortalConnectionInput,
   InMemoryPortalConnectionRepository,
   InMemoryPortalDocumentRegistry,
+  InMemoryPortalEvidenceRepository,
   LocalPlaywrightPortalTaskRunner,
   type PortalConnection,
   type PortalConnectionRepository,
@@ -49,14 +50,31 @@ describe("LocalPlaywrightPortalTaskRunner", () => {
   it("stores fixture portal PDFs with run provenance and dedups repeat downloads", async () => {
     const storage = new CountingDocumentStorage();
     const registry = new InMemoryPortalDocumentRegistry();
+    const evidence = new InMemoryPortalEvidenceRepository();
     const runner = await makeRunner({
       storage,
       registry,
+      evidence,
       page: new FixturePortalPage(),
     });
 
     const first = await runner.runTask(input());
     const second = await runner.runTask(input({ runId: "run_2" }));
+
+    const records = evidence.listDocuments(context);
+    expect(records).toHaveLength(2);
+    expect(records[0]).toMatchObject({
+      workspaceId: "ws_1",
+      sourceKind: "portal",
+      contentHash: first.documents[0]?.contentHash,
+      storageUri: `stored-document:${first.storedDocuments[0]?.id}`,
+      retentionState: "active",
+    });
+    expect(records[0]?.sourceMetadata).toMatchObject({
+      runId: "run_1",
+      browserProvider: "local-playwright",
+    });
+    expect(evidence.listDocuments({ workspaceId: "ws_other" })).toEqual([]);
 
     expect(first.status).toBe("completed");
     expect(first.documents).toHaveLength(2);
@@ -232,7 +250,7 @@ describe("LocalPlaywrightPortalTaskRunner", () => {
 
     const result = await runner.runTask(input({ task: retargeted }));
 
-    expect(result.status).toBe("failed");
+    expect(result.status).toBe("policy_refused");
     expect(result.errors[0]).toContain("reviewed task revision");
     expect(secretStore.getCount).toBe(0);
     expect(provider.sessionCount).toBe(0);
@@ -272,9 +290,9 @@ describe("LocalPlaywrightPortalTaskRunner", () => {
 
     const result = await runner.runTask(input());
 
-    expect(result.status).toBe("failed");
+    expect(result.status).toBe("policy_refused");
     expect(result.errors).toEqual([
-      'portal connection is approved for browser provider "browserbase", not "local-playwright"',
+      'refused: portal connection is approved for browser provider "browserbase", not "local-playwright"',
     ]);
     expect(secretStore.getCount).toBe(0);
     expect(provider.sessionCount).toBe(0);
@@ -510,6 +528,40 @@ describe("LocalPlaywrightPortalTaskRunner", () => {
     }
   });
 
+  it("records an incidental off-allowlist subresource without stopping the run", async () => {
+    const page = new FixturePortalPage({
+      subresources: [{ url: "https://tracking.example/pixel.gif", resourceType: "image" }],
+    });
+    const runner = await makeRunner({ page });
+
+    const result = await runner.runTask(input());
+
+    expect(result.status).toBe("completed");
+    expect(result.documents).toHaveLength(2);
+    expect(result.provenance.blockedRequests).toEqual([
+      expect.objectContaining({
+        url: "https://tracking.example/pixel.gif",
+        reason: "off_allowlist",
+      }),
+    ]);
+    expect(result.warnings).toContain("1 incidental request(s) blocked; see provenance");
+  });
+
+  it("releases a reserved content hash when storing the document fails", async () => {
+    const registry = new InMemoryPortalDocumentRegistry();
+    const storage = new CountingDocumentStorage();
+    storage.failNextPut = new Error("disk full");
+    const runner = await makeRunner({ page: new FixturePortalPage(), registry, storage });
+
+    const failed = await runner.runTask(input());
+    const retried = await runner.runTask(input({ runId: "run_2" }));
+
+    expect(failed.status).toBe("failed");
+    expect(failed.errors).toEqual(["disk full"]);
+    expect(retried.status).toBe("completed");
+    expect(retried.documents).toHaveLength(2);
+  });
+
   it("refuses a login POST whose body carries fields outside the reviewed form", async () => {
     const page = new FixturePortalPage({
       loginPostData: "email=a%40b.test&password=x&action=delete_account",
@@ -541,7 +593,9 @@ describe("LocalPlaywrightPortalTaskRunner", () => {
     const result = await runner.runTask(input());
 
     expect(result.status).toBe("failed");
-    expect(result.errors).toEqual(["download payload does not carry a PDF signature"]);
+    expect(result.errors).toEqual([
+      "download payload does not carry the application/pdf signature",
+    ]);
     expect(storage.putCount).toBe(0);
   });
 
@@ -772,10 +826,29 @@ describe("LocalPlaywrightPortalTaskRunner", () => {
     const registry = new InMemoryPortalDocumentRegistry();
     const hash = "a".repeat(64);
 
-    await registry.recordContentHash({ workspaceId: "ws_1", contentHash: hash, documentId: "d1" });
+    const first = await registry.reserveContentHash({
+      workspaceId: "ws_1",
+      contentHash: hash,
+      documentId: "d1",
+    });
+    const again = await registry.reserveContentHash({
+      workspaceId: "ws_1",
+      contentHash: hash,
+      documentId: "d2",
+    });
+    const otherWorkspace = await registry.reserveContentHash({
+      workspaceId: "ws_2",
+      contentHash: hash,
+      documentId: "d3",
+    });
+    await registry.releaseContentHash({ workspaceId: "ws_1", contentHash: hash });
+    const afterRelease = await registry.reserveContentHash({
+      workspaceId: "ws_1",
+      contentHash: hash,
+      documentId: "d4",
+    });
 
-    expect(await registry.hasContentHash({ workspaceId: "ws_1", contentHash: hash })).toBe(true);
-    expect(await registry.hasContentHash({ workspaceId: "ws_2", contentHash: hash })).toBe(false);
+    expect([first, again, otherWorkspace, afterRelease]).toEqual([true, false, true, true]);
   });
 
   it("fails before loading credentials when the connection targets another task", async () => {
@@ -790,9 +863,9 @@ describe("LocalPlaywrightPortalTaskRunner", () => {
 
     const result = await runner.runTask(input());
 
-    expect(result.status).toBe("failed");
+    expect(result.status).toBe("policy_refused");
     expect(result.errors).toEqual([
-      "portal connection is not bound to this workspace and reviewed task revision",
+      "refused: portal connection is not bound to this workspace and reviewed task revision",
     ]);
     expect(secretStore.getCount).toBe(0);
     expect(provider.sessionCount).toBe(0);
@@ -822,7 +895,7 @@ describe("LocalPlaywrightPortalTaskRunner", () => {
 
     const result = await runner.runTask(input());
 
-    expect(result.status).toBe("failed");
+    expect(result.status).toBe("policy_refused");
     expect(result.errors[0]).toContain("not bound to this workspace");
     expect(secretStore.getCount).toBe(0);
     expect(provider.sessionCount).toBe(0);
@@ -915,9 +988,15 @@ class CountingSecretStore extends InMemorySecretStore {
 
 class CountingDocumentStorage extends InMemoryDocumentStorage {
   putCount = 0;
+  failNextPut: Error | undefined;
   readonly #documents: unknown[] = [];
 
   override async put(inputValue: Parameters<InMemoryDocumentStorage["put"]>[0]) {
+    if (this.failNextPut !== undefined) {
+      const failure = this.failNextPut;
+      this.failNextPut = undefined;
+      throw failure;
+    }
     this.putCount += 1;
     const document = await super.put(inputValue);
     this.#documents.push(document);
@@ -933,6 +1012,7 @@ interface MakeRunnerInput {
   page: FixturePortalPage;
   storage?: CountingDocumentStorage;
   registry?: InMemoryPortalDocumentRegistry;
+  evidence?: InMemoryPortalEvidenceRepository;
   password?: string;
   providerFailure?: Error;
   providerSensitiveValues?: readonly string[];
@@ -989,6 +1069,7 @@ async function makeRunner(inputValue: MakeRunnerInput): Promise<LocalPlaywrightP
       }),
     documentStorage: inputValue.storage ?? new CountingDocumentStorage(),
     documentRegistry: inputValue.registry ?? new InMemoryPortalDocumentRegistry(),
+    evidence: inputValue.evidence ?? new InMemoryPortalEvidenceRepository(),
     secretStore,
     connections,
   });
@@ -1052,6 +1133,8 @@ interface FixturePortalPageOptions {
   linkHrefs?: readonly string[];
   /** Body the fixture login form posts (default: the reviewed email/password fields). */
   loginPostData?: string;
+  /** Extra requests the login page issues on load, e.g. third-party pixels. */
+  subresources?: readonly Pick<PortalRequest, "url" | "resourceType">[];
 }
 
 class FixturePortalPage implements PortalBrowserPage {
@@ -1074,6 +1157,7 @@ class FixturePortalPage implements PortalBrowserPage {
   readonly #hrefAttribute: string;
   readonly #abortBlockedRequests: boolean;
   readonly #loginPostData: string;
+  readonly #subresources: readonly Pick<PortalRequest, "url" | "resourceType">[];
   #guard: PortalRequestGuard | undefined;
   #currentUrl = "https://portal.test/login";
 
@@ -1088,6 +1172,7 @@ class FixturePortalPage implements PortalBrowserPage {
     this.#linkHrefs = options.linkHrefs;
     this.#loginPostData =
       options.loginPostData ?? "email=synthetic-user%40example.test&password=synthetic-password";
+    this.#subresources = options.subresources ?? [];
   }
 
   guardRequests(guard: PortalRequestGuard): void {
@@ -1096,6 +1181,9 @@ class FixturePortalPage implements PortalBrowserPage {
 
   async goto(url: string): Promise<void> {
     await this.emitRequest({ url, method: "GET", resourceType: "document" });
+    for (const subresource of this.#subresources) {
+      await this.emitRequest({ ...subresource, method: "GET" });
+    }
     this.#currentUrl = url;
   }
 

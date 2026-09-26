@@ -64,8 +64,37 @@ export function isSuccessfulStatus(status: number): boolean {
   return status >= 200 && status < 300;
 }
 
+/** Only the statuses clients actually follow; 304 and friends are not redirects. */
+const REDIRECT_STATUSES: ReadonlySet<number> = new Set([301, 302, 303, 307, 308]);
+
 export function isRedirectStatus(status: number): boolean {
-  return status >= 300 && status < 400;
+  return REDIRECT_STATUSES.has(status);
+}
+
+/** 307/308 keep method and body; every other redirect becomes a body-less GET. */
+export function redirectPreservesMethod(status: number): boolean {
+  return status === 307 || status === 308;
+}
+
+export const MAX_REDIRECT_HOPS = 5;
+
+export interface RedirectTargetInput {
+  status: number;
+  location: string | null | undefined;
+  currentUrl: string;
+  /** Hops already followed before this one. */
+  hop: number;
+}
+
+/** Resolves the next hop of a redirect chain or throws when it cannot be followed safely. */
+export function redirectTarget(input: RedirectTargetInput): string {
+  if (input.hop >= MAX_REDIRECT_HOPS) {
+    throw new Error(`redirect chain exceeded ${MAX_REDIRECT_HOPS} hops`);
+  }
+  if (input.location === undefined || input.location === null) {
+    throw new Error(`redirect ${input.status} without a Location header`);
+  }
+  return new URL(input.location, input.currentUrl).toString();
 }
 
 /** Compares media types only; parameters such as `charset` are ignored. */
@@ -73,22 +102,38 @@ export function isExpectedMimeType(actual: string, expected: string): boolean {
   return mediaType(actual) === mediaType(expected);
 }
 
-const PDF_SIGNATURE = new TextEncoder().encode("%PDF-");
+/** Document types a task may download: each has a byte signature the runner verifies. */
+export const DOWNLOAD_MIME_TYPES = ["application/pdf", "image/png", "image/jpeg"] as const;
+
+export type DownloadMimeType = (typeof DOWNLOAD_MIME_TYPES)[number];
+
+const SIGNATURES: Readonly<Record<DownloadMimeType, readonly Uint8Array[]>> = {
+  "application/pdf": [new TextEncoder().encode("%PDF-")],
+  "image/png": [new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])],
+  "image/jpeg": [new Uint8Array([0xff, 0xd8, 0xff])],
+};
 
 /**
  * A server-controlled `Content-Type` is not enough to accept bytes as tax
  * evidence; an expired-session page or proxy error labelled `application/pdf`
  * must not be stored as an invoice. Returns the rejection reason, or undefined
- * when the payload looks like the declared type.
+ * when the payload carries the signature of the declared type.
  */
 export function documentBytesProblem(bytes: Uint8Array, mimeType: string): string | undefined {
   if (bytes.byteLength === 0) {
     return "download payload is empty";
   }
-  if (mediaType(mimeType) === "application/pdf" && !startsWith(bytes, PDF_SIGNATURE)) {
-    return "download payload does not carry a PDF signature";
+  const declared = mediaType(mimeType);
+  if (!isDownloadMimeType(declared)) {
+    return `download media type ${declared} is not a supported evidence format`;
   }
-  return undefined;
+  return SIGNATURES[declared].some((signature) => startsWith(bytes, signature))
+    ? undefined
+    : `download payload does not carry the ${declared} signature`;
+}
+
+function isDownloadMimeType(value: string): value is DownloadMimeType {
+  return (DOWNLOAD_MIME_TYPES as readonly string[]).includes(value);
 }
 
 function startsWith(bytes: Uint8Array, prefix: Uint8Array): boolean {

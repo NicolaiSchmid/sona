@@ -36,8 +36,8 @@ Sona worker (portal_fetch job: lease, cooldown, run history)
       BrowserbasePortalTaskRunner       managed remote browser over CDP
   → versioned task definition (schema-validated, read-only policy)
   → network guard on the browser context
-  → portal login → discovery → in-page PDF download
-  → DocumentStorage (hash dedup) + run provenance
+  → portal login → discovery → worker-issued download (session cookies, byte cap)
+  → DocumentStorage (hash dedup) + receipts evidence record + run provenance
   → extraction + reconciliation
 ```
 
@@ -52,15 +52,22 @@ instantiated without an injected browser provider. Each run:
 - only runs on the browser provider (local or managed) the connection was
   approved for, since a managed remote browser is a separate data processor;
 - installs a network guard on the browser context that aborts off-allowlist
-  and cleartext requests, URLs naming a forbidden operation even over GET,
-  every WebSocket handshake, and any non-idempotent request that is not an
-  exact-URL, reviewed-body-field POST exception;
+  and cleartext requests, URLs naming a forbidden operation (decoded, any
+  method, any initiator; only static asset paths are exempt), every WebSocket
+  handshake, and any non-idempotent request that is not an exact-URL POST
+  exception whose body carries only reviewed fields (credential fields are
+  opaque, control fields are pinned or screened);
+- treats a refused navigation, download, or mutation attempt as `blocked`
+  (terminal for the worker) while incidental third-party pixels or fonts are
+  recorded as provenance and the run continues;
 - issues every HTTP request of the session from the worker with redirects
   disabled, so each hop is evaluated by the guard before it is sent (a remote
   browser contributes rendering and scripting, not network egress);
 - downloads with the session cookies under a hard byte cap and wall-clock
-  deadline, then checks final URL, status, media type, and a document
-  signature before storing;
+  deadline, checks final URL, status, media type, and the byte signature of the
+  declared format (PDF, PNG, JPEG), reserves the content hash atomically,
+  stores the original, and registers it as `@sona/receipts` evidence with
+  source kind `portal`;
 - redacts credentials, provider secrets, and query strings from errors,
   provenance, and stored metadata, and never returns document bytes.
 

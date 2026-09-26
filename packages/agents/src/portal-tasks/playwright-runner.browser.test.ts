@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import {
   InMemoryPortalConnectionRepository,
   InMemoryPortalDocumentRegistry,
+  InMemoryPortalEvidenceRepository,
   LocalPlaywrightPortalTaskRunner,
 } from "./playwright-runner.js";
 import type { RunPortalTaskResult } from "./runner.js";
@@ -31,7 +32,7 @@ describe.skipIf(!runBrowserTests)("LocalPlaywrightPortalTaskRunner browser fixtu
     expect(result.provenance.blockedRequests).toEqual([]);
   });
 
-  it("refuses WebSockets and off-allowlist subresources opened by the portal page", {
+  it("refuses WebSockets and off-allowlist subresources but completes the run", {
     timeout: 15_000,
   }, async () => {
     const result = await runFixture((origin) =>
@@ -44,7 +45,7 @@ describe.skipIf(!runBrowserTests)("LocalPlaywrightPortalTaskRunner browser fixtu
       ]),
     );
 
-    expect(result.status).toBe("blocked");
+    expect(result.status).toBe("completed");
     expect(result.provenance.blockedRequests).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ resourceType: "websocket", reason: "websocket" }),
@@ -54,6 +55,27 @@ describe.skipIf(!runBrowserTests)("LocalPlaywrightPortalTaskRunner browser fixtu
         }),
       ]),
     );
+    expect(result.warnings).toContain("2 incidental request(s) blocked; see provenance");
+  });
+
+  it("drops the body and content headers when an XHR POST is redirected to a GET", async () => {
+    const { result, hits, headersSeen } = await runFixtureWithServer((origin) =>
+      makeTask(origin, [
+        { kind: "navigate", url: `${origin}/xhr-login` },
+        { kind: "waitForSelector", selector: "[data-testid='xhr-done']", timeoutMs: 5_000 },
+      ]),
+    );
+
+    expect(result.status).toBe("completed");
+    expect(hits.get("POST /api/login")).toBe(1);
+    expect(hits.get("GET /api/after")).toBe(1);
+    const after = headersSeen.get("GET /api/after");
+    expect(after?.["content-type"]).not.toBe("application/x-www-form-urlencoded");
+    expect(["0", undefined]).toContain(after?.["content-length"]);
+    expect(after?.["cookie"]).toBeUndefined();
+    expect(result.provenance.allowedNonIdempotentRequests).toEqual([
+      expect.objectContaining({ url: expect.stringMatching(/\/api\/login$/), reason: "search" }),
+    ]);
   });
 
   it("aborts a method-preserving redirect onto an unreviewed endpoint before it is sent", async () => {
@@ -126,7 +148,7 @@ describe.skipIf(!runBrowserTests)("LocalPlaywrightPortalTaskRunner browser fixtu
       ]),
     );
 
-    expect(result.status).toBe("blocked");
+    expect(result.status).toBe("completed");
     expect(result.provenance.blockedRequests).toEqual([
       expect.objectContaining({
         url: "https://tracking.example/pixel2.gif",
@@ -234,6 +256,8 @@ interface FixtureRun {
   result: RunPortalTaskResult;
   /** `METHOD /path` request counts the fixture server actually received. */
   hits: ReadonlyMap<string, number>;
+  /** Selected request headers of the last request per `METHOD /path`. */
+  headersSeen: ReadonlyMap<string, Record<string, string | undefined>>;
 }
 
 async function runFixtureWithServer(
@@ -258,6 +282,7 @@ async function runFixtureWithServer(
     const runner = new LocalPlaywrightPortalTaskRunner({
       documentStorage: new InMemoryDocumentStorage(),
       documentRegistry: new InMemoryPortalDocumentRegistry(),
+      evidence: new InMemoryPortalEvidenceRepository(),
       secretStore,
       connections: new InMemoryPortalConnectionRepository([
         {
@@ -281,7 +306,7 @@ async function runFixtureWithServer(
       workspaceId: context.workspaceId,
       now: "2026-02-01T00:00:00Z",
     });
-    return { result, hits: server.hits };
+    return { result, hits: server.hits, headersSeen: server.headersSeen };
   } finally {
     await server.close();
   }
@@ -290,14 +315,21 @@ async function runFixtureWithServer(
 interface FixtureServer {
   origin: string;
   hits: ReadonlyMap<string, number>;
+  headersSeen: ReadonlyMap<string, Record<string, string | undefined>>;
   close(): Promise<void>;
 }
 
 async function startFixtureServer(): Promise<FixtureServer> {
   const hits = new Map<string, number>();
+  const headersSeen = new Map<string, Record<string, string | undefined>>();
   const server = createServer((request, response) => {
     const key = `${request.method} ${new URL(request.url ?? "/", "http://localhost").pathname}`;
     hits.set(key, (hits.get(key) ?? 0) + 1);
+    headersSeen.set(key, {
+      "content-type": headerValue(request.headers["content-type"]),
+      "content-length": headerValue(request.headers["content-length"]),
+      cookie: headerValue(request.headers.cookie),
+    });
     handleFixtureRequest(request, response);
   });
   await new Promise<void>((resolve) => {
@@ -310,6 +342,7 @@ async function startFixtureServer(): Promise<FixtureServer> {
   return {
     origin: `http://localhost:${address.port}`,
     hits,
+    headersSeen,
     close: async () => {
       server.closeAllConnections();
       await new Promise<void>((resolve, reject) => {
@@ -325,8 +358,39 @@ async function startFixtureServer(): Promise<FixtureServer> {
   };
 }
 
+function headerValue(value: string | string[] | undefined): string | undefined {
+  return Array.isArray(value) ? value.join(", ") : value;
+}
+
 function handleFixtureRequest(request: IncomingMessage, response: ServerResponse): void {
   const url = new URL(request.url ?? "/", "http://localhost");
+  if (url.pathname === "/xhr-login" && request.method === "GET") {
+    response.writeHead(200, { "content-type": "text/html" });
+    response.end(`<!doctype html><main id="xhr">pending</main>
+      <script>
+        fetch("/api/login", {
+          method: "POST",
+          headers: { "content-type": "application/x-www-form-urlencoded" },
+          body: "q=hello",
+        }).then(() => {
+          const marker = document.createElement("div");
+          marker.dataset.testid = "xhr-done";
+          marker.textContent = "xhr done";
+          document.body.append(marker);
+        });
+      </script>`);
+    return;
+  }
+  if (url.pathname === "/api/login" && request.method === "POST") {
+    response.writeHead(303, { location: "/api/after" });
+    response.end();
+    return;
+  }
+  if (url.pathname === "/api/after" && request.method === "GET") {
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end("{}");
+    return;
+  }
   if (url.pathname === "/login" && request.method === "GET") {
     response.writeHead(200, { "content-type": "text/html" });
     response.end(`<!doctype html>
@@ -472,6 +536,17 @@ function makeTask(origin: string, steps?: readonly PortalTaskStep[]): PortalTask
         reason: "login",
         justification: "Fixture login form requires POST before read-only invoice access.",
         allowedBodyFields: ["email", "password"],
+        credentialBodyFields: ["email", "password"],
+        pinnedBodyValues: {},
+      },
+      {
+        method: "POST",
+        urlPattern: `${origin}/api/login`,
+        reason: "search",
+        justification: "Fixture XHR search endpoint answers with a redirect to a GET resource.",
+        allowedBodyFields: ["q"],
+        credentialBodyFields: [],
+        pinnedBodyValues: {},
       },
       {
         method: "POST",
@@ -479,6 +554,8 @@ function makeTask(origin: string, steps?: readonly PortalTaskStep[]): PortalTask
         reason: "login",
         justification: "Fixture variant whose login endpoint redirects with the method preserved.",
         allowedBodyFields: ["email", "password"],
+        credentialBodyFields: ["email", "password"],
+        pinnedBodyValues: {},
       },
     ],
     steps: [

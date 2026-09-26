@@ -13,6 +13,7 @@ import {
   type PortalFetchConnection,
   type PortalFetchConnectionRepository,
   type PortalFetchJobStateStore,
+  type RecordPortalFetchRunInput,
   type RunPortalFetchJobInput,
   runPortalFetchJob,
 } from "./portal-fetch.js";
@@ -194,23 +195,56 @@ describe("portal_fetch job", () => {
     expect(recorder.listRuns({ workspaceId: "ws_other" })).toEqual([]);
   });
 
-  it("hands the job back to the queue when the run cannot be recorded", async () => {
+  it("keeps the lease instead of rerunning the browser when the run cannot be recorded", async () => {
     const state = new InMemoryPortalFetchJobStateStore();
     const connections = singleConnection();
+    let attempts = 0;
     const failingRecorder = {
       async recordRun(): Promise<void> {
+        attempts += 1;
         throw new Error("run history unavailable");
       },
     };
+    const counting = new CountingPortalTaskRunner();
 
     await expect(
       runPortalFetchJob(jobInput({ state, connections, runs: failingRecorder })),
-    ).rejects.toThrow("run history unavailable");
+    ).rejects.toThrow(
+      /could not be recorded after 3 attempts; lease kept: run history unavailable/,
+    );
     const retried = await runPortalFetchJob(
-      jobInput({ state, connections, now: "2026-02-01T00:01:00Z" }),
+      jobInput({ state, connections, runner: counting, now: "2026-02-01T00:01:00Z" }),
     );
 
-    expect(retried.status).toBe("completed");
+    expect(attempts).toBe(3);
+    expect(retried.status).toBe("duplicate");
+    expect(counting.runCount).toBe(0);
+  });
+
+  it("retries recording transiently and records the connection id", async () => {
+    const state = new InMemoryPortalFetchJobStateStore();
+    const connections = singleConnection();
+    const recorded: RecordPortalFetchRunInput[] = [];
+    let failures = 2;
+    const flakyRecorder = {
+      async recordRun(input: RecordPortalFetchRunInput): Promise<void> {
+        if (failures > 0) {
+          failures -= 1;
+          throw new Error("transient");
+        }
+        recorded.push(input);
+      },
+    };
+
+    const result = await runPortalFetchJob(jobInput({ state, connections, runs: flakyRecorder }));
+
+    expect(result.status).toBe("completed");
+    expect(recorded).toHaveLength(1);
+    expect(recorded[0]).toMatchObject({
+      connectionId: "conn_1",
+      context: { workspaceId: "ws_1" },
+    });
+    expect(recorded[0]?.result.provenance.connectionId).toBe("conn_1");
   });
 
   it("gives each delivery attempt of a job id its own run id", async () => {

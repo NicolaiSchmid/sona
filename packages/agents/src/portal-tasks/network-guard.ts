@@ -6,15 +6,15 @@ import type {
   PortalResourceType,
 } from "./provenance.js";
 import type { PortalHttpMethodException, PortalTask } from "./schema.js";
-import { redactSensitiveUrlPath } from "./url.js";
+import { decodedPathAndQuery, redactUrl } from "./url.js";
 
 export interface PortalRequest {
   url: string;
   /** HTTP method as sent by the browser; compared case-insensitively. */
   method: string;
   resourceType: PortalResourceType;
-  /** Request body for non-idempotent methods; null/undefined when absent. */
-  postData?: string | null;
+  /** Request body for non-idempotent methods; absent when the request has none. */
+  postData?: string;
 }
 
 export interface NetworkGuardOptions {
@@ -31,22 +31,33 @@ export interface NetworkGuardSnapshot {
 }
 
 const IDEMPOTENT_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
-
-/**
- * Static assets are exempt from the destructive-URL screen: an icon named
- * `add.svg` is not an operation, whereas a document, XHR, or fetch to
- * `/cancel-subscription` may well be one even when it uses GET.
- */
-const STATIC_RESOURCE_TYPES: ReadonlySet<PortalResourceType> = new Set<PortalResourceType>([
-  "stylesheet",
-  "image",
-  "media",
-  "font",
-  "script",
-  "texttrack",
-]);
 const SECURE_PROTOCOLS = new Set(["https:", "wss:"]);
 const LOCALHOST_PROTOCOLS = new Set([...SECURE_PROTOCOLS, "http:", "ws:"]);
+
+/**
+ * Paths ending in a static asset extension are exempt from the destructive
+ * URL screen: an icon named `add.svg` is not an operation. The exemption is
+ * based on the URL, not on how the browser classified the request, because a
+ * portal can trigger `GET /cancel-subscription` through an `<img>` just as
+ * well as through a link.
+ */
+const STATIC_ASSET_RE =
+  /\.(?:js|mjs|css|map|png|jpe?g|gif|svg|webp|ico|woff2?|ttf|otf|eot|mp4|webm|mp3|json|xml|txt)$/i;
+
+/**
+ * Blocks that mean the task itself tried to leave the read-only boundary: a
+ * navigation or download the guard refused, or an attempted mutation. An
+ * incidental third-party pixel, font, or WebSocket that was aborted is recorded
+ * as provenance but does not stop the run.
+ */
+export function isMaterialBlock(blocked: BlockedPortalRequest): boolean {
+  return (
+    blocked.resourceType === "document" ||
+    blocked.reason === "destructive_url" ||
+    blocked.reason === "non_idempotent_method" ||
+    blocked.reason === "unreviewed_body"
+  );
+}
 
 /**
  * Execution-time read-only enforcement for one run. Every decision that blocks
@@ -76,10 +87,7 @@ export class NetworkGuard {
 
     // Merchant portals do not reliably keep GET side-effect free, so a URL
     // that names a forbidden operation is refused regardless of method.
-    if (
-      !STATIC_RESOURCE_TYPES.has(request.resourceType) &&
-      forbiddenConceptFor(urlPathAndQuery(request.url)) !== undefined
-    ) {
+    if (isDestructiveUrl(request.url)) {
       return this.block(request, method, "destructive_url");
     }
 
@@ -164,15 +172,25 @@ export function createNetworkGuard(options: NetworkGuardOptions): NetworkGuard {
   return new NetworkGuard(options);
 }
 
+function isDestructiveUrl(rawUrl: string): boolean {
+  const pathAndQuery = decodedPathAndQuery(rawUrl);
+  const path = pathAndQuery.split("?", 1)[0] ?? pathAndQuery;
+  if (STATIC_ASSET_RE.test(path) && path === pathAndQuery) {
+    return false;
+  }
+  return forbiddenConceptFor(pathAndQuery) !== undefined;
+}
+
 /**
  * The exception URL alone does not bound what a POST does; a multiplexed
  * `/api` endpoint dispatches on its body. Only the reviewed field names may be
- * sent, and for anything but login (whose values are opaque credentials) no
- * value may name a forbidden operation. Bodies the guard cannot parse are
- * refused rather than trusted.
+ * sent; credential fields carry opaque values, pinned control fields must
+ * carry one of their reviewed values, and any other value must not name a
+ * forbidden operation. Every occurrence of a repeated field is checked, and
+ * bodies the guard cannot parse are refused rather than trusted.
  */
 function isReviewedBody(
-  postData: string | null | undefined,
+  postData: string | undefined,
   exception: PortalHttpMethodException,
 ): boolean {
   const fields = parseBodyFields(postData);
@@ -180,20 +198,27 @@ function isReviewedBody(
     return false;
   }
   const allowed = new Set(exception.allowedBodyFields);
+  const credentials = new Set(exception.credentialBodyFields);
   for (const [name, value] of fields) {
     if (!allowed.has(name)) {
       return false;
     }
-    if (exception.reason !== "login" && forbiddenConceptFor(value) !== undefined) {
+    if (credentials.has(name)) {
+      continue;
+    }
+    const pinned = exception.pinnedBodyValues[name];
+    if (pinned !== undefined ? !pinned.includes(value) : forbiddenConceptFor(value) !== undefined) {
       return false;
     }
   }
   return true;
 }
 
-function parseBodyFields(postData: string | null | undefined): Map<string, string> | undefined {
-  if (postData === undefined || postData === null || postData.trim().length === 0) {
-    return new Map();
+type BodyField = readonly [name: string, value: string];
+
+function parseBodyFields(postData: string | undefined): readonly BodyField[] | undefined {
+  if (postData === undefined || postData.trim().length === 0) {
+    return [];
   }
   const trimmed = postData.trim();
   if (trimmed.startsWith("{")) {
@@ -203,10 +228,10 @@ function parseBodyFields(postData: string | null | undefined): Map<string, strin
     // multipart/form-data is not reviewed field-by-field.
     return undefined;
   }
-  return new Map(new URLSearchParams(trimmed));
+  return [...new URLSearchParams(trimmed).entries()];
 }
 
-function parseJsonFields(body: string): Map<string, string> | undefined {
+function parseJsonFields(body: string): readonly BodyField[] | undefined {
   let parsed: unknown;
   try {
     parsed = JSON.parse(body);
@@ -216,25 +241,18 @@ function parseJsonFields(body: string): Map<string, string> | undefined {
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
     return undefined;
   }
-  const fields = new Map<string, string>();
-  for (const [name, value] of Object.entries(parsed)) {
-    fields.set(name, typeof value === "string" ? value : JSON.stringify(value));
-  }
-  return fields;
+  return Object.entries(parsed).map(([name, value]) => [
+    name,
+    typeof value === "string" ? value : JSON.stringify(value),
+  ]);
 }
 
-/** Provenance keeps host and path shape only; malformed input is kept verbatim so the record explains the block. */
+/**
+ * Provenance keeps host and path shape only; malformed input is kept verbatim
+ * so the record still explains the block.
+ */
 function recordedUrl(rawUrl: string): string {
-  return redactSensitiveUrlPath(rawUrl) ?? rawUrl;
-}
-
-function urlPathAndQuery(rawUrl: string): string {
-  try {
-    const url = new URL(rawUrl);
-    return `${url.pathname}${url.search}`;
-  } catch {
-    return rawUrl;
-  }
+  return redactUrl(rawUrl) ?? rawUrl;
 }
 
 function exceptionMatchKey(rawUrl: string): string {

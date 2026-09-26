@@ -143,6 +143,51 @@ describe("portalTaskSchema", () => {
     expect(exception([""])).toBe(false);
   });
 
+  it("validates credential and pinned body fields against the allowed field names", () => {
+    const raw = loadFixture() as Record<string, unknown>;
+    const exception = (extra: Record<string, unknown>) =>
+      safeParsePortalTask({
+        ...raw,
+        httpMethodExceptions: [
+          {
+            method: "POST",
+            urlPattern: "https://amazon.de/api",
+            reason: "login",
+            justification: "Multiplexed login endpoint dispatches on the action field.",
+            allowedBodyFields: ["action", "email", "password"],
+            ...extra,
+          },
+        ],
+      }).success;
+
+    expect(exception({ credentialBodyFields: ["email", "password"] })).toBe(true);
+    expect(exception({ pinnedBodyValues: { action: ["login"] } })).toBe(true);
+    expect(exception({ credentialBodyFields: ["otp"] })).toBe(false);
+    expect(exception({ pinnedBodyValues: { remember: ["1"] } })).toBe(false);
+    expect(exception({ pinnedBodyValues: { action: ["delete_account"] } })).toBe(false);
+    expect(exception({ pinnedBodyValues: { action: [] } })).toBe(false);
+  });
+
+  it("only allows download media types whose bytes the runner can verify", () => {
+    const raw = loadFixture() as Record<string, unknown>;
+    const download = (mimeType?: string) =>
+      safeParsePortalTask({
+        ...raw,
+        steps: [
+          {
+            kind: "downloadLinks",
+            selector: "a.pdf",
+            ...(mimeType === undefined ? {} : { mimeType }),
+          },
+        ],
+      });
+
+    expect(download().success).toBe(true);
+    expect(download("image/png").success).toBe(true);
+    expect(download("text/html").success).toBe(false);
+    expect(download("application/octet-stream").success).toBe(false);
+  });
+
   it("digests a task independently of key order and changes when the definition changes", () => {
     const task = parsePortalTask(syntheticReferencePortalTask);
     const reordered = parsePortalTask(

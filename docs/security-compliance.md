@@ -138,9 +138,13 @@ Implemented controls and their known limits:
   rebinding or portals resolving to private addresses, so browsers and
   workers must run in an egress-isolated network with no route to internal
   services, in hosted and self-hosted deployments alike.
-- Downloads are bounded in size and validated (status, media type, document
-  signature) before they become evidence; run results carry references, not
-  document bytes.
+- Downloads are bounded in size and validated (status, media type, byte
+  signature of the declared format) before they become evidence; run results
+  carry references, not document bytes.
+- Because requests are issued by the worker through Playwright's request
+  interception, every response body is buffered in the worker before the page
+  sees it; streaming responses (server-sent events, media) are not supported
+  inside guarded sessions.
 
 ## Early launch posture
 

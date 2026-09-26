@@ -5,8 +5,11 @@ import {
   isExpectedMimeType,
   isRedirectStatus,
   isSuccessfulStatus,
+  MAX_REDIRECT_HOPS,
   parseContentLength,
   readBodyWithLimit,
+  redirectPreservesMethod,
+  redirectTarget,
 } from "./download.js";
 
 function streamOf(chunks: readonly Uint8Array[]): {
@@ -103,11 +106,42 @@ describe("isSuccessfulStatus", () => {
     expect(isSuccessfulStatus(300)).toBe(false);
   });
 
-  it("treats only 3xx as redirects", () => {
-    expect(isRedirectStatus(299)).toBe(false);
-    expect(isRedirectStatus(301)).toBe(true);
-    expect(isRedirectStatus(399)).toBe(true);
-    expect(isRedirectStatus(400)).toBe(false);
+  it("treats only followable 3xx statuses as redirects", () => {
+    expect([301, 302, 303, 307, 308].every(isRedirectStatus)).toBe(true);
+    expect([299, 300, 304, 305, 399, 400].some(isRedirectStatus)).toBe(false);
+    expect(redirectPreservesMethod(307)).toBe(true);
+    expect(redirectPreservesMethod(308)).toBe(true);
+    expect(redirectPreservesMethod(303)).toBe(false);
+  });
+});
+
+describe("redirectTarget", () => {
+  it("resolves relative and absolute Location headers against the current hop", () => {
+    expect(
+      redirectTarget({ status: 302, location: "/next", currentUrl: "https://a.test/x/y", hop: 0 }),
+    ).toBe("https://a.test/next");
+    expect(
+      redirectTarget({
+        status: 302,
+        location: "//b.test/z",
+        currentUrl: "https://a.test/",
+        hop: 1,
+      }),
+    ).toBe("https://b.test/z");
+  });
+
+  it("refuses chains without a Location header or beyond the hop limit", () => {
+    expect(() =>
+      redirectTarget({ status: 302, location: null, currentUrl: "https://a.test/", hop: 0 }),
+    ).toThrow("without a Location header");
+    expect(() =>
+      redirectTarget({
+        status: 302,
+        location: "/x",
+        currentUrl: "https://a.test/",
+        hop: MAX_REDIRECT_HOPS,
+      }),
+    ).toThrow(`exceeded ${MAX_REDIRECT_HOPS} hops`);
   });
 });
 
@@ -135,14 +169,24 @@ describe("documentBytesProblem", () => {
     );
     expect(
       documentBytesProblem(new TextEncoder().encode("<html>expired</html>"), "application/pdf"),
-    ).toBe("download payload does not carry a PDF signature");
+    ).toBe("download payload does not carry the application/pdf signature");
     expect(documentBytesProblem(new TextEncoder().encode("%PDF"), "application/pdf")).toBe(
-      "download payload does not carry a PDF signature",
+      "download payload does not carry the application/pdf signature",
     );
   });
 
-  it("only requires non-empty bytes for other media types", () => {
-    expect(documentBytesProblem(new TextEncoder().encode("id,amount"), "text/csv")).toBeUndefined();
+  it("verifies PNG and JPEG signatures and refuses unsupported media types", () => {
+    const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1]);
+    const jpeg = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 1]);
+
+    expect(documentBytesProblem(png, "image/png")).toBeUndefined();
+    expect(documentBytesProblem(jpeg, "image/jpeg")).toBeUndefined();
+    expect(documentBytesProblem(jpeg, "image/png")).toBe(
+      "download payload does not carry the image/png signature",
+    );
+    expect(documentBytesProblem(new TextEncoder().encode("id,amount"), "text/csv")).toBe(
+      "download media type text/csv is not a supported evidence format",
+    );
   });
 });
 

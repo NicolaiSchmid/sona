@@ -4,10 +4,11 @@
  * never touches a browser API directly.
  */
 import type { PortalRequest } from "./network-guard.js";
+import type { BrowserProviderName } from "./provenance.js";
 import type { PortalTask } from "./schema.js";
 
 export interface PortalBrowserProvider {
-  providerName: string;
+  providerName: BrowserProviderName;
   /**
    * Values the provider itself must keep out of run output, such as a CDP
    * endpoint carrying an API token. The runner registers them with the run
