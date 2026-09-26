@@ -70,16 +70,19 @@ function normalize(action: string): string {
     .replace(/^_+|_+$/g, "");
 }
 
-/** Returns the forbidden concept an action violates, or `undefined` if safe. */
-export function forbiddenConceptFor(action: string): string | undefined {
-  const normalized = normalize(action);
-  const tokens = normalized.split("_");
-  for (const token of tokens) {
+function forbiddenConcept(value: string, phrases: readonly string[]): string | undefined {
+  const normalized = normalize(value);
+  for (const token of normalized.split("_")) {
     if (FORBIDDEN_TOKENS.has(token)) {
       return token;
     }
   }
-  return FORBIDDEN_PHRASES.find((phrase) => normalized.includes(phrase));
+  return phrases.find((phrase) => normalized.includes(phrase));
+}
+
+/** Returns the forbidden concept an action violates, or `undefined` if safe. */
+export function forbiddenConceptFor(action: string): string | undefined {
+  return forbiddenConcept(action, FORBIDDEN_PHRASES);
 }
 
 export interface PolicyViolation {
@@ -106,12 +109,5 @@ export function validateReadOnlyActions(actions: readonly string[]): ReadOnlyPol
 
 /** Returns the destructive concept a selector implies, or `undefined` if safe. */
 export function destructiveSelectorConceptFor(selector: string): string | undefined {
-  const normalized = normalize(selector);
-  const tokens = normalized.split("_");
-  for (const token of tokens) {
-    if (FORBIDDEN_TOKENS.has(token)) {
-      return token;
-    }
-  }
-  return FORBIDDEN_SELECTOR_PHRASES.find((phrase) => normalized.includes(phrase));
+  return forbiddenConcept(selector, FORBIDDEN_SELECTOR_PHRASES);
 }

@@ -117,18 +117,12 @@ export async function runPortalFetchJob(
   try {
     runResult = await input.runner.runTask(runInput);
   } catch {
-    await input.state.release(leaseKey);
-    return {
-      status: "failed",
-      connectionId: input.connectionId,
-      cooldownUntil,
-      runResult: undefined,
-    };
+    // A throwing runner is reported like any other non-completed run below.
   }
 
   // Only a completed fetch consumes the job id; anything else keeps the
   // cooldown (the portal was contacted) but stays retryable.
-  if (runResult.status !== "completed") {
+  if (runResult?.status !== "completed") {
     await input.state.release(leaseKey);
     return {
       status: "failed",

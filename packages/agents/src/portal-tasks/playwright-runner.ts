@@ -6,75 +6,32 @@ import {
   sha256Hex,
   type WorkspaceContext,
 } from "@sona/core";
-import { parseContentLength, readBodyWithLimit } from "./download.js";
-import { createNetworkGuard, type NetworkGuard, type PortalRequest } from "./network-guard.js";
+import type {
+  PortalBrowserProvider,
+  PortalBrowserSession,
+  PortalDownloadResponse,
+  PortalElementHandle,
+} from "./browser.js";
+import { isSelectorTimeoutError } from "./browser.js";
+import { isExpectedMimeType, isSuccessfulStatus } from "./download.js";
+import {
+  createNetworkGuard,
+  type NetworkGuard,
+  type PortalRequestDecision,
+} from "./network-guard.js";
+import { createLocalPlaywrightBrowserProvider } from "./playwright-adapter.js";
 import { validateReadOnlyActions } from "./policy.js";
 import type { FetchedDocument } from "./provenance.js";
 import { PortalSecretRedactor } from "./redaction.js";
-import type {
-  PortalTaskRunner,
-  PortalTaskRunStatus,
-  RunPortalTaskInput,
-  RunPortalTaskResult,
+import {
+  createBaseRunResult,
+  type PortalTaskRunner,
+  type PortalTaskRunStatus,
+  type RunPortalTaskInput,
+  type RunPortalTaskResult,
 } from "./runner.js";
-import { type PortalTask, type PortalTaskStep, safeParsePortalTask } from "./schema.js";
-
-export interface PortalBrowserProvider {
-  providerName: string;
-  /**
-   * Values the provider itself must keep out of run output, such as a CDP
-   * endpoint carrying an API token. The runner registers them with the run
-   * redactor before the session is created so setup failures are redacted too.
-   */
-  sensitiveValues?: readonly string[];
-  createSession(input: PortalBrowserSessionInput): Promise<PortalBrowserSession>;
-}
-
-export interface PortalBrowserSessionInput {
-  task: PortalTask;
-  runId: string;
-}
-
-/**
- * A guarded browser session. `route` must see every request the session can
- * make, including popups and WebSocket handshakes, before it leaves the
- * browser; a handler that throws aborts the request.
- */
-export interface PortalBrowserSession {
-  page: PortalBrowserPage;
-  route(pattern: string, handler: (request: PortalRequest) => void | Promise<void>): Promise<void>;
-  close(): Promise<void>;
-}
-
-export interface PortalElementHandle {
-  getAttribute(name: string): Promise<string | null>;
-  textContent(): Promise<string | null>;
-}
-
-export interface PortalBrowserPage {
-  goto(url: string): Promise<void>;
-  fill(selector: string, value: string): Promise<void>;
-  click(selector: string): Promise<void>;
-  waitForSelector(selector: string, options?: { timeoutMs?: number }): Promise<boolean>;
-  queryAll(selector: string): Promise<PortalElementHandle[]>;
-  requestBytes(url: string, options: PortalDownloadRequestOptions): Promise<PortalDownloadResponse>;
-  screenshot?(): Promise<Uint8Array>;
-  url(): string;
-}
-
-export interface PortalDownloadRequestOptions {
-  expectedMimeType: string;
-  maxBytes: number;
-  maxRedirects: number;
-  onRedirect(url: string): boolean;
-}
-
-export interface PortalDownloadResponse {
-  bytes: Uint8Array;
-  mimeType: string;
-  finalUrl: string;
-  status: number;
-}
+import { type PortalTaskStep, safeParsePortalTask } from "./schema.js";
+import { resolveUrl, sanitizeUrl } from "./url.js";
 
 export interface PortalConnection {
   id: string;
@@ -111,15 +68,9 @@ export interface LocalPlaywrightPortalTaskRunnerOptions {
   maxDownloadBytes?: number;
 }
 
-interface LoadedCredential {
-  key: string;
-  value: string;
-}
-
 const MAX_DOWNLOAD_DOCUMENTS_PER_RUN = 50;
 const DEFAULT_MAX_DOWNLOAD_BYTES = 10 * 1024 * 1024;
 const MAX_DOWNLOAD_REDIRECTS = 5;
-const DOWNLOAD_TIMEOUT_MS = 60_000;
 
 interface ExecutionState {
   input: RunPortalTaskInput;
@@ -153,7 +104,7 @@ export class LocalPlaywrightPortalTaskRunner implements PortalTaskRunner {
   }
 
   async runTask(input: RunPortalTaskInput): Promise<RunPortalTaskResult> {
-    const result = baseResult(input, this.#browserProvider.providerName);
+    const result = createBaseRunResult(input, this.#browserProvider.providerName);
     const parsedTask = safeParsePortalTask(input.task);
     if (!parsedTask.success) {
       result.status = "policy_refused";
@@ -257,15 +208,11 @@ export class LocalPlaywrightPortalTaskRunner implements PortalTaskRunner {
     redactor: PortalSecretRedactor,
   ): Promise<Map<string, string>> {
     const credentials = new Map<string, string>();
-    const loaded: LoadedCredential[] = [];
     for (const [key, ref] of Object.entries(connection.credentialRefs)) {
       const secret = await this.#secretStore.getSecret({ context, ref });
       const value = secret.reveal();
       redactor.addSecret(value);
-      loaded.push({ key, value });
-    }
-    for (const credential of loaded) {
-      credentials.set(credential.key, credential.value);
+      credentials.set(key, value);
     }
     return credentials;
   }
@@ -367,9 +314,11 @@ async function executeStep(
   }
 }
 
+type DownloadLinksStep = Extract<PortalTaskStep, { kind: "downloadLinks" }>;
+
 async function downloadLinks(
   state: ExecutionState,
-  step: Extract<PortalTaskStep, { kind: "downloadLinks" }>,
+  step: DownloadLinksStep,
 ): Promise<PortalTaskRunStatus> {
   const elements = await state.session.page.queryAll(step.selector);
   if (elements.length === 0) {
@@ -393,11 +342,7 @@ async function downloadLinks(
     }
     usableLinks += 1;
     const href = resolveUrl(rawHref, state.session.page.url());
-    const decision = state.guard.evaluateRequest({
-      url: href,
-      method: "GET",
-      resourceType: "document",
-    });
+    const decision = evaluateDownloadUrl(state, href);
     if (decision.action === "abort") {
       state.result.warnings.push(`download blocked: ${decision.reason}`);
       continue;
@@ -409,14 +354,7 @@ async function downloadLinks(
         expectedMimeType: step.mimeType,
         maxBytes: state.maxDownloadBytes,
         maxRedirects: MAX_DOWNLOAD_REDIRECTS,
-        onRedirect: (redirectUrl) => {
-          const redirectDecision = state.guard.evaluateRequest({
-            url: redirectUrl,
-            method: "GET",
-            resourceType: "document",
-          });
-          return redirectDecision.action === "allow";
-        },
+        onRedirect: (redirectUrl) => evaluateDownloadUrl(state, redirectUrl).action === "allow",
       });
     } catch (error) {
       state.result.errors.push(state.redactor.redactText(errorMessage(error)));
@@ -425,11 +363,7 @@ async function downloadLinks(
         : "failed";
     }
 
-    const finalDecision = state.guard.evaluateRequest({
-      url: response.finalUrl,
-      method: "GET",
-      resourceType: "document",
-    });
+    const finalDecision = evaluateDownloadUrl(state, response.finalUrl);
     if (finalDecision.action === "abort") {
       state.result.warnings.push(`download blocked after redirect: ${finalDecision.reason}`);
       return "blocked";
@@ -487,6 +421,10 @@ async function downloadLinks(
   return "completed";
 }
 
+function evaluateDownloadUrl(state: ExecutionState, url: string): PortalRequestDecision {
+  return state.guard.evaluateRequest({ url, method: "GET", resourceType: "document" });
+}
+
 async function captureFailureArtifact(state: ExecutionState): Promise<void> {
   if (state.sensitivePageSeen || state.session.page.screenshot === undefined) {
     return;
@@ -506,19 +444,21 @@ interface FetchedDocumentInput {
 
 function makeFetchedDocument(state: ExecutionState, input: FetchedDocumentInput): FetchedDocument {
   const domain = state.input.task.domains[0] ?? "unknown";
+  const sourceUrl = sanitizeUrl(input.sourceUrl);
+  const filename = state.redactor.redactText(input.filename);
   return {
-    filename: state.redactor.redactText(input.filename),
+    filename,
     mimeType: input.mimeType,
     contentHash: input.contentHash,
-    sourceUrl: sanitizeUrl(input.sourceUrl),
+    sourceUrl,
     content: { kind: "bytes", bytes: new Uint8Array(input.bytes) },
     provenance: {
       sourcePortal: domain,
       taskId: state.input.task.id,
       taskVersion: state.input.task.version,
       runId: state.input.runId,
-      sourceUrl: sanitizeUrl(input.sourceUrl) ?? undefined,
-      downloadedFilename: state.redactor.redactText(input.filename),
+      sourceUrl,
+      downloadedFilename: filename,
       contentHash: input.contentHash,
       fetchedAt: state.input.now,
       browserProvider: state.result.provenance.browserProvider,
@@ -566,72 +506,9 @@ function stripFetchedDocumentContent(
   };
 }
 
-function isSuccessfulStatus(status: number): boolean {
-  return status >= 200 && status < 300;
-}
-
-function isExpectedMimeType(actual: string, expected: string): boolean {
-  return mediaType(actual) === mediaType(expected);
-}
-
-function mediaType(contentType: string): string {
-  return contentType.split(";", 1)[0]?.trim().toLowerCase() ?? "";
-}
-
-/**
- * The result skeleton is built before the task is validated so a malformed
- * definition still yields a structured `policy_refused` result; task identity
- * is therefore read defensively from the unvalidated input.
- */
-function baseResult(input: RunPortalTaskInput, provider: string): RunPortalTaskResult {
-  const identity = taskIdentity(input.task);
-  return {
-    status: "completed",
-    runId: input.runId,
-    taskId: identity.id,
-    taskVersion: identity.version,
-    documents: [],
-    storedDocuments: [],
-    provenance: {
-      runId: input.runId,
-      taskId: identity.id,
-      taskVersion: identity.version,
-      portalDomain: identity.domain,
-      browserProvider: provider,
-      workspaceId: input.workspaceId,
-      fetchedAt: input.now,
-      blockedRequests: [],
-      allowedNonIdempotentRequests: [],
-    },
-    warnings: [],
-    errors: [],
-  };
-}
-
-interface TaskIdentity {
-  id: string;
-  version: number;
-  domain: string;
-}
-
-function taskIdentity(task: unknown): TaskIdentity {
-  const raw: Record<string, unknown> = isObject(task) ? task : {};
-  const domains = Array.isArray(raw["domains"]) ? raw["domains"] : [];
-  const firstDomain: unknown = domains[0];
-  return {
-    id: typeof raw["id"] === "string" ? raw["id"] : "unknown",
-    version: typeof raw["version"] === "number" ? raw["version"] : 0,
-    domain: typeof firstDomain === "string" ? firstDomain : "unknown",
-  };
-}
-
-function resolveUrl(rawHref: string, baseUrl: string): string {
-  return new URL(rawHref, baseUrl).toString();
-}
-
 async function resolveFilename(
   element: PortalElementHandle,
-  step: Extract<PortalTaskStep, { kind: "downloadLinks" }>,
+  step: DownloadLinksStep,
   href: string,
   index: number,
 ): Promise<string> {
@@ -648,15 +525,6 @@ async function resolveFilename(
   const pathname = new URL(href).pathname;
   const basename = pathname.split("/").filter(Boolean).at(-1);
   return basename ?? `portal-document-${index + 1}.pdf`;
-}
-
-function sanitizeUrl(rawUrl: string): string | undefined {
-  try {
-    const url = new URL(rawUrl);
-    return `${url.protocol}//${url.host}${url.pathname}`;
-  } catch {
-    return undefined;
-  }
 }
 
 function connectionKey(workspaceId: string, connectionId: string): string {
@@ -676,343 +544,4 @@ function freezeConnection(connection: PortalConnection): PortalConnection {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
-}
-
-export function createLocalPlaywrightBrowserProvider(): PortalBrowserProvider {
-  return new DynamicPlaywrightBrowserProvider("local-playwright", undefined);
-}
-
-export function createCdpPlaywrightBrowserProvider(
-  providerName: string,
-  cdpEndpoint: string,
-): PortalBrowserProvider {
-  return new DynamicPlaywrightBrowserProvider(providerName, cdpEndpoint);
-}
-
-/**
- * Resolved at runtime rather than imported statically so `@sona/agents` loads
- * without the optional `playwright` peer; the module shape is narrowed below
- * instead of relying on Playwright's own types.
- */
-const PLAYWRIGHT_SPECIFIER = "playwright";
-
-interface PlaywrightModule {
-  chromium: {
-    launch(options: { headless: boolean }): Promise<PlaywrightBrowser>;
-    connectOverCDP(endpoint: string): Promise<PlaywrightBrowser>;
-  };
-}
-
-interface PlaywrightBrowser {
-  newContext(options: {
-    acceptDownloads: boolean;
-    serviceWorkers: "allow" | "block";
-  }): Promise<PlaywrightContext>;
-  close(): Promise<void>;
-}
-
-interface PlaywrightContext {
-  route(pattern: string, handler: (route: PlaywrightRoute) => Promise<void>): Promise<void>;
-  routeWebSocket(
-    matcher: (url: URL) => boolean,
-    handler: (route: PlaywrightWebSocketRoute) => void | Promise<void>,
-  ): Promise<void>;
-  cookies(urls: readonly string[]): Promise<PlaywrightCookie[]>;
-  newPage(): Promise<PlaywrightPage>;
-  close(): Promise<void>;
-}
-
-interface PlaywrightCookie {
-  name: string;
-  value: string;
-}
-
-interface PlaywrightWebSocketRoute {
-  url(): string;
-  connectToServer(): unknown;
-  close(): Promise<void>;
-}
-
-interface PlaywrightPage {
-  goto(url: string): Promise<unknown>;
-  fill(selector: string, value: string): Promise<void>;
-  click(selector: string): Promise<void>;
-  waitForSelector(selector: string, options: { timeout?: number }): Promise<unknown | null>;
-  $$(selector: string): Promise<PlaywrightElement[]>;
-  screenshot(): Promise<Buffer>;
-  url(): string;
-}
-
-interface PlaywrightRoute {
-  request(): {
-    url(): string;
-    method(): string;
-    resourceType(): string;
-  };
-  continue(): Promise<void>;
-  abort(): Promise<void>;
-}
-
-interface PlaywrightElement {
-  getAttribute(name: string): Promise<string | null>;
-  textContent(): Promise<string | null>;
-}
-
-class DynamicPlaywrightBrowserProvider implements PortalBrowserProvider {
-  readonly providerName: string;
-  readonly sensitiveValues: readonly string[];
-  readonly #cdpEndpoint: string | undefined;
-
-  constructor(providerName: string, cdpEndpoint: string | undefined) {
-    this.providerName = providerName;
-    this.#cdpEndpoint = cdpEndpoint;
-    this.sensitiveValues = cdpEndpoint === undefined ? [] : cdpEndpointSecrets(cdpEndpoint);
-  }
-
-  async createSession(): Promise<PortalBrowserSession> {
-    const module = await loadPlaywrightModule();
-    const browser =
-      this.#cdpEndpoint === undefined
-        ? await module.chromium.launch({ headless: true })
-        : await module.chromium.connectOverCDP(this.#cdpEndpoint);
-    const context = await browser.newContext({
-      acceptDownloads: false,
-      serviceWorkers: "block",
-    });
-    const page = await context.newPage();
-    const adaptedPage = new PlaywrightPageAdapter(page, context);
-    return {
-      page: adaptedPage,
-      route: async (pattern, handler) => {
-        await adaptedPage.route(pattern, handler);
-      },
-      close: async () => {
-        await context.close();
-        await browser.close();
-      },
-    };
-  }
-}
-
-/**
- * A CDP endpoint is a secret in its own right, and so are the token-shaped
- * parts it is built from, in case an error echoes only one of them.
- */
-function cdpEndpointSecrets(endpoint: string): string[] {
-  const secrets = new Set<string>([endpoint]);
-  try {
-    const url = new URL(endpoint);
-    if (url.password.length > 0) {
-      secrets.add(url.password);
-    }
-    for (const value of url.searchParams.values()) {
-      if (value.length >= MIN_TOKEN_LENGTH) {
-        secrets.add(value);
-      }
-    }
-  } catch {
-    // Not a URL; the full string is still redacted.
-  }
-  return [...secrets];
-}
-
-const MIN_TOKEN_LENGTH = 8;
-
-async function loadPlaywrightModule(): Promise<PlaywrightModule> {
-  let loaded: unknown;
-  try {
-    loaded = await import(PLAYWRIGHT_SPECIFIER);
-  } catch (error) {
-    throw new Error(
-      `playwright module is required for the default portal browser provider; install the optional peer dependency "playwright" or inject a PortalBrowserProvider: ${errorMessage(error)}`,
-    );
-  }
-  if (!isPlaywrightModule(loaded)) {
-    throw new Error(
-      'playwright module is required for the default portal browser provider but did not expose chromium; install the optional peer dependency "playwright" or inject a PortalBrowserProvider',
-    );
-  }
-  return loaded;
-}
-
-function isPlaywrightModule(value: unknown): value is PlaywrightModule {
-  if (!isObject(value)) {
-    return false;
-  }
-  const chromium = value["chromium"];
-  return (
-    isObject(chromium) &&
-    typeof chromium["launch"] === "function" &&
-    typeof chromium["connectOverCDP"] === "function"
-  );
-}
-
-class PlaywrightPageAdapter implements PortalBrowserPage {
-  readonly #page: PlaywrightPage;
-  readonly #context: PlaywrightContext;
-
-  constructor(page: PlaywrightPage, context: PlaywrightContext) {
-    this.#page = page;
-    this.#context = context;
-  }
-
-  /**
-   * Installs the guard on the browser context so popups are covered from their
-   * first request, and on WebSocket handshakes, which `route` does not see.
-   */
-  async route(
-    pattern: string,
-    handler: (request: PortalRequest) => void | Promise<void>,
-  ): Promise<void> {
-    await this.#context.route(pattern, async (route) => {
-      const request = route.request();
-      try {
-        await handler({
-          url: request.url(),
-          method: request.method(),
-          resourceType: request.resourceType(),
-        });
-        await route.continue();
-      } catch {
-        await route.abort();
-      }
-    });
-    // A glob such as `**/*` does not match `ws://` URLs in Playwright, so the
-    // WebSocket route uses a predicate that intercepts every handshake.
-    await this.#context.routeWebSocket(matchEveryUrl, async (route) => {
-      try {
-        await handler({ url: route.url(), method: "GET", resourceType: "websocket" });
-        route.connectToServer();
-      } catch {
-        await route.close();
-      }
-    });
-  }
-
-  async goto(url: string): Promise<void> {
-    await this.#page.goto(url);
-  }
-
-  async fill(selector: string, value: string): Promise<void> {
-    await this.#page.fill(selector, value);
-  }
-
-  async click(selector: string): Promise<void> {
-    await this.#page.click(selector);
-  }
-
-  async waitForSelector(selector: string, options: { timeoutMs?: number } = {}): Promise<boolean> {
-    try {
-      const found = await this.#page.waitForSelector(selector, { timeout: options.timeoutMs });
-      return found !== null;
-    } catch (error) {
-      if (isSelectorTimeoutError(error)) {
-        return false;
-      }
-      throw error;
-    }
-  }
-
-  async queryAll(selector: string): Promise<PortalElementHandle[]> {
-    return await this.#page.$$(selector);
-  }
-
-  /**
-   * Downloads with Node's streaming `fetch` rather than Playwright's request
-   * API, which buffers the whole body before exposing it. Each hop carries the
-   * browser session's cookies for that URL, follows redirects one at a time so
-   * every target is re-evaluated by the guard, and stops reading the body the
-   * moment it crosses the byte cap.
-   */
-  async requestBytes(
-    url: string,
-    options: PortalDownloadRequestOptions,
-  ): Promise<PortalDownloadResponse> {
-    let currentUrl = url;
-    let redirectsFollowed = 0;
-    while (true) {
-      const response = await fetch(currentUrl, {
-        method: "GET",
-        headers: await this.downloadHeaders(currentUrl, options.expectedMimeType),
-        redirect: "manual",
-        signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS),
-      });
-      const status = response.status;
-      if (isRedirectStatus(status)) {
-        await response.body?.cancel();
-        if (redirectsFollowed >= options.maxRedirects) {
-          throw new Error(`download exceeded ${options.maxRedirects} redirects`);
-        }
-        const location = response.headers.get("location");
-        if (location === null) {
-          throw new Error(`download redirect ${status} missing Location header`);
-        }
-        const nextUrl = resolveUrl(location, currentUrl);
-        if (!options.onRedirect(nextUrl)) {
-          throw new Error("download redirect blocked by portal network policy");
-        }
-        currentUrl = nextUrl;
-        redirectsFollowed += 1;
-        continue;
-      }
-
-      const mimeType = response.headers.get("content-type") ?? "application/octet-stream";
-      if (!isSuccessfulStatus(status)) {
-        await response.body?.cancel();
-        throw new Error(`download failed with status ${status}`);
-      }
-      if (!isExpectedMimeType(mimeType, options.expectedMimeType)) {
-        await response.body?.cancel();
-        throw new Error(
-          `download returned unexpected content type ${mimeType}; expected ${options.expectedMimeType}`,
-        );
-      }
-      const contentLength = parseContentLength(response.headers.get("content-length"));
-      if (contentLength !== undefined && contentLength > options.maxBytes) {
-        await response.body?.cancel();
-        throw new Error(`download exceeds ${options.maxBytes} byte limit`);
-      }
-      const bytes = await readBodyWithLimit(response.body, options.maxBytes);
-      return { bytes, mimeType, finalUrl: currentUrl, status };
-    }
-  }
-
-  private async downloadHeaders(
-    url: string,
-    expectedMimeType: string,
-  ): Promise<Record<string, string>> {
-    const headers: Record<string, string> = { accept: `${expectedMimeType}, */*;q=0.1` };
-    const cookies = await this.#context.cookies([url]);
-    if (cookies.length > 0) {
-      headers["cookie"] = cookies.map((cookie) => `${cookie.name}=${cookie.value}`).join("; ");
-    }
-    return headers;
-  }
-
-  async screenshot(): Promise<Uint8Array> {
-    return new Uint8Array(await this.#page.screenshot());
-  }
-
-  url(): string {
-    return this.#page.url();
-  }
-}
-
-function matchEveryUrl(): boolean {
-  return true;
-}
-
-function isObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
-}
-
-function isRedirectStatus(status: number): boolean {
-  return status >= 300 && status < 400;
-}
-
-function isSelectorTimeoutError(error: unknown): boolean {
-  if (!(error instanceof Error)) {
-    return false;
-  }
-  return error.name === "TimeoutError" || /timeout/i.test(error.message);
 }

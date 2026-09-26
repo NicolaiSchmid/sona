@@ -1,76 +1,28 @@
 import { createSecretValue, InMemoryDocumentStorage, InMemorySecretStore } from "@sona/core";
 import { describe, expect, it } from "vitest";
+import type {
+  PortalBrowserPage,
+  PortalBrowserProvider,
+  PortalBrowserSession,
+  PortalDownloadRequestOptions,
+  PortalDownloadResponse,
+  PortalElementHandle,
+} from "./browser.js";
+import { syntheticReferencePortalTask } from "./definitions/synthetic-reference-portal.js";
 import type { PortalRequest } from "./network-guard.js";
+import { createCdpPlaywrightBrowserProvider } from "./playwright-adapter.js";
 import {
-  createCdpPlaywrightBrowserProvider,
   InMemoryPortalConnectionRepository,
   InMemoryPortalDocumentRegistry,
   LocalPlaywrightPortalTaskRunner,
-  type PortalBrowserPage,
-  type PortalBrowserProvider,
-  type PortalBrowserSession,
-  type PortalDownloadRequestOptions,
-  type PortalDownloadResponse,
-  type PortalElementHandle,
 } from "./playwright-runner.js";
 import type { RunPortalTaskInput } from "./runner.js";
-import type { PortalTask } from "./schema.js";
+import { type PortalTask, parsePortalTask } from "./schema.js";
 
 const now = "2026-02-01T00:00:00Z";
 const context = { workspaceId: "ws_1", userId: "user_1" };
 
-const task: PortalTask = {
-  id: "synthetic-reference-portal",
-  name: "Synthetic reference portal",
-  version: 1,
-  risk: "read_only_document_fetch",
-  domains: ["portal.test"],
-  requires: ["credentials"],
-  allowedActions: ["navigate", "login", "search_invoices", "download_invoice_pdf"],
-  forbiddenActions: ["purchase", "cancel_order", "change_payment_method"],
-  outputs: ["document_file", "provenance_json"],
-  httpMethodExceptions: [
-    {
-      method: "POST",
-      urlPattern: "https://portal.test/login",
-      reason: "login",
-      justification: "Portal login form requires a POST before read-only invoice access.",
-    },
-  ],
-  steps: [
-    {
-      kind: "navigate",
-      url: "https://portal.test/login",
-      sensitive: true,
-    },
-    {
-      kind: "fill",
-      selector: "#email",
-      credentialKey: "username",
-    },
-    {
-      kind: "fill",
-      selector: "#password",
-      credentialKey: "password",
-      sensitive: true,
-    },
-    {
-      kind: "click",
-      selector: "button.login",
-    },
-    {
-      kind: "waitForSelector",
-      selector: "[data-testid='invoice-list']",
-    },
-    {
-      kind: "downloadLinks",
-      selector: "a.invoice-download",
-      hrefAttribute: "href",
-      filenameAttribute: "data-filename",
-      mimeType: "application/pdf",
-    },
-  ],
-};
+const task: PortalTask = parsePortalTask(syntheticReferencePortalTask);
 
 function input(overrides: Partial<RunPortalTaskInput> = {}): RunPortalTaskInput {
   return {
