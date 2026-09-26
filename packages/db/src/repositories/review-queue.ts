@@ -1,15 +1,16 @@
-import type { JsonValue, ReviewState } from "@sona/core";
+import { isReviewState, type ReviewState } from "@sona/core";
 import type { DbClient } from "../runner.js";
 import type { ReviewItem } from "../schema.js";
 import {
-  insertReviewEvent,
   parseJson,
+  requiredLiteral,
   requiredString,
   row,
   rows,
   stringifyJson,
   withTransaction,
 } from "./helpers.js";
+import { insertReviewEvent, reviewEventId } from "./review-events.js";
 
 export interface ReviewTransitionInput {
   id: string;
@@ -55,7 +56,7 @@ export class SqliteReviewQueueRepository {
         )
         .run(input.toState, input.at, workspaceId, input.id);
       insertReviewEvent(this.#db, {
-        id: `review_event:${input.id}:${input.at}`,
+        id: reviewEventId({ type: "review_item", id: input.id }, input.at),
         workspaceId,
         targetType: current.targetType,
         targetId: current.targetId,
@@ -94,8 +95,8 @@ function itemFromRow(source: Record<string, unknown>): ReviewItem {
     workspaceId: requiredString(source, "workspace_id"),
     targetType: requiredString(source, "target_type"),
     targetId: requiredString(source, "target_id"),
-    state: requiredString(source, "state") as ReviewState,
-    reason: parseJson(requiredString(source, "reason_json")) as JsonValue,
+    state: requiredLiteral(source, "state", isReviewState),
+    reason: parseJson(requiredString(source, "reason_json")),
     createdAt: requiredString(source, "created_at"),
     updatedAt: requiredString(source, "updated_at"),
   };

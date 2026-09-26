@@ -8,7 +8,10 @@
  *   accept the posting's commodity,
  * - a transaction and its postings land atomically or not at all,
  * - re-creating a transaction under the same workspace-scoped idempotency key
- *   returns the existing transaction instead of duplicating it,
+ *   returns the existing transaction when the content matches and fails
+ *   loudly when it does not — never a silent merge,
+ * - transactions are created as `draft` or `suggested`; every further review
+ *   state is reached through a recorded transition with an actor,
  * - corrections are append-only: a superseding transaction is a new balanced
  *   transaction; the original keeps its postings and only its review state
  *   flips to `superseded`, recorded by a review event.
@@ -16,25 +19,32 @@
 import {
   type AccountKind,
   DEFAULT_ACCOUNTS,
+  isReviewState,
   type LedgerAccount,
   type LedgerPosting,
   type LedgerTransaction,
   type MoneyAmount,
   type ReviewState,
+  stableJsonHash,
   validateAccountPath,
   validateBalancedTransaction,
 } from "@sona/core";
 import type { DbClient, DbValue } from "../runner.js";
+import { EVIDENCE_RECORD_TYPES } from "./evidence-links.js";
 import {
-  insertReviewEvent,
   optionalString,
   placeholders,
   type Row,
+  requiredBoolean,
+  requiredLiteral,
   requiredString,
   row,
   rows,
   withTransaction,
 } from "./helpers.js";
+import { insertReviewEvent, reviewEventId } from "./review-events.js";
+
+// --- Public types -----------------------------------------------------------
 
 export interface LedgerAccountInput {
   /** Application-generated id, used only when the path is first created. */
@@ -63,19 +73,27 @@ export interface LedgerPostingInput {
   memo?: string;
 }
 
+/** Review states a transaction may be created in; anything further needs a recorded transition. */
+export const LEDGER_CREATION_REVIEW_STATES = [
+  "draft",
+  "suggested",
+] as const satisfies readonly ReviewState[];
+
+export type LedgerCreationReviewState = (typeof LEDGER_CREATION_REVIEW_STATES)[number];
+
 export interface CreateLedgerTransactionInput {
   id: string;
   /** ISO date (YYYY-MM-DD). */
   bookedOn: string;
   description: string;
   postings: readonly LedgerPostingInput[];
-  /** Defaults to "draft". `superseded` is only reachable through supersession. */
-  reviewState?: Exclude<ReviewState, "superseded">;
+  /** Defaults to "draft". */
+  reviewState?: LedgerCreationReviewState;
   createdAt: string;
   /**
    * Workspace-scoped natural key of the logical import (e.g. a bank transaction
-   * reference). Creating again with the same key returns the existing
-   * transaction and writes nothing.
+   * reference). Creating again with the same key and content returns the
+   * existing transaction; the same key with different content is rejected.
    */
   idempotencyKey?: string;
 }
@@ -103,6 +121,18 @@ export interface LedgerTransactionFilter {
   account?: string;
   /** Only transactions in one of these review states; an empty list matches nothing. */
   reviewStates?: readonly ReviewState[];
+  /** Maximum number of transactions to return, oldest first. */
+  limit?: number;
+}
+
+export interface LedgerReviewTransitionInput {
+  id: string;
+  /** `superseded` is only reachable through {@link SqliteLedgerRepository.supersedeTransaction}. */
+  toState: Exclude<ReviewState, "superseded">;
+  /** Who decided: a user id, "rule:<id>", or "system". */
+  actor: string;
+  at: string;
+  notes?: string;
 }
 
 export interface SupersedeLedgerTransactionInput {
@@ -121,22 +151,49 @@ export interface SupersedeLedgerTransactionResult {
   created: boolean;
 }
 
+export const LEDGER_ERROR_CODES = [
+  "invalid_input",
+  "unbalanced",
+  "unknown_account",
+  "commodity_mismatch",
+  "not_found",
+  "already_superseded",
+  "idempotency_conflict",
+  "invalid_review_state",
+] as const;
+
+export type LedgerErrorCode = (typeof LEDGER_ERROR_CODES)[number];
+
+/** Domain error with a stable `code` so callers can branch without parsing messages. */
+export class LedgerError extends Error {
+  readonly code: LedgerErrorCode;
+
+  constructor(code: LedgerErrorCode, message: string) {
+    super(message);
+    this.name = "LedgerError";
+    this.code = code;
+  }
+}
+
 /** Thrown when a transaction's postings do not net to zero per commodity. */
-export class UnbalancedLedgerTransactionError extends Error {
+export class UnbalancedLedgerTransactionError extends LedgerError {
   readonly transactionId: string;
   readonly errors: readonly string[];
 
   constructor(transactionId: string, errors: readonly string[]) {
-    super(`Ledger transaction ${transactionId} is unbalanced: ${errors.join("; ")}`);
+    super("unbalanced", `ledger transaction ${transactionId} is unbalanced: ${errors.join("; ")}`);
     this.name = "UnbalancedLedgerTransactionError";
     this.transactionId = transactionId;
     this.errors = errors;
   }
 }
 
+// --- SQL fragments ----------------------------------------------------------
+
 const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
-const REVIEW_TARGET_TYPE = "ledger_transaction" as const;
+/** Posting ids are zero-padded to three digits so `ORDER BY id` preserves input order. */
+const MAX_POSTINGS_PER_TRANSACTION = 999;
 
 const TRANSACTION_SELECT =
   "SELECT t.id, t.workspace_id, t.booked_on, t.description, t.review_state, t.created_at, k.idempotency_key, s.supersedes_transaction_id, sb.transaction_id AS superseded_by_transaction_id FROM ledger_transactions t LEFT JOIN ledger_transaction_idempotency_keys k ON k.workspace_id = t.workspace_id AND k.transaction_id = t.id LEFT JOIN ledger_transaction_supersessions s ON s.workspace_id = t.workspace_id AND s.transaction_id = t.id LEFT JOIN ledger_transaction_supersessions sb ON sb.workspace_id = t.workspace_id AND sb.supersedes_transaction_id = t.id";
@@ -149,6 +206,24 @@ const POSTING_SELECT = `SELECT p.id, p.transaction_id, a.path AS account, p.amou
 const ACCOUNT_SELECT =
   "SELECT id, workspace_id, path, kind, commodity, receipt_required FROM ledger_accounts";
 
+const ACCOUNT_INSERT =
+  "INSERT INTO ledger_accounts (id, workspace_id, path, kind, commodity, receipt_required, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)";
+
+const ACCOUNT_KINDS: Readonly<Record<AccountKind, true>> = {
+  asset: true,
+  liability: true,
+  equity: true,
+  income: true,
+  expense: true,
+  suspense: true,
+};
+
+function isAccountKind(value: string): value is AccountKind {
+  return Object.hasOwn(ACCOUNT_KINDS, value);
+}
+
+// --- Repository -------------------------------------------------------------
+
 export class SqliteLedgerRepository {
   readonly #db: DbClient;
 
@@ -156,21 +231,54 @@ export class SqliteLedgerRepository {
     this.#db = db;
   }
 
-  // --- Accounts -------------------------------------------------------------
+  // Accounts -----------------------------------------------------------------
 
-  /** Creates the account or updates kind/commodity/receiptRequired of the existing path. */
-  async upsertAccount(workspaceId: string, input: LedgerAccountInput): Promise<LedgerAccount> {
-    return this.#upsertAccount(workspaceId, input);
+  /**
+   * Creates the account if the path is new, otherwise returns the existing
+   * account untouched. Use this to install defaults without clobbering
+   * user configuration.
+   */
+  async ensureAccount(workspaceId: string, input: LedgerAccountInput): Promise<LedgerAccount> {
+    return withTransaction(this.#db, () => this.#ensureAccount(workspaceId, input));
   }
 
-  /** Idempotently installs the `@sona/core` default private-tax account tree. */
+  /**
+   * Creates the account or explicitly overwrites kind/commodity/receiptRequired
+   * of the existing path. Changes that would contradict existing postings
+   * (kind change, tighter commodity) are rejected.
+   */
+  async upsertAccount(workspaceId: string, input: LedgerAccountInput): Promise<LedgerAccount> {
+    return withTransaction(this.#db, () => {
+      const { kind, commodity, receiptRequired } = normalizeAccountInput(input);
+      const existing = this.#accountByPath(workspaceId, input.path);
+      if (existing !== undefined) {
+        this.#assertAccountChangeIsSafe(workspaceId, existing, kind, commodity);
+      }
+      this.#db
+        .prepare(
+          `${ACCOUNT_INSERT} ON CONFLICT (workspace_id, path) DO UPDATE SET kind = excluded.kind, commodity = excluded.commodity, receipt_required = excluded.receipt_required`,
+        )
+        .run(
+          input.id,
+          workspaceId,
+          input.path,
+          kind,
+          commodity ?? null,
+          receiptRequired ? 1 : 0,
+          input.createdAt,
+        );
+      return this.#requireAccount(workspaceId, input.path);
+    });
+  }
+
+  /** Idempotently installs the `@sona/core` default private-tax account tree, keeping existing accounts as they are. */
   async ensureDefaultAccounts(
     workspaceId: string,
     input: EnsureDefaultAccountsInput,
   ): Promise<LedgerAccount[]> {
     return withTransaction(this.#db, () =>
       DEFAULT_ACCOUNTS.map((account) =>
-        this.#upsertAccount(workspaceId, {
+        this.#ensureAccount(workspaceId, {
           id: input.accountId(account.path),
           path: account.path,
           kind: account.kind,
@@ -191,12 +299,12 @@ export class SqliteLedgerRepository {
     ).map(accountFromRow);
   }
 
-  // --- Transactions ---------------------------------------------------------
+  // Transactions -------------------------------------------------------------
 
   /**
    * Writes a balanced transaction and its postings atomically. Rejects
-   * unbalanced postings, unknown accounts, commodity mismatches, and malformed
-   * dates before touching the database.
+   * unbalanced postings, unknown accounts, commodity mismatches, malformed
+   * dates, and non-creation review states before touching the database.
    */
   async createTransaction(
     workspaceId: string,
@@ -240,15 +348,61 @@ export class SqliteLedgerRepository {
       );
       params.push(filter.account);
     }
+    let limitClause = "";
+    if (filter.limit !== undefined) {
+      if (!Number.isInteger(filter.limit) || filter.limit < 1) {
+        throw new LedgerError(
+          "invalid_input",
+          `ledger transaction limit must be a positive integer, got ${String(filter.limit)}`,
+        );
+      }
+      limitClause = " LIMIT ?";
+      params.push(filter.limit);
+    }
 
     const transactions = rows(
       this.#db
         .prepare(
-          `${TRANSACTION_SELECT} WHERE ${clauses.join(" AND ")} ORDER BY t.booked_on, t.created_at, t.id`,
+          `${TRANSACTION_SELECT} WHERE ${clauses.join(" AND ")} ORDER BY t.booked_on, t.created_at, t.id${limitClause}`,
         )
         .all(...params),
     ).map(transactionFromRow);
     return this.#attachPostings(workspaceId, transactions);
+  }
+
+  /**
+   * Moves a transaction to another review state and records who did it. The
+   * same state again is an idempotent no-op; superseded transactions are
+   * terminal and cannot be transitioned.
+   */
+  async transitionReviewState(
+    workspaceId: string,
+    input: LedgerReviewTransitionInput,
+  ): Promise<PersistedLedgerTransaction> {
+    return withTransaction(this.#db, () => {
+      const current = this.#requireExistingTransaction(workspaceId, input.id);
+      if ((input.toState as ReviewState) === "superseded") {
+        throw new LedgerError(
+          "invalid_review_state",
+          "ledger transactions reach superseded only through supersession",
+        );
+      }
+      if (current.reviewState === "superseded") {
+        throw new LedgerError(
+          "already_superseded",
+          `ledger transaction ${current.id} is already superseded`,
+        );
+      }
+      if (current.reviewState === input.toState) {
+        return current;
+      }
+      this.#setReviewState(workspaceId, current, input.toState, {
+        actor: input.actor,
+        at: input.at,
+        notes: input.notes,
+      });
+      return this.#requireTransaction(workspaceId, current.id);
+    });
   }
 
   /**
@@ -262,25 +416,26 @@ export class SqliteLedgerRepository {
     input: SupersedeLedgerTransactionInput,
   ): Promise<SupersedeLedgerTransactionResult> {
     return withTransaction(this.#db, () => {
-      const original = this.#getTransaction(workspaceId, input.supersedesTransactionId);
-      if (original === undefined) {
-        throw new Error("ledger transaction not found in workspace");
-      }
+      const original = this.#requireExistingTransaction(workspaceId, input.supersedesTransactionId);
       if (input.replacement.id === original.id) {
-        throw new Error("a ledger transaction cannot supersede itself");
+        throw new LedgerError("invalid_input", "a ledger transaction cannot supersede itself");
       }
 
       if (original.supersededByTransactionId !== undefined) {
-        const existing = this.#getTransaction(workspaceId, original.supersededByTransactionId);
-        if (existing !== undefined && isSameReplacement(existing, input.replacement)) {
+        const existing = this.#requireTransaction(workspaceId, original.supersededByTransactionId);
+        if (isSameReplacement(existing, input.replacement)) {
           return { superseded: original, replacement: existing, created: false };
         }
-        throw new Error(
-          `ledger transaction ${original.id} is already superseded by ${original.supersededByTransactionId}`,
+        throw new LedgerError(
+          "already_superseded",
+          `ledger transaction ${original.id} is already superseded by ${existing.id}`,
         );
       }
       if (original.reviewState === "superseded") {
-        throw new Error(`ledger transaction ${original.id} is already superseded`);
+        throw new LedgerError(
+          "already_superseded",
+          `ledger transaction ${original.id} is already superseded`,
+        );
       }
 
       const { transaction: replacement, created } = this.#createTransaction(
@@ -288,7 +443,8 @@ export class SqliteLedgerRepository {
         input.replacement,
       );
       if (!created) {
-        throw new Error(
+        throw new LedgerError(
+          "idempotency_conflict",
           `idempotency key ${JSON.stringify(input.replacement.idempotencyKey)} already belongs to ledger transaction ${replacement.id}`,
         );
       }
@@ -298,22 +454,10 @@ export class SqliteLedgerRepository {
           "INSERT INTO ledger_transaction_supersessions (workspace_id, transaction_id, supersedes_transaction_id, superseded_at) VALUES (?, ?, ?, ?)",
         )
         .run(workspaceId, replacement.id, original.id, input.supersededAt);
-      // The only mutation a superseded transaction ever receives.
-      this.#db
-        .prepare(
-          "UPDATE ledger_transactions SET review_state = ? WHERE workspace_id = ? AND id = ?",
-        )
-        .run("superseded" satisfies ReviewState, workspaceId, original.id);
-      insertReviewEvent(this.#db, {
-        id: `review_event:${original.id}:${input.supersededAt}`,
-        workspaceId,
-        targetType: REVIEW_TARGET_TYPE,
-        targetId: original.id,
-        fromState: original.reviewState,
-        toState: "superseded",
+      this.#setReviewState(workspaceId, original, "superseded", {
         actor: input.actor,
+        at: input.supersededAt,
         notes: input.notes,
-        createdAt: input.supersededAt,
       });
 
       return {
@@ -324,44 +468,66 @@ export class SqliteLedgerRepository {
     });
   }
 
-  // --- Internals (synchronous so they compose inside one transaction) -------
+  // Internals (synchronous so they compose inside one transaction) -----------
 
-  #upsertAccount(workspaceId: string, input: LedgerAccountInput): LedgerAccount {
-    const validation = validateAccountPath(input.path);
-    if (!validation.valid) {
-      throw new Error(`Invalid ledger account path: ${validation.errors.join("; ")}`);
-    }
-    const kind = input.kind ?? validation.kind;
-    if (kind === undefined) {
-      throw new Error(
-        `Ledger account path "${input.path}" has no inferable kind; pass one explicitly`,
-      );
-    }
-    if (validation.kind !== undefined && kind !== validation.kind) {
-      throw new Error(
-        `Ledger account kind "${kind}" conflicts with the root of "${input.path}" (${validation.kind})`,
-      );
-    }
-
+  #ensureAccount(workspaceId: string, input: LedgerAccountInput): LedgerAccount {
+    const { kind, commodity, receiptRequired } = normalizeAccountInput(input);
     this.#db
-      .prepare(
-        "INSERT INTO ledger_accounts (id, workspace_id, path, kind, commodity, receipt_required, created_at) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (workspace_id, path) DO UPDATE SET kind = excluded.kind, commodity = excluded.commodity, receipt_required = excluded.receipt_required",
-      )
+      .prepare(`${ACCOUNT_INSERT} ON CONFLICT (workspace_id, path) DO NOTHING`)
       .run(
         input.id,
         workspaceId,
         input.path,
         kind,
-        input.commodity ?? null,
-        input.receiptRequired === true ? 1 : 0,
+        commodity ?? null,
+        receiptRequired ? 1 : 0,
         input.createdAt,
       );
+    return this.#requireAccount(workspaceId, input.path);
+  }
 
-    const account = this.#accountByPath(workspaceId, input.path);
-    if (account === undefined) {
-      throw new Error("ledger account upsert did not persist");
+  #assertAccountChangeIsSafe(
+    workspaceId: string,
+    existing: LedgerAccount,
+    kind: AccountKind,
+    commodity: string | undefined,
+  ): void {
+    if (existing.kind !== kind && this.#hasPostings(workspaceId, existing.id)) {
+      throw new LedgerError(
+        "invalid_input",
+        `cannot change the kind of ledger account "${existing.path}" while it has postings`,
+      );
     }
-    return account;
+    if (
+      commodity !== undefined &&
+      commodity !== existing.commodity &&
+      this.#hasPostings(workspaceId, existing.id, { otherThanCommodity: commodity })
+    ) {
+      throw new LedgerError(
+        "commodity_mismatch",
+        `cannot restrict ledger account "${existing.path}" to ${commodity}: it has postings in another commodity`,
+      );
+    }
+  }
+
+  #hasPostings(
+    workspaceId: string,
+    accountId: string,
+    options: { otherThanCommodity?: string } = {},
+  ): boolean {
+    const params: DbValue[] = [workspaceId, accountId];
+    let commodityClause = "";
+    if (options.otherThanCommodity !== undefined) {
+      commodityClause = " AND commodity <> ?";
+      params.push(options.otherThanCommodity);
+    }
+    return (
+      this.#db
+        .prepare(
+          `SELECT 1 FROM ledger_postings WHERE workspace_id = ? AND account_id = ?${commodityClause} LIMIT 1`,
+        )
+        .get(...params) !== undefined
+    );
   }
 
   #accountByPath(workspaceId: string, path: string): LedgerAccount | undefined {
@@ -373,6 +539,14 @@ export class SqliteLedgerRepository {
     return result === undefined ? undefined : accountFromRow(result);
   }
 
+  #requireAccount(workspaceId: string, path: string): LedgerAccount {
+    const account = this.#accountByPath(workspaceId, path);
+    if (account === undefined) {
+      throw new Error(`ledger account "${path}" was not persisted`);
+    }
+    return account;
+  }
+
   #createTransaction(
     workspaceId: string,
     input: CreateLedgerTransactionInput,
@@ -380,7 +554,14 @@ export class SqliteLedgerRepository {
     if (input.idempotencyKey !== undefined) {
       const existingId = this.#transactionIdForKey(workspaceId, input.idempotencyKey);
       if (existingId !== undefined) {
-        return { transaction: this.#requireTransaction(workspaceId, existingId), created: false };
+        const existing = this.#requireTransaction(workspaceId, existingId);
+        if (transactionFingerprint(existing) !== transactionFingerprint(input)) {
+          throw new LedgerError(
+            "idempotency_conflict",
+            `idempotency key ${JSON.stringify(input.idempotencyKey)} already belongs to ledger transaction ${existing.id} whose content differs from the new input`,
+          );
+        }
+        return { transaction: existing, created: false };
       }
     }
 
@@ -396,7 +577,7 @@ export class SqliteLedgerRepository {
         workspaceId,
         input.bookedOn,
         input.description,
-        input.reviewState ?? ("draft" satisfies ReviewState),
+        input.reviewState ?? "draft",
         input.createdAt,
       );
 
@@ -430,7 +611,7 @@ export class SqliteLedgerRepository {
     return { transaction: this.#requireTransaction(workspaceId, input.id), created: true };
   }
 
-  /** Resolves posting account paths to ids and checks commodity restrictions. */
+  /** Resolves posting account paths to accounts and checks commodity restrictions. */
   #resolveAccounts(
     workspaceId: string,
     postings: readonly LedgerPostingInput[],
@@ -450,17 +631,45 @@ export class SqliteLedgerRepository {
 
     const missing = paths.filter((path) => !resolved.has(path));
     if (missing.length > 0) {
-      throw new Error(`Unknown ledger accounts in workspace: ${missing.join(", ")}`);
+      throw new LedgerError(
+        "unknown_account",
+        `unknown ledger accounts in workspace: ${missing.join(", ")}`,
+      );
     }
     for (const posting of postings) {
       const restriction = resolved.get(posting.account)?.commodity;
       if (restriction !== undefined && restriction !== posting.amount.commodity) {
-        throw new Error(
-          `Ledger account "${posting.account}" only accepts ${restriction}, got ${posting.amount.commodity}`,
+        throw new LedgerError(
+          "commodity_mismatch",
+          `ledger account "${posting.account}" only accepts ${restriction}, got ${posting.amount.commodity}`,
         );
       }
     }
     return resolved;
+  }
+
+  /** The only mutation a ledger transaction row ever receives, always paired with a review event. */
+  #setReviewState(
+    workspaceId: string,
+    current: PersistedLedgerTransaction,
+    toState: ReviewState,
+    decision: { actor: string; at: string; notes: string | undefined },
+  ): void {
+    this.#db
+      .prepare("UPDATE ledger_transactions SET review_state = ? WHERE workspace_id = ? AND id = ?")
+      .run(toState, workspaceId, current.id);
+    const target = { type: EVIDENCE_RECORD_TYPES.ledgerTransaction, id: current.id };
+    insertReviewEvent(this.#db, {
+      id: reviewEventId(target, decision.at),
+      workspaceId,
+      targetType: target.type,
+      targetId: target.id,
+      fromState: current.reviewState,
+      toState,
+      actor: decision.actor,
+      notes: decision.notes,
+      createdAt: decision.at,
+    });
   }
 
   #transactionIdForKey(workspaceId: string, idempotencyKey: string): string | undefined {
@@ -486,6 +695,16 @@ export class SqliteLedgerRepository {
     return this.#attachPostings(workspaceId, [transactionFromRow(result)])[0];
   }
 
+  /** Caller-facing lookup: the transaction must exist in this workspace. */
+  #requireExistingTransaction(workspaceId: string, id: string): PersistedLedgerTransaction {
+    const transaction = this.#getTransaction(workspaceId, id);
+    if (transaction === undefined) {
+      throw new LedgerError("not_found", `ledger transaction ${id} not found in workspace`);
+    }
+    return transaction;
+  }
+
+  /** Post-write read-back: a miss here is an internal persistence failure. */
   #requireTransaction(workspaceId: string, id: string): PersistedLedgerTransaction {
     const transaction = this.#getTransaction(workspaceId, id);
     if (transaction === undefined) {
@@ -517,14 +736,56 @@ export class SqliteLedgerRepository {
   }
 }
 
-function validateTransactionInput(input: CreateLedgerTransactionInput): void {
-  if (!ISO_DATE_RE.test(input.bookedOn)) {
-    throw new Error(
-      `Ledger transaction bookedOn must be YYYY-MM-DD, got ${JSON.stringify(input.bookedOn)}`,
+// --- Validation and mapping -------------------------------------------------
+
+function normalizeAccountInput(input: LedgerAccountInput): {
+  kind: AccountKind;
+  commodity: string | undefined;
+  receiptRequired: boolean;
+} {
+  const validation = validateAccountPath(input.path);
+  if (!validation.valid) {
+    throw new LedgerError(
+      "invalid_input",
+      `invalid ledger account path: ${validation.errors.join("; ")}`,
     );
   }
-  if ((input.reviewState as ReviewState | undefined) === "superseded") {
-    throw new Error("A ledger transaction cannot be created in the superseded state");
+  const kind = input.kind ?? validation.kind;
+  if (kind === undefined) {
+    throw new LedgerError(
+      "invalid_input",
+      `ledger account path "${input.path}" has no inferable kind; pass one explicitly`,
+    );
+  }
+  if (validation.kind !== undefined && kind !== validation.kind) {
+    throw new LedgerError(
+      "invalid_input",
+      `ledger account kind "${kind}" conflicts with the root of "${input.path}" (${validation.kind})`,
+    );
+  }
+  return { kind, commodity: input.commodity, receiptRequired: input.receiptRequired === true };
+}
+
+function validateTransactionInput(input: CreateLedgerTransactionInput): void {
+  if (!ISO_DATE_RE.test(input.bookedOn)) {
+    throw new LedgerError(
+      "invalid_input",
+      `ledger transaction bookedOn must be YYYY-MM-DD, got ${JSON.stringify(input.bookedOn)}`,
+    );
+  }
+  // The type already narrows this; the runtime check guards callers arriving via JSON/MCP.
+  const reviewState: string = input.reviewState ?? "draft";
+  if (!(LEDGER_CREATION_REVIEW_STATES as readonly string[]).includes(reviewState)) {
+    throw new LedgerError(
+      "invalid_review_state",
+      `review state "${reviewState}" cannot be assigned on creation; create as draft or suggested and record a transition`,
+    );
+  }
+  if (input.postings.length > MAX_POSTINGS_PER_TRANSACTION) {
+    throw new LedgerError(
+      "invalid_input",
+      `ledger transaction ${input.id} has ${input.postings.length} postings; the maximum is ${MAX_POSTINGS_PER_TRANSACTION}`,
+    );
   }
   const balance = validateBalancedTransaction(input.postings);
   if (!balance.balanced) {
@@ -537,15 +798,35 @@ function postingId(transactionId: string, index: number): string {
   return `${transactionId}:${String(index + 1).padStart(3, "0")}`;
 }
 
+interface TransactionContent {
+  bookedOn: string;
+  description: string;
+  postings: readonly LedgerPostingInput[];
+}
+
+/** Stable hash of the financially relevant content, used to detect idempotency-key collisions. */
+function transactionFingerprint(transaction: TransactionContent): string {
+  return stableJsonHash({
+    bookedOn: transaction.bookedOn,
+    description: transaction.description,
+    postings: transaction.postings.map((posting) => ({
+      account: posting.account,
+      amount: posting.amount.amount,
+      commodity: posting.amount.commodity,
+      memo: posting.memo ?? null,
+    })),
+  });
+}
+
 function isSameReplacement(
   existing: PersistedLedgerTransaction,
   replacement: CreateLedgerTransactionInput,
 ): boolean {
-  return (
+  const sameIdentity =
     existing.id === replacement.id ||
     (replacement.idempotencyKey !== undefined &&
-      existing.idempotencyKey === replacement.idempotencyKey)
-  );
+      existing.idempotencyKey === replacement.idempotencyKey);
+  return sameIdentity && transactionFingerprint(existing) === transactionFingerprint(replacement);
 }
 
 function accountFromRow(source: Row): LedgerAccount {
@@ -553,9 +834,9 @@ function accountFromRow(source: Row): LedgerAccount {
     id: requiredString(source, "id"),
     workspaceId: requiredString(source, "workspace_id"),
     path: requiredString(source, "path"),
-    kind: requiredString(source, "kind") as AccountKind,
+    kind: requiredLiteral(source, "kind", isAccountKind),
     commodity: optionalString(source, "commodity"),
-    receiptRequired: source["receipt_required"] === 1,
+    receiptRequired: requiredBoolean(source, "receipt_required"),
   };
 }
 
@@ -566,7 +847,7 @@ function transactionFromRow(source: Row): PersistedLedgerTransaction {
     bookedOn: requiredString(source, "booked_on"),
     description: requiredString(source, "description"),
     postings: [],
-    reviewState: requiredString(source, "review_state") as ReviewState,
+    reviewState: requiredLiteral(source, "review_state", isReviewState),
     createdAt: requiredString(source, "created_at"),
     idempotencyKey: optionalString(source, "idempotency_key"),
     supersedesTransactionId: optionalString(source, "supersedes_transaction_id"),

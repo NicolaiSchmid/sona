@@ -11,6 +11,7 @@
 /** Package version marker, used to verify wiring and test discovery. */
 export const sonaCoreVersion = "0.0.0" as const;
 
+export * from "./audit/types";
 export * from "./evidence/types";
 export * from "./ledger/accounts";
 export * from "./ledger/balance";
