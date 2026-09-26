@@ -9,6 +9,9 @@ import { describe, expect, it } from "vitest";
 import {
   InMemoryPortalFetchConnectionRepository,
   InMemoryPortalFetchJobStateStore,
+  type PortalFetchConnection,
+  type PortalFetchConnectionRepository,
+  type PortalFetchJobStateStore,
   runPortalFetchJob,
 } from "./portal-fetch.js";
 
@@ -234,7 +237,258 @@ describe("portal_fetch job", () => {
     expect(result.status).toBe("failed");
     expect(result.runResult?.status).toBe("blocked");
   });
+
+  it("never invokes the runner for duplicate or cooling-down reservations", async () => {
+    const state = new InMemoryPortalFetchJobStateStore();
+    const connections = new InMemoryPortalFetchConnectionRepository([
+      { connectionId: "conn_1", workspaceId: "ws_1", task },
+    ]);
+    const counting = new CountingPortalTaskRunner();
+    const base = {
+      context: { workspaceId: "ws_1" },
+      connectionId: "conn_1",
+      cooldownMs: 60_000,
+      connections,
+      state,
+    };
+
+    await runPortalFetchJob({
+      ...base,
+      jobId: "job_1",
+      now: "2026-02-01T00:00:00Z",
+      runner: new FakePortalTaskRunner(),
+    });
+    const duplicate = await runPortalFetchJob({
+      ...base,
+      jobId: "job_1",
+      now: "2026-02-01T00:05:00Z",
+      runner: counting,
+    });
+    const cooling = await runPortalFetchJob({
+      ...base,
+      jobId: "job_2",
+      now: "2026-02-01T00:00:30Z",
+      runner: counting,
+    });
+
+    expect(duplicate.status).toBe("duplicate");
+    expect(duplicate.cooldownUntil).toBeUndefined();
+    expect(cooling.status).toBe("cooldown");
+    expect(counting.runCount).toBe(0);
+  });
+
+  it("refuses a connection that belongs to another workspace before contacting the portal", async () => {
+    const counting = new CountingPortalTaskRunner();
+    const state = new CountingJobStateStore();
+    const leaky: PortalFetchConnectionRepository = {
+      async getConnection(input): Promise<PortalFetchConnection> {
+        return { connectionId: input.connectionId, workspaceId: "ws_other", task };
+      },
+    };
+
+    const result = await runPortalFetchJob({
+      jobId: "job_1",
+      context: { workspaceId: "ws_1" },
+      connectionId: "conn_1",
+      now: "2026-02-01T00:00:00Z",
+      cooldownMs: 60_000,
+      runner: counting,
+      connections: leaky,
+      state,
+    });
+
+    expect(result).toEqual({
+      status: "failed",
+      connectionId: "conn_1",
+      cooldownUntil: undefined,
+      runResult: undefined,
+    });
+    expect(counting.runCount).toBe(0);
+    expect(state.acquireCount).toBe(0);
+  });
+
+  it("does not resolve connections across workspaces in the in-memory repository", async () => {
+    const counting = new CountingPortalTaskRunner();
+    const state = new CountingJobStateStore();
+    const connections = new InMemoryPortalFetchConnectionRepository([
+      { connectionId: "conn_1", workspaceId: "ws_1", task },
+    ]);
+
+    await expect(
+      runPortalFetchJob({
+        jobId: "job_1",
+        context: { workspaceId: "ws_2" },
+        connectionId: "conn_1",
+        now: "2026-02-01T00:00:00Z",
+        cooldownMs: 60_000,
+        runner: counting,
+        connections,
+        state,
+      }),
+    ).rejects.toThrow("Portal fetch connection not found: conn_1");
+    expect(counting.runCount).toBe(0);
+    expect(state.acquireCount).toBe(0);
+  });
+
+  it("rejects an invalid workspace context before any lookup", async () => {
+    const counting = new CountingPortalTaskRunner();
+    const state = new CountingJobStateStore();
+    const connections = new InMemoryPortalFetchConnectionRepository([
+      { connectionId: "conn_1", workspaceId: "ws_1", task },
+    ]);
+
+    await expect(
+      runPortalFetchJob({
+        jobId: "job_1",
+        context: { workspaceId: "" },
+        connectionId: "conn_1",
+        now: "2026-02-01T00:00:00Z",
+        cooldownMs: 60_000,
+        runner: counting,
+        connections,
+        state,
+      }),
+    ).rejects.toThrow(/workspace context/i);
+    expect(counting.runCount).toBe(0);
+    expect(state.acquireCount).toBe(0);
+  });
+
+  it("keeps the portal cooldown even when the run fails", async () => {
+    const state = new InMemoryPortalFetchJobStateStore();
+    const connections = new InMemoryPortalFetchConnectionRepository([
+      { connectionId: "conn_1", workspaceId: "ws_1", task },
+    ]);
+
+    const failed = await runPortalFetchJob({
+      jobId: "job_1",
+      context: { workspaceId: "ws_1" },
+      connectionId: "conn_1",
+      now: "2026-02-01T00:00:00Z",
+      cooldownMs: 60_000,
+      runner: new ThrowingPortalTaskRunner(),
+      connections,
+      state,
+    });
+    const reservation = await state.acquire({
+      jobId: "job_2",
+      workspaceId: "ws_1",
+      connectionId: "conn_1",
+      now: "2026-02-01T00:00:59Z",
+      cooldownUntil: "2026-02-01T00:02:00.000Z",
+    });
+
+    expect(failed.status).toBe("failed");
+    expect(failed.cooldownUntil).toBe("2026-02-01T00:01:00.000Z");
+    expect(reservation).toEqual({ status: "cooldown", cooldownUntil: "2026-02-01T00:01:00.000Z" });
+  });
 });
+
+describe("InMemoryPortalFetchJobStateStore", () => {
+  const lease = (workspaceId: string, jobId = "job_1", connectionId = "conn_1") => ({
+    jobId,
+    workspaceId,
+    connectionId,
+  });
+  const acquire = (
+    state: PortalFetchJobStateStore,
+    workspaceId: string,
+    now: string,
+    jobId = "job_1",
+    connectionId = "conn_1",
+  ) =>
+    state.acquire({
+      ...lease(workspaceId, jobId, connectionId),
+      now,
+      cooldownUntil: new Date(Date.parse(now) + 60_000).toISOString(),
+    });
+
+  it("treats the same job id in two workspaces as independent leases", async () => {
+    const state = new InMemoryPortalFetchJobStateStore();
+
+    const first = await acquire(state, "ws_1", "2026-02-01T00:00:00Z");
+    const second = await acquire(state, "ws_2", "2026-02-01T00:00:00Z");
+    await state.complete(lease("ws_1"));
+    const retryOther = await acquire(state, "ws_2", "2026-02-01T00:05:00Z", "job_9");
+
+    expect(first.status).toBe("acquired");
+    expect(second.status).toBe("acquired");
+    expect(retryOther.status).toBe("acquired");
+  });
+
+  it("scopes connection cooldowns to the workspace", async () => {
+    const state = new InMemoryPortalFetchJobStateStore();
+
+    await acquire(state, "ws_1", "2026-02-01T00:00:00Z");
+    const otherWorkspace = await acquire(state, "ws_2", "2026-02-01T00:00:10Z", "job_2");
+    const sameWorkspace = await acquire(state, "ws_1", "2026-02-01T00:00:10Z", "job_3");
+
+    expect(otherWorkspace.status).toBe("acquired");
+    expect(sameWorkspace.status).toBe("cooldown");
+  });
+
+  it("keeps a completed job idempotent even if release is called afterwards", async () => {
+    const state = new InMemoryPortalFetchJobStateStore();
+
+    await acquire(state, "ws_1", "2026-02-01T00:00:00Z");
+    await state.complete(lease("ws_1"));
+    await state.release(lease("ws_1"));
+    const again = await acquire(state, "ws_1", "2026-02-01T01:00:00Z");
+
+    expect(again).toEqual({ status: "duplicate", cooldownUntil: undefined });
+  });
+
+  it("refuses a leased job id while it is in flight and frees it on release", async () => {
+    const state = new InMemoryPortalFetchJobStateStore();
+
+    await acquire(state, "ws_1", "2026-02-01T00:00:00Z");
+    const inFlight = await acquire(state, "ws_1", "2026-02-01T00:00:01Z");
+    await state.release(lease("ws_1"));
+    const afterRelease = await acquire(state, "ws_1", "2026-02-01T00:01:00Z");
+
+    expect(inFlight.status).toBe("duplicate");
+    expect(afterRelease.status).toBe("acquired");
+  });
+
+  it("ignores release and complete for unknown job ids", async () => {
+    const state = new InMemoryPortalFetchJobStateStore();
+
+    await state.release(lease("ws_1"));
+    const acquired = await acquire(state, "ws_1", "2026-02-01T00:00:00Z");
+
+    expect(acquired.status).toBe("acquired");
+  });
+
+  it("lets a job through once the cooldown boundary has been reached", async () => {
+    const state = new InMemoryPortalFetchJobStateStore();
+
+    await acquire(state, "ws_1", "2026-02-01T00:00:00Z");
+    const before = await acquire(state, "ws_1", "2026-02-01T00:00:59.999Z", "job_2");
+    const atBoundary = await acquire(state, "ws_1", "2026-02-01T00:01:00Z", "job_3");
+
+    expect(before.status).toBe("cooldown");
+    expect(atBoundary.status).toBe("acquired");
+  });
+});
+
+class CountingPortalTaskRunner implements PortalTaskRunner {
+  runCount = 0;
+
+  async runTask(input: RunPortalTaskInput): Promise<RunPortalTaskResult> {
+    this.runCount += 1;
+    return await new FakePortalTaskRunner().runTask(input);
+  }
+}
+
+class CountingJobStateStore extends InMemoryPortalFetchJobStateStore {
+  acquireCount = 0;
+
+  override async acquire(
+    input: Parameters<InMemoryPortalFetchJobStateStore["acquire"]>[0],
+  ): ReturnType<InMemoryPortalFetchJobStateStore["acquire"]> {
+    this.acquireCount += 1;
+    return await super.acquire(input);
+  }
+}
 
 class BlockingPortalTaskRunner implements PortalTaskRunner {
   readonly started: Promise<void>;

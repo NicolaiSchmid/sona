@@ -1,4 +1,10 @@
-import { createSecretValue, InMemoryDocumentStorage, InMemorySecretStore } from "@sona/core";
+import {
+  createSecretValue,
+  type GetSecretInput,
+  InMemoryDocumentStorage,
+  InMemorySecretStore,
+  type SecretValue,
+} from "@sona/core";
 import { describe, expect, it } from "vitest";
 import type {
   PortalBrowserPage,
@@ -12,9 +18,12 @@ import { syntheticReferencePortalTask } from "./definitions/synthetic-reference-
 import type { PortalRequest } from "./network-guard.js";
 import { createCdpPlaywrightBrowserProvider } from "./playwright-adapter.js";
 import {
+  type GetPortalConnectionInput,
   InMemoryPortalConnectionRepository,
   InMemoryPortalDocumentRegistry,
   LocalPlaywrightPortalTaskRunner,
+  type PortalConnection,
+  type PortalConnectionRepository,
 } from "./playwright-runner.js";
 import type { RunPortalTaskInput } from "./runner.js";
 import { type PortalTask, parsePortalTask } from "./schema.js";
@@ -272,7 +281,258 @@ describe("LocalPlaywrightPortalTaskRunner", () => {
     expect(requestCount).toBe(50);
     expect(result.warnings).toContain("download link count limited to 50 documents");
   });
+
+  it("suppresses the failure screenshot once a sensitive step has run", async () => {
+    const page = new FixturePortalPage({
+      missingSelectors: new Set(["[data-testid='invoice-list']"]),
+    });
+    const runner = await makeRunner({ page });
+
+    // The synthetic task marks its login navigation as sensitive.
+    const result = await runner.runTask(input());
+
+    expect(result.status).toBe("selector_missing");
+    expect(page.screenshotCount).toBe(0);
+    expect(result.warnings.some((warning) => warning.includes("screenshot"))).toBe(false);
+  });
+
+  it("captures exactly one failure screenshot on a non-sensitive path", async () => {
+    const page = new FixturePortalPage({
+      missingSelectors: new Set(["[data-testid='invoice-list']"]),
+    });
+    const runner = await makeRunner({ page });
+    const nonSensitive: PortalTask = {
+      ...task,
+      steps: task.steps.map((step) => ({ ...step, sensitive: false })),
+    };
+
+    const result = await runner.runTask(input({ task: nonSensitive }));
+
+    expect(result.status).toBe("selector_missing");
+    expect(page.screenshotCount).toBe(1);
+    expect(result.warnings.filter((warning) => warning.includes("screenshot"))).toEqual([
+      expect.stringMatching(/^failure screenshot captured: [0-9a-f]{64}$/),
+    ]);
+  });
+
+  it("blocks download links that all leave the allowlist without fetching or storing", async () => {
+    const storage = new CountingDocumentStorage();
+    const page = new FixturePortalPage({
+      linkHrefs: ["https://evil.test/a.pdf", "https://portal.test.evil.example/b.pdf"],
+    });
+    const runner = await makeRunner({ page, storage });
+
+    const result = await runner.runTask(input());
+
+    expect(result.status).toBe("blocked");
+    expect(page.requestCount).toBe(0);
+    expect(storage.putCount).toBe(0);
+    expect(result.documents).toEqual([]);
+    expect(
+      result.warnings.filter((warning) => warning === "download blocked: off_allowlist"),
+    ).toHaveLength(2);
+    expect(result.provenance.blockedRequests?.map((request) => request.url)).toEqual([
+      "https://evil.test/a.pdf",
+      "https://portal.test.evil.example/b.pdf",
+    ]);
+  });
+
+  it("blocks javascript: and mailto: hrefs instead of requesting them", async () => {
+    const page = new FixturePortalPage({
+      linkHrefs: ["javascript:alert(1)", "mailto:billing@portal.test"],
+    });
+    const runner = await makeRunner({ page });
+
+    const result = await runner.runTask(input());
+
+    expect(result.status).toBe("blocked");
+    expect(page.requestCount).toBe(0);
+    expect(result.storedDocuments).toEqual([]);
+    expect(result.provenance.blockedRequests?.map((request) => request.reason)).toEqual([
+      "off_allowlist",
+      "off_allowlist",
+    ]);
+  });
+
+  it("resolves relative hrefs against the current page before guarding them", async () => {
+    const page = new FixturePortalPage({ linkHrefs: ["/files/2026-01.pdf", "2026-02.pdf"] });
+    const runner = await makeRunner({ page });
+
+    const result = await runner.runTask(input());
+
+    expect(result.status).toBe("completed");
+    expect(result.documents.map((document) => document.sourceUrl)).toEqual([
+      "https://portal.test/files/2026-01.pdf",
+      "https://portal.test/2026-02.pdf",
+    ]);
+  });
+
+  it("dedups downloads across runners that share a document registry", async () => {
+    const registry = new InMemoryPortalDocumentRegistry();
+    const firstStorage = new CountingDocumentStorage();
+    const secondStorage = new CountingDocumentStorage();
+    const first = await makeRunner({
+      page: new FixturePortalPage(),
+      registry,
+      storage: firstStorage,
+    });
+    const second = await makeRunner({
+      page: new FixturePortalPage(),
+      registry,
+      storage: secondStorage,
+    });
+
+    const firstResult = await first.runTask(input());
+    const secondResult = await second.runTask(input({ runId: "run_2" }));
+
+    expect(firstResult.documents).toHaveLength(2);
+    expect(secondResult.status).toBe("completed");
+    expect(secondResult.documents).toEqual([]);
+    expect(firstStorage.putCount).toBe(2);
+    expect(secondStorage.putCount).toBe(0);
+  });
+
+  it("does not dedup across workspaces in the shared registry", async () => {
+    const registry = new InMemoryPortalDocumentRegistry();
+    const hash = "a".repeat(64);
+
+    await registry.recordContentHash({ workspaceId: "ws_1", contentHash: hash, documentId: "d1" });
+
+    expect(await registry.hasContentHash({ workspaceId: "ws_1", contentHash: hash })).toBe(true);
+    expect(await registry.hasContentHash({ workspaceId: "ws_2", contentHash: hash })).toBe(false);
+  });
+
+  it("fails before loading credentials when the connection targets another task", async () => {
+    const secretStore = new CountingSecretStore();
+    const provider = new FixtureBrowserProvider({ page: new FixturePortalPage() });
+    const runner = await makeRunner({
+      page: new FixturePortalPage(),
+      provider,
+      secretStore,
+      connectionTaskId: "another-portal",
+    });
+
+    const result = await runner.runTask(input());
+
+    expect(result.status).toBe("failed");
+    expect(result.errors).toEqual([
+      "portal connection does not match the requested workspace/task",
+    ]);
+    expect(secretStore.getCount).toBe(0);
+    expect(provider.sessionCount).toBe(0);
+  });
+
+  it("fails before loading credentials when a repository leaks another workspace's connection", async () => {
+    const secretStore = new CountingSecretStore();
+    const provider = new FixtureBrowserProvider({ page: new FixturePortalPage() });
+    const leaky: PortalConnectionRepository = {
+      async getConnection(request: GetPortalConnectionInput): Promise<PortalConnection> {
+        return {
+          id: request.connectionId,
+          workspaceId: "ws_other",
+          taskId: task.id,
+          credentialRefs: {},
+        };
+      },
+    };
+    const runner = await makeRunner({
+      page: new FixturePortalPage(),
+      provider,
+      secretStore,
+      connections: leaky,
+    });
+
+    const result = await runner.runTask(input());
+
+    expect(result.status).toBe("failed");
+    expect(result.errors[0]).toContain("does not match the requested workspace");
+    expect(secretStore.getCount).toBe(0);
+    expect(provider.sessionCount).toBe(0);
+  });
+
+  it("scopes in-memory connection lookups to the requesting workspace", async () => {
+    const secretStore = new CountingSecretStore();
+    const provider = new FixtureBrowserProvider({ page: new FixturePortalPage() });
+    const runner = await makeRunner({ page: new FixturePortalPage(), provider, secretStore });
+
+    await expect(runner.runTask(input({ workspaceId: "ws_2" }))).rejects.toThrow(
+      "Portal connection not found: conn_1",
+    );
+    expect(secretStore.getCount).toBe(0);
+    expect(provider.sessionCount).toBe(0);
+  });
+
+  it("marks the run failed with a redacted message when closing the session throws", async () => {
+    const secretMarker = "CLOSE-S3CRET-77";
+    const runner = await makeRunner({
+      page: new FixturePortalPage(),
+      password: secretMarker,
+      closeFailure: new Error(`browser exited uncleanly while holding ${secretMarker}`),
+    });
+
+    const result = await runner.runTask(input());
+
+    expect(result.status).toBe("failed");
+    expect(result.errors).toEqual(["browser exited uncleanly while holding [REDACTED_SECRET]"]);
+    expect(JSON.stringify(result)).not.toContain(secretMarker);
+    // Documents fetched before the close failure are still reported.
+    expect(result.documents).toHaveLength(2);
+  });
+
+  it("scopes stored documents to the workspace and returns object references only", async () => {
+    const storage = new CountingDocumentStorage();
+    const runner = await makeRunner({ page: new FixturePortalPage(), storage });
+
+    const result = await runner.runTask(input());
+    const serialized = JSON.stringify(result);
+
+    expect(result.storedDocuments.map((document) => document.workspaceId)).toEqual([
+      "ws_1",
+      "ws_1",
+    ]);
+    for (const [index, stored] of result.storedDocuments.entries()) {
+      const fetched = result.documents[index];
+      expect(stored.id).toBe(`portal_conn_1_${fetched?.contentHash.slice(0, 16)}`);
+      expect(stored.metadata).toMatchObject({
+        "portal.runId": "run_1",
+        "portal.taskId": "synthetic-reference-portal",
+        "portal.taskVersion": "1",
+        "portal.index": String(index),
+        "portal.sourceUrl": `https://portal.test/invoices/2026-0${index + 1}.pdf`,
+      });
+      expect(fetched?.content).toEqual({ kind: "objectRef", uri: `stored-document:${stored.id}` });
+      expect(fetched?.provenance.workspaceId).toBe("ws_1");
+    }
+    expect(serialized).not.toContain('"bytes"');
+    expect(serialized).not.toContain("%PDF");
+  });
+
+  it("records the justified login POST in run provenance", async () => {
+    const runner = await makeRunner({ page: new FixturePortalPage() });
+
+    const result = await runner.runTask(input());
+
+    expect(result.status).toBe("completed");
+    expect(result.provenance.blockedRequests).toEqual([]);
+    expect(result.provenance.allowedNonIdempotentRequests).toEqual([
+      {
+        url: "https://portal.test/login",
+        method: "POST",
+        reason: "login",
+        justification: "Portal login form requires POST before read-only invoice access.",
+      },
+    ]);
+  });
 });
+
+class CountingSecretStore extends InMemorySecretStore {
+  getCount = 0;
+
+  override async getSecret(inputValue: GetSecretInput): Promise<SecretValue> {
+    this.getCount += 1;
+    return await super.getSecret(inputValue);
+  }
+}
 
 class CountingDocumentStorage extends InMemoryDocumentStorage {
   putCount = 0;
@@ -297,10 +557,18 @@ interface MakeRunnerInput {
   password?: string;
   providerFailure?: Error;
   providerSensitiveValues?: readonly string[];
+  /** Overrides the provider built from `page`/`providerFailure`. */
+  provider?: FixtureBrowserProvider;
+  secretStore?: InMemorySecretStore;
+  /** Task id the in-memory connection is bound to (default: the synthetic task). */
+  connectionTaskId?: string;
+  /** Overrides the in-memory connection repository entirely. */
+  connections?: PortalConnectionRepository;
+  closeFailure?: Error;
 }
 
 async function makeRunner(inputValue: MakeRunnerInput): Promise<LocalPlaywrightPortalTaskRunner> {
-  const secretStore = new InMemorySecretStore();
+  const secretStore = inputValue.secretStore ?? new InMemorySecretStore();
   const usernameRef = await secretStore.putSecret({
     context,
     label: "Portal username",
@@ -311,24 +579,29 @@ async function makeRunner(inputValue: MakeRunnerInput): Promise<LocalPlaywrightP
     label: "Portal password",
     value: createSecretValue(inputValue.password ?? "synthetic-password"),
   });
-  const connections = new InMemoryPortalConnectionRepository([
-    {
-      id: "conn_1",
-      workspaceId: context.workspaceId,
-      taskId: task.id,
-      credentialRefs: {
-        username: usernameRef,
-        password: passwordRef,
+  const connections =
+    inputValue.connections ??
+    new InMemoryPortalConnectionRepository([
+      {
+        id: "conn_1",
+        workspaceId: context.workspaceId,
+        taskId: inputValue.connectionTaskId ?? task.id,
+        credentialRefs: {
+          username: usernameRef,
+          password: passwordRef,
+        },
       },
-    },
-  ]);
+    ]);
 
   return new LocalPlaywrightPortalTaskRunner({
-    browserProvider: new FixtureBrowserProvider(
-      inputValue.page,
-      inputValue.providerFailure,
-      inputValue.providerSensitiveValues,
-    ),
+    browserProvider:
+      inputValue.provider ??
+      new FixtureBrowserProvider({
+        page: inputValue.page,
+        failure: inputValue.providerFailure,
+        sensitiveValues: inputValue.providerSensitiveValues,
+        closeFailure: inputValue.closeFailure,
+      }),
     documentStorage: inputValue.storage ?? new CountingDocumentStorage(),
     documentRegistry: inputValue.registry ?? new InMemoryPortalDocumentRegistry(),
     secretStore,
@@ -336,32 +609,43 @@ async function makeRunner(inputValue: MakeRunnerInput): Promise<LocalPlaywrightP
   });
 }
 
+interface FixtureBrowserProviderOptions {
+  page: FixturePortalPage;
+  failure?: Error;
+  sensitiveValues?: readonly string[];
+  closeFailure?: Error;
+}
+
 class FixtureBrowserProvider implements PortalBrowserProvider {
   readonly providerName = "local-playwright";
   readonly sensitiveValues: readonly string[];
+  sessionCount = 0;
   readonly #page: FixturePortalPage;
   readonly #failure: Error | undefined;
+  readonly #closeFailure: Error | undefined;
 
-  constructor(
-    page: FixturePortalPage,
-    failure: Error | undefined,
-    sensitiveValues: readonly string[] = [],
-  ) {
-    this.#page = page;
-    this.#failure = failure;
-    this.sensitiveValues = sensitiveValues;
+  constructor(options: FixtureBrowserProviderOptions) {
+    this.#page = options.page;
+    this.#failure = options.failure;
+    this.#closeFailure = options.closeFailure;
+    this.sensitiveValues = options.sensitiveValues ?? [];
   }
 
   async createSession(): Promise<PortalBrowserSession> {
     if (this.#failure !== undefined) {
       throw this.#failure;
     }
+    this.sessionCount += 1;
     return {
       page: this.#page,
       route: async (pattern, handler) => {
         await this.#page.route(pattern, handler);
       },
-      close: async () => undefined,
+      close: async () => {
+        if (this.#closeFailure !== undefined) {
+          throw this.#closeFailure;
+        }
+      },
     };
   }
 }
@@ -377,11 +661,16 @@ interface FixturePortalPageOptions {
   hrefAttribute?: string;
   /** Mimic Playwright: a route handler that throws makes the navigation reject. */
   abortBlockedRequests?: boolean;
+  /** Raw href values for the fixture links; overrides `linkCount` when set. */
+  linkHrefs?: readonly string[];
 }
 
 class FixturePortalPage implements PortalBrowserPage {
   readonly waitCounts = new Map<string, number>();
   screenshotCount = 0;
+  /** Number of `requestBytes` calls, i.e. download fetches actually attempted. */
+  requestCount = 0;
+  readonly #linkHrefs: readonly string[] | undefined;
   readonly #missingSelectors: ReadonlySet<string>;
   readonly #timeoutSelectors: ReadonlySet<string>;
   readonly #download:
@@ -400,6 +689,7 @@ class FixturePortalPage implements PortalBrowserPage {
     this.#linkCount = options.linkCount ?? 2;
     this.#hrefAttribute = options.hrefAttribute ?? "href";
     this.#abortBlockedRequests = options.abortBlockedRequests ?? false;
+    this.#linkHrefs = options.linkHrefs;
   }
 
   async route(_pattern: string, handler: FixtureRouteHandler): Promise<void> {
@@ -446,6 +736,11 @@ class FixturePortalPage implements PortalBrowserPage {
     if (selector !== "a.invoice-download") {
       return [];
     }
+    if (this.#linkHrefs !== undefined) {
+      return this.#linkHrefs.map(
+        (href, index) => new FixtureElement(href, `link-${index + 1}.pdf`, this.#hrefAttribute),
+      );
+    }
     return Array.from({ length: this.#linkCount }, (_value, index) => {
       const invoice = String(index + 1).padStart(2, "0");
       return new FixtureElement(
@@ -460,6 +755,7 @@ class FixturePortalPage implements PortalBrowserPage {
     url: string,
     options: PortalDownloadRequestOptions,
   ): Promise<PortalDownloadResponse> {
+    this.requestCount += 1;
     await this.emitRequest({ url, method: "GET", resourceType: "document" });
     if (this.#download !== undefined) {
       return this.#download(url, options);
