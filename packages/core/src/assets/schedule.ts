@@ -17,6 +17,7 @@ import {
   type AssetDisposalEvent,
   type AssetEvent,
   type AssetImprovementEvent,
+  type AssetRetractionEvent,
   DEFAULT_DEPRECIATION_ROUNDING_SCALE,
   DEPRECIATION_RATE_SCALE,
   DepreciationError,
@@ -165,8 +166,9 @@ export interface DepreciationScheduleRow {
   accumulatedDepreciation: string;
   notes: DepreciationRowNote[];
   /**
-   * Events applied so far (improvements, and the disposal in the disposal
-   * year). Their evidence carries onto the row; only improvements to
+   * Events applied so far: improvements, retractions (from the year they were
+   * recorded, as provenance for a removed cost), and the disposal in its
+   * year. Their evidence carries onto the row; only improvements to
    * depreciable components raise the basis.
    */
   appliedEventIds: string[];
@@ -254,7 +256,15 @@ interface ValidatedDisposal {
 
 interface ValidatedEvents {
   improvementsByYear: Map<number, AssetImprovementEvent[]>;
+  /** Retractions by the year they were recorded; provenance only, no amount effect. */
+  retractionsByYear: Map<number, AssetRetractionEvent[]>;
   disposal: ValidatedDisposal | undefined;
+}
+
+function pushByYear<E>(map: Map<number, E[]>, year: number, event: E): void {
+  const bucket = map.get(year) ?? [];
+  bucket.push(event);
+  map.set(year, bucket);
 }
 
 /**
@@ -298,9 +308,15 @@ function validateEvents(
     }
   }
   const retracted = retractedEventIds(events);
+  const retractionsByYear = new Map<number, AssetRetractionEvent[]>();
 
   for (const event of events) {
-    if (event.kind === "retraction" || retracted.has(event.id)) {
+    if (event.kind === "retraction") {
+      const on = parseYearMonth(event.occurredOn, `Event ${event.id} occurredOn`);
+      pushByYear(retractionsByYear, on.year, event);
+      continue;
+    }
+    if (retracted.has(event.id)) {
       continue;
     }
     const on = parseYearMonth(event.occurredOn, `Event ${event.id} occurredOn`);
@@ -331,12 +347,10 @@ function validateEvents(
         `Improvement ${event.id} occurred after disposal on ${disposal.event.occurredOn}`,
       );
     }
-    const bucket = improvementsByYear.get(on.year) ?? [];
-    bucket.push(event);
-    improvementsByYear.set(on.year, bucket);
+    pushByYear(improvementsByYear, on.year, event);
   }
 
-  return { improvementsByYear, disposal };
+  return { improvementsByYear, retractionsByYear, disposal };
 }
 
 /**
@@ -371,7 +385,11 @@ export function computeDepreciationSchedule(
   const scale = config.roundingScale ?? DEFAULT_DEPRECIATION_ROUNDING_SCALE;
   const allocation = allocateAcquisitionCosts(asset, scale);
   const acquired = parseYearMonth(asset.acquiredOn, "acquiredOn");
-  const { improvementsByYear, disposal } = validateEvents(asset, input.events ?? [], acquired);
+  const { improvementsByYear, retractionsByYear, disposal } = validateEvents(
+    asset,
+    input.events ?? [],
+    acquired,
+  );
 
   const residual =
     config.residualValue === undefined
@@ -400,8 +418,11 @@ export function computeDepreciationSchedule(
   const lastImprovementYear = Math.max(acquired.year - 1, ...improvementsByYear.keys());
 
   const rows: DepreciationScheduleRow[] = [];
-  /** Improvements applied so far, plus the disposal in its year; each row reports their evidence. */
-  const applied: Array<AssetImprovementEvent | AssetDisposalEvent> = [];
+  /**
+   * Events applied so far: improvements, retractions (provenance only), and
+   * the disposal in its year. Each row reports their ids and evidence.
+   */
+  const applied: AssetEvent[] = [];
   let basis = acquisitionBasis;
   let accumulated = 0n;
   let monthsElapsed = 0;
@@ -414,6 +435,7 @@ export function computeDepreciationSchedule(
     }
 
     const exhaustedBefore = rows.length > 0 && basis - residual - accumulated <= 0n;
+    applied.push(...(retractionsByYear.get(year) ?? []));
     const improvements = improvementsByYear.get(year) ?? [];
     for (const improvement of improvements) {
       applied.push(improvement);
@@ -486,9 +508,12 @@ export function computeDepreciationSchedule(
         ...baseEvidence,
         ...applied.flatMap((e) => e.evidenceDocumentIds),
       ]),
+      // Retractions carry no cost, so they never count as an evidence gap.
       missingEvidenceFor: [
         ...baseMissing,
-        ...applied.filter((e) => e.evidenceDocumentIds.length === 0).map((e) => `event:${e.id}`),
+        ...applied
+          .filter((e) => e.kind !== "retraction" && e.evidenceDocumentIds.length === 0)
+          .map((e) => `event:${e.id}`),
       ],
     });
     accumulated += amount;

@@ -127,7 +127,8 @@ const ROW_NOTE_LABELS = {
  */
 function reviewGap(
   transaction: DepreciationTransactionRef | undefined,
-  scheduled: MoneyAmount,
+  schedule: Pick<DepreciationSchedule, "configVersion" | "commodity">,
+  scheduledAmount: string,
 ): string | undefined {
   const required = REQUIRED_STATE.final;
   if (transaction === undefined) {
@@ -136,8 +137,19 @@ function reviewGap(
   if (!meetsReviewState(transaction.reviewState, required)) {
     return `review state "${transaction.reviewState}" below required "${required}"`;
   }
-  if (!moneyAmountsEqual(transaction.amount, scheduled)) {
-    return `recorded amount ${transaction.amount.amount} ${transaction.amount.commodity} (config v${transaction.configVersion}) differs from configured schedule ${scheduled.amount} ${scheduled.commodity}; adjustment review required`;
+  // An approval is bound to the configuration it was given under: a new
+  // version (method, accounts, residual) needs a fresh review even if the
+  // amount happens to be unchanged.
+  if (transaction.configVersion !== schedule.configVersion) {
+    return `recorded under config v${transaction.configVersion} (${transaction.amount.amount} ${transaction.amount.commodity}); current schedule is v${schedule.configVersion} (${scheduledAmount} ${schedule.commodity}); review required`;
+  }
+  if (
+    !moneyAmountsEqual(transaction.amount, {
+      amount: scheduledAmount,
+      commodity: schedule.commodity,
+    })
+  ) {
+    return `recorded amount ${transaction.amount.amount} ${transaction.amount.commodity} differs from configured schedule ${scheduledAmount} ${schedule.commodity}; adjustment review required`;
   }
   return undefined;
 }
@@ -194,7 +206,7 @@ export function generateDepreciationSection(
     const gap =
       live.length > 1
         ? `more than one live transaction recorded for this year (${live.map((t) => t.transactionId).join(", ")}); review required`
-        : reviewGap(transaction, { amount: row.amount, commodity: schedule.commodity });
+        : reviewGap(transaction, schedule, row.amount);
     if (options.mode === "final" && gap !== undefined) {
       result.excluded.push({
         assetId: input.assetId,

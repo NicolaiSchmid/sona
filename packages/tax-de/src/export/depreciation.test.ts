@@ -107,7 +107,9 @@ describe("generateDepreciationSection", () => {
         assetId: "asset_flat",
         year: 2026,
         transactionId: "t_depr",
-        reason: expect.stringContaining("recorded amount 6360.00 EUR (config v1) differs"),
+        reason: expect.stringContaining(
+          "recorded under config v1 (6360.00 EUR); current schedule is v2",
+        ),
       },
     ]);
 
@@ -119,8 +121,40 @@ describe("generateDepreciationSection", () => {
       configVersion: 2,
       status: "user_reviewed",
     });
-    expect(draft.rows[0]?.notes).toContain("differs from configured schedule");
+    expect(draft.rows[0]?.notes).toContain("current schedule is v2");
     expect(draft.rows[0]?.notes).toContain("review required");
+  });
+
+  it("requires a fresh review when the config version changed even if the amount did not", () => {
+    // v2 only renames the expense account; the 2 % amount is identical.
+    const renamed = {
+      ...SAMPLE_DEPRECIATION,
+      schedule: computeDepreciationSchedule({
+        asset: SAMPLE_ASSET,
+        config: {
+          ...SAMPLE_SCHEDULE_CONFIG,
+          id: "cfg_flat_v2",
+          version: 2,
+          expenseAccount: "Expenses:RealEstate:Depreciation:Flat renamed",
+        },
+      }),
+    };
+    const final = generateDepreciationSection([renamed], { year: 2026, mode: "final" });
+    expect(final.rows).toEqual([]);
+    expect(final.excluded[0]?.reason).toContain("recorded under config v1");
+  });
+
+  it("flags a recorded amount that drifted from the same config version", () => {
+    const drifted = {
+      ...SAMPLE_DEPRECIATION,
+      transactions: SAMPLE_DEPRECIATION.transactions.map((t) =>
+        t.year === 2026 ? { ...t, amount: { amount: "6000.00", commodity: "EUR" } } : t,
+      ),
+    };
+    const final = generateDepreciationSection([drifted], { year: 2026, mode: "final" });
+    expect(final.excluded[0]?.reason).toContain(
+      "recorded amount 6000.00 EUR differs from configured schedule 6360.00 EUR",
+    );
   });
 
   it("surfaces a recorded transaction for a year the current schedule no longer covers", () => {

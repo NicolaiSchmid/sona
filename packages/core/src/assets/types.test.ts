@@ -24,6 +24,26 @@ describe("assetSchema", () => {
     expect(badSideCost.success).toBe(false);
   });
 
+  it("rejects impossible calendar dates and duplicate side-cost ids", () => {
+    expect(assetSchema.safeParse({ ...SAMPLE_PROPERTY, acquiredOn: "2026-02-31" }).success).toBe(
+      false,
+    );
+    expect(assetSchema.safeParse({ ...SAMPLE_PROPERTY, acquiredOn: "2024-02-29" }).success).toBe(
+      true,
+    );
+    expect(assetSchema.safeParse({ ...SAMPLE_PROPERTY, acquiredOn: "2023-02-29" }).success).toBe(
+      false,
+    );
+    const [sideCost] = SAMPLE_PROPERTY.acquisitionSideCosts;
+    expect(
+      assetSchema.safeParse({ ...SAMPLE_PROPERTY, acquisitionSideCosts: [sideCost, sideCost] })
+        .success,
+    ).toBe(false);
+    expect(
+      assetEventSchema.safeParse({ ...SAMPLE_IMPROVEMENT, occurredOn: "2026-04-31" }).success,
+    ).toBe(false);
+  });
+
   it("rejects duplicate component ids, negative costs, and malformed dates", () => {
     const [building] = SAMPLE_PROPERTY.components;
     expect(

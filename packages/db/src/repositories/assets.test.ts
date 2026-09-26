@@ -10,11 +10,42 @@ import {
 import { describe, expect, it } from "vitest";
 import { SqliteAssetRepository } from "./assets.js";
 import { SqliteEvidenceLinkRepository } from "./evidence-links.js";
-import { createTestDatabase } from "./test-support.js";
+import { createTestDatabase, type TestDatabase } from "./test-support.js";
+
+/** Evidence documents the fixtures reference, per workspace (document ids are global). */
+const FIXTURE_DOCUMENTS = {
+  ws_1: ["doc_contract", "doc_notary", "doc_bath", "doc_sale"],
+  ws_2: ["doc_contract_ws2", "doc_notary_ws2"],
+} as const;
+
+/** Test database with the fixture documents stored, so evidence ids resolve. */
+function setup(): TestDatabase {
+  const database = createTestDatabase();
+  const insert = database.db.prepare(
+    "INSERT INTO documents (id, workspace_id, content_hash, mime_type, original_filename, storage_uri, source_kind, retention_state, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+  );
+  for (const [workspaceId, ids] of Object.entries(FIXTURE_DOCUMENTS)) {
+    for (const id of ids) {
+      insert.run(
+        id,
+        workspaceId,
+        `hash_${id}`,
+        "application/pdf",
+        `${id}.pdf`,
+        `file://${id}`,
+        "upload",
+        "active",
+        "2026-01-01T00:00:00Z",
+      );
+    }
+  }
+  return database;
+}
 
 const CREATED_AT = "2026-01-01T00:00:00Z";
 
 function property(overrides: Partial<Asset> = {}): Asset {
+  const suffix = overrides.workspaceId === "ws_2" ? "_ws2" : "";
   return {
     id: "asset_flat",
     workspaceId: "ws_1",
@@ -43,10 +74,10 @@ function property(overrides: Partial<Asset> = {}): Asset {
         id: "sc_notary",
         label: "Notary",
         amount: { amount: "24000.00", commodity: "EUR" },
-        evidenceDocumentIds: ["doc_notary"],
+        evidenceDocumentIds: [`doc_notary${suffix}`],
       },
     ],
-    evidenceDocumentIds: ["doc_contract"],
+    evidenceDocumentIds: [`doc_contract${suffix}`],
     createdAt: CREATED_AT,
     ...overrides,
   };
@@ -94,7 +125,7 @@ const disposal: AssetDisposalEvent = {
 
 describe("SqliteAssetRepository", () => {
   it("round-trips an asset with components, side costs, and evidence", async () => {
-    const { db, close } = createTestDatabase();
+    const { db, close } = setup();
     try {
       const repo = new SqliteAssetRepository(db);
       await repo.create(property());
@@ -108,7 +139,7 @@ describe("SqliteAssetRepository", () => {
   });
 
   it("rejects invalid assets at the write boundary", async () => {
-    const { db, close } = createTestDatabase();
+    const { db, close } = setup();
     try {
       const repo = new SqliteAssetRepository(db);
       await expect(
@@ -133,7 +164,7 @@ describe("SqliteAssetRepository", () => {
   });
 
   it("isolates assets, events, configs, and entries by workspace", async () => {
-    const { db, close } = createTestDatabase();
+    const { db, close } = setup();
     try {
       const repo = new SqliteAssetRepository(db);
       await repo.create(property());
@@ -168,7 +199,7 @@ describe("SqliteAssetRepository", () => {
   });
 
   it("keeps asset history append-only and ordered", async () => {
-    const { db, close } = createTestDatabase();
+    const { db, close } = setup();
     try {
       const repo = new SqliteAssetRepository(db);
       await repo.create(property());
@@ -187,7 +218,7 @@ describe("SqliteAssetRepository", () => {
   });
 
   it("round-trips a retraction and rejects one that points outside the asset", async () => {
-    const { db, close } = createTestDatabase();
+    const { db, close } = setup();
     try {
       const repo = new SqliteAssetRepository(db);
       await repo.create(property());
@@ -229,7 +260,7 @@ describe("SqliteAssetRepository", () => {
   });
 
   it("refuses a depreciation entry whose config belongs to a different asset", async () => {
-    const { db, close } = createTestDatabase();
+    const { db, close } = setup();
     try {
       const repo = new SqliteAssetRepository(db);
       await repo.create(property());
@@ -246,7 +277,7 @@ describe("SqliteAssetRepository", () => {
   });
 
   it("lets depreciation draft evidence links pass the evidence endpoint check", async () => {
-    const { db, close } = createTestDatabase();
+    const { db, close } = setup();
     try {
       const repo = new SqliteAssetRepository(db);
       const links = new SqliteEvidenceLinkRepository(db);
@@ -279,8 +310,48 @@ describe("SqliteAssetRepository", () => {
     }
   });
 
+  it("refuses evidence document ids that are not stored in the workspace", async () => {
+    const { db, close } = setup();
+    try {
+      const repo = new SqliteAssetRepository(db);
+      await expect(
+        repo.create(property({ evidenceDocumentIds: ["doc_dangling"] })),
+      ).rejects.toThrow(/evidence document\(s\) not found in workspace: doc_dangling/);
+      // Another workspace's document does not count as evidence here.
+      await expect(
+        repo.create(property({ evidenceDocumentIds: ["doc_contract_ws2"] })),
+      ).rejects.toThrow(/not found in workspace/);
+      expect(await repo.list("ws_1")).toEqual([]);
+      await repo.create(property());
+      await expect(
+        repo.appendEvent({ ...improvement, evidenceDocumentIds: ["doc_bath", "doc_nope"] }),
+      ).rejects.toThrow(/doc_nope/);
+      expect(await repo.listEvents("ws_1", "asset_flat")).toEqual([]);
+    } finally {
+      close();
+    }
+  });
+
+  it("refuses improvements and residual values in a different commodity than the asset", async () => {
+    const { db, close } = setup();
+    try {
+      const repo = new SqliteAssetRepository(db);
+      await repo.create(property());
+      await expect(
+        repo.appendEvent({ ...improvement, amount: { amount: "1.00", commodity: "USD" } }),
+      ).rejects.toThrow(/denominated in USD, expected EUR/);
+      await expect(
+        repo.saveScheduleConfig(config({ residualValue: { amount: "1.00", commodity: "USD" } })),
+      ).rejects.toThrow(/denominated in USD, expected EUR/);
+      expect(await repo.listEvents("ws_1", "asset_flat")).toEqual([]);
+      expect(await repo.listScheduleConfigs("ws_1", "asset_flat")).toEqual([]);
+    } finally {
+      close();
+    }
+  });
+
   it("appends schedule config versions and returns the latest", async () => {
-    const { db, close } = createTestDatabase();
+    const { db, close } = setup();
     try {
       const repo = new SqliteAssetRepository(db);
       await repo.create(property());
@@ -307,7 +378,7 @@ describe("SqliteAssetRepository", () => {
   });
 
   it("records depreciation entries insert-only, idempotent by transaction id", async () => {
-    const { db, close } = createTestDatabase();
+    const { db, close } = setup();
     try {
       const repo = new SqliteAssetRepository(db);
       await repo.create(property());
@@ -366,7 +437,7 @@ describe("SqliteAssetRepository", () => {
   });
 
   it("feeds persisted state into schedule computation and idempotent planning", async () => {
-    const { db, close } = createTestDatabase();
+    const { db, close } = setup();
     try {
       const repo = new SqliteAssetRepository(db);
       await repo.create(property());
@@ -405,7 +476,7 @@ describe("SqliteAssetRepository", () => {
   });
 
   it("rejects an improvement whose component belongs to another workspace at the database", async () => {
-    const { db, close } = createTestDatabase();
+    const { db, close } = setup();
     try {
       const repo = new SqliteAssetRepository(db);
       await repo.create(property());
@@ -452,7 +523,7 @@ describe("SqliteAssetRepository", () => {
   });
 
   it("round-trips a disposal without proceeds", async () => {
-    const { db, close } = createTestDatabase();
+    const { db, close } = setup();
     try {
       const repo = new SqliteAssetRepository(db);
       await repo.create(property());
@@ -471,7 +542,7 @@ describe("SqliteAssetRepository", () => {
   });
 
   it("round-trips a rounding scale of zero and a residual value on the config", async () => {
-    const { db, close } = createTestDatabase();
+    const { db, close } = setup();
     try {
       const repo = new SqliteAssetRepository(db);
       await repo.create(property());
@@ -492,7 +563,7 @@ describe("SqliteAssetRepository", () => {
   });
 
   it("refuses a depreciation entry pointing at an unknown or foreign schedule config", async () => {
-    const { db, close } = createTestDatabase();
+    const { db, close } = setup();
     try {
       const repo = new SqliteAssetRepository(db);
       await repo.create(property());
@@ -520,7 +591,7 @@ describe("SqliteAssetRepository", () => {
   });
 
   it("lists assets ordered by acquisition date, then id", async () => {
-    const { db, close } = createTestDatabase();
+    const { db, close } = setup();
     try {
       const repo = new SqliteAssetRepository(db);
       const withComponents = (id: string, acquiredOn: string): Asset =>
@@ -539,7 +610,7 @@ describe("SqliteAssetRepository", () => {
   });
 
   it("scopes component ids to their asset so two assets in one workspace may share them", async () => {
-    const { db, close } = createTestDatabase();
+    const { db, close } = setup();
     try {
       const repo = new SqliteAssetRepository(db);
       await repo.create(property());
@@ -570,7 +641,7 @@ describe("SqliteAssetRepository", () => {
   });
 
   it("rolls back the asset row when a component insert fails", async () => {
-    const { db, close } = createTestDatabase();
+    const { db, close } = setup();
     try {
       const repo = new SqliteAssetRepository(db);
       // Plant a component row that will collide on (workspace_id, asset_id, id)
@@ -591,7 +662,7 @@ describe("SqliteAssetRepository", () => {
   });
 
   it("refuses a retry that re-describes a known transaction under a different config", async () => {
-    const { db, close } = createTestDatabase();
+    const { db, close } = setup();
     try {
       const repo = new SqliteAssetRepository(db);
       await repo.create(property());
@@ -609,7 +680,7 @@ describe("SqliteAssetRepository", () => {
   });
 
   it("rejects a retraction whose target was recorded in another workspace", async () => {
-    const { db, close } = createTestDatabase();
+    const { db, close } = setup();
     try {
       const repo = new SqliteAssetRepository(db);
       await repo.create(property());
@@ -619,6 +690,7 @@ describe("SqliteAssetRepository", () => {
         id: "evt_ws2",
         workspaceId: "ws_2",
         assetId: "asset_other",
+        evidenceDocumentIds: ["doc_contract_ws2"],
       };
       await repo.appendEvent(foreign);
       // The target lookup is workspace-scoped: ws_1 cannot see, let alone retract, ws_2's event.
@@ -643,7 +715,7 @@ describe("SqliteAssetRepository", () => {
   });
 
   it("verifies the document endpoint of a draft's substantiating links in the workspace", async () => {
-    const { db, close } = createTestDatabase();
+    const { db, close } = setup();
     try {
       const repo = new SqliteAssetRepository(db);
       const links = new SqliteEvidenceLinkRepository(db);
@@ -666,51 +738,21 @@ describe("SqliteAssetRepository", () => {
       db.prepare(
         "INSERT INTO ledger_transactions (id, workspace_id, booked_on, description, review_state, created_at) VALUES (?, ?, ?, ?, ?, ?)",
       ).run(draft.transaction.id, "ws_1", draft.transaction.bookedOn, "draft", "draft", CREATED_AT);
-      const insertDocument = db.prepare(
-        "INSERT INTO documents (id, workspace_id, content_hash, mime_type, original_filename, storage_uri, source_kind, retention_state, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-      );
-
-      // Documents missing entirely: every substantiating link is refused.
-      for (const link of substantiating) {
-        await expect(links.link(link)).rejects.toThrow(
-          new RegExp(`document:${link.fromId} not found in workspace`),
-        );
-      }
-      // A document that exists only in another workspace does not count.
-      insertDocument.run(
-        "doc_ws2_only",
-        "ws_2",
-        "hash_ws2",
-        "application/pdf",
-        "other.pdf",
-        "file://other",
-        "upload",
-        "active",
-        CREATED_AT,
-      );
       const contractLink = substantiating.find((l) => l.fromId === "doc_contract");
       if (contractLink === undefined) {
         throw new Error("expected a link from doc_contract");
       }
+
+      // A document that does not exist, or exists only in another workspace, is refused.
       await expect(
-        links.link({ ...contractLink, id: "link_cross_ws", fromId: "doc_ws2_only" }),
-      ).rejects.toThrow(/document:doc_ws2_only not found in workspace/);
+        links.link({ ...contractLink, id: "link_missing", fromId: "doc_missing" }),
+      ).rejects.toThrow(/document:doc_missing not found in workspace/);
+      await expect(
+        links.link({ ...contractLink, id: "link_cross_ws", fromId: "doc_contract_ws2" }),
+      ).rejects.toThrow(/document:doc_contract_ws2 not found in workspace/);
       expect(await links.listForTransaction("ws_1", draft.transaction.id)).toEqual([]);
 
-      // Once both documents exist in ws_1, every link is created exactly once.
-      for (const [index, documentId] of ["doc_contract", "doc_notary"].entries()) {
-        insertDocument.run(
-          documentId,
-          "ws_1",
-          `hash_${index}`,
-          "application/pdf",
-          `${documentId}.pdf`,
-          `file://${documentId}`,
-          "upload",
-          "active",
-          CREATED_AT,
-        );
-      }
+      // The asset's own documents exist in ws_1, so every link is created exactly once.
       for (const link of substantiating) {
         expect((await links.link(link)).created).toBe(true);
         expect((await links.link(link)).created).toBe(false);

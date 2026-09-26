@@ -17,6 +17,7 @@ import {
   optionalNumber,
   optionalString,
   parseJson,
+  placeholders,
   type Row,
   requiredBoolean,
   requiredLiteral,
@@ -45,6 +46,10 @@ export class SqliteAssetRepository {
     if ((await this.getById(asset.workspaceId, asset.id)) !== undefined) {
       throw new Error("asset already exists in workspace");
     }
+    this.#requireDocuments(asset.workspaceId, [
+      ...asset.evidenceDocumentIds,
+      ...asset.acquisitionSideCosts.flatMap((s) => s.evidenceDocumentIds),
+    ]);
     withTransaction(this.#db, () => {
       this.#db
         .prepare(
@@ -101,12 +106,17 @@ export class SqliteAssetRepository {
   async appendEvent(input: AssetEvent): Promise<void> {
     const event = assetEventSchema.parse(input);
     const asset = await this.#requireAsset(event.workspaceId, event.assetId);
-    if (
-      event.kind === "improvement" &&
-      !asset.components.some((component) => component.id === event.componentId)
-    ) {
-      throw new Error(`component ${event.componentId} does not belong to asset ${asset.id}`);
+    if (event.kind === "improvement") {
+      if (!asset.components.some((component) => component.id === event.componentId)) {
+        throw new Error(`component ${event.componentId} does not belong to asset ${asset.id}`);
+      }
+      if (event.amount.commodity !== asset.commodity) {
+        throw new Error(
+          `improvement ${event.id} is denominated in ${event.amount.commodity}, expected ${asset.commodity}`,
+        );
+      }
     }
+    this.#requireDocuments(event.workspaceId, event.evidenceDocumentIds);
     if (event.kind === "retraction") {
       // A mis-targeted retraction would make every later schedule computation
       // fail, and history is append-only, so refuse it here as core would.
@@ -166,31 +176,47 @@ export class SqliteAssetRepository {
   /** Appends a new configuration version. Existing versions are immutable. */
   async saveScheduleConfig(input: DepreciationScheduleConfig): Promise<void> {
     const config = depreciationScheduleConfigSchema.parse(input);
-    await this.#requireAsset(config.workspaceId, config.assetId);
-    const latest = await this.getLatestScheduleConfig(config.workspaceId, config.assetId);
-    if (latest !== undefined && config.version <= latest.version) {
+    const asset = await this.#requireAsset(config.workspaceId, config.assetId);
+    if (config.residualValue !== undefined && config.residualValue.commodity !== asset.commodity) {
       throw new Error(
-        `schedule config version ${config.version} must exceed latest version ${latest.version}`,
+        `residual value is denominated in ${config.residualValue.commodity}, expected ${asset.commodity}`,
       );
     }
-    this.#db
-      .prepare(
-        "INSERT INTO asset_depreciation_schedules (id, workspace_id, asset_id, version, method_json, pro_rata_temporis, residual_value, residual_commodity, rounding_scale, expense_account, accumulated_depreciation_account, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-      )
-      .run(
-        config.id,
-        config.workspaceId,
-        config.assetId,
-        config.version,
-        JSON.stringify(config.method),
-        config.proRataTemporis ? 1 : 0,
-        config.residualValue?.amount ?? null,
-        config.residualValue?.commodity ?? null,
-        config.roundingScale ?? null,
-        config.expenseAccount,
-        config.accumulatedDepreciationAccount,
-        config.createdAt,
+    // Version check and insert run in one transaction so concurrent appends
+    // cannot both pass the check and land out of order.
+    withTransaction(this.#db, () => {
+      const latest = row(
+        this.#db
+          .prepare(
+            "SELECT version FROM asset_depreciation_schedules WHERE workspace_id = ? AND asset_id = ? ORDER BY version DESC LIMIT 1",
+          )
+          .get(config.workspaceId, config.assetId),
       );
+      const latestVersion = latest === undefined ? 0 : requiredNumber(latest, "version");
+      if (config.version <= latestVersion) {
+        throw new Error(
+          `schedule config version ${config.version} must exceed latest version ${latestVersion}`,
+        );
+      }
+      this.#db
+        .prepare(
+          "INSERT INTO asset_depreciation_schedules (id, workspace_id, asset_id, version, method_json, pro_rata_temporis, residual_value, residual_commodity, rounding_scale, expense_account, accumulated_depreciation_account, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .run(
+          config.id,
+          config.workspaceId,
+          config.assetId,
+          config.version,
+          JSON.stringify(config.method),
+          config.proRataTemporis ? 1 : 0,
+          config.residualValue?.amount ?? null,
+          config.residualValue?.commodity ?? null,
+          config.roundingScale ?? null,
+          config.expenseAccount,
+          config.accumulatedDepreciationAccount,
+          config.createdAt,
+        );
+    });
   }
 
   async getScheduleConfig(
@@ -308,6 +334,28 @@ export class SqliteAssetRepository {
         )
         .all(workspaceId, assetId),
     ).map(entryFromRow);
+  }
+
+  /**
+   * Evidence document ids must name stored documents of the same workspace;
+   * a dangling id would otherwise count as evidence in schedules and exports.
+   */
+  #requireDocuments(workspaceId: string, documentIds: readonly string[]): void {
+    const ids = [...new Set(documentIds)];
+    if (ids.length === 0) {
+      return;
+    }
+    const found = rows(
+      this.#db
+        .prepare(
+          `SELECT id FROM documents WHERE workspace_id = ? AND id IN ${placeholders(ids.length)}`,
+        )
+        .all(workspaceId, ...ids),
+    ).map((r) => requiredString(r, "id"));
+    const missing = ids.filter((id) => !found.includes(id));
+    if (missing.length > 0) {
+      throw new Error(`evidence document(s) not found in workspace: ${missing.join(", ")}`);
+    }
   }
 
   async #requireAsset(workspaceId: string, assetId: string): Promise<Asset> {

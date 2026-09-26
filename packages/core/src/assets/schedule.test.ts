@@ -495,7 +495,13 @@ describe("computeDepreciationSchedule — retractions", () => {
       config: SAMPLE_PROPERTY_CONFIG,
       events: [SAMPLE_IMPROVEMENT, retraction],
     });
-    expect(retracted.rows).toEqual(without.rows);
+    // Amounts match a schedule that never had the improvement; only the
+    // provenance columns differ (the retraction is recorded from 2026 on).
+    const amounts = (s: DepreciationSchedule) =>
+      s.rows.map((r) => [r.year, r.depreciableBasis, r.amount, r.closingBookValue]);
+    expect(amounts(retracted)).toEqual(amounts(without));
+    expect(rowFor(retracted, 2025).appliedEventIds).toEqual([]);
+    expect(rowFor(retracted, 2026).appliedEventIds).toEqual(["evt_retract_bath"]);
   });
 
   it("lets a corrected event follow a retraction", () => {
@@ -513,7 +519,7 @@ describe("computeDepreciationSchedule — retractions", () => {
       ],
     });
     expect(rowFor(corrected, 2026).depreciableBasis).toBe("338000.00");
-    expect(rowFor(corrected, 2026).appliedEventIds).toEqual(["evt_bath_fixed"]);
+    expect(rowFor(corrected, 2026).appliedEventIds).toEqual(["evt_retract_bath", "evt_bath_fixed"]);
   });
 
   it("lets a retracted disposal be replaced and rejects dangling or nested retractions", () => {
@@ -1085,12 +1091,14 @@ describe("computeDepreciationSchedule — retraction provenance", () => {
       events: [SAMPLE_DISPOSAL, retractSale],
     });
     expect(s.disposedOn).toBeUndefined();
-    expect(s.rows).toEqual(plain.rows);
+    expect(s.rows.map((r) => [r.year, r.amount])).toEqual(
+      plain.rows.map((r) => [r.year, r.amount]),
+    );
     expect(s.complete).toBe(true);
     expect(totalOf(s)).toBe("318000.00");
   });
 
-  it("keeps the evidence of a retraction and of the retracted event off every row", () => {
+  it("drops the retracted event but keeps the retraction as provenance from its year on", () => {
     const s = computeDepreciationSchedule({
       asset: SAMPLE_PROPERTY,
       config: SAMPLE_PROPERTY_CONFIG,
@@ -1102,19 +1110,28 @@ describe("computeDepreciationSchedule — retraction provenance", () => {
           ...retractSale,
           id: "evt_retract_bath",
           retractsEventId: "evt_bath_2026",
-          evidenceDocumentIds: ["doc_maintenance_memo"],
+          occurredOn: "2026-09-01",
+          evidenceDocumentIds: [],
         },
       ],
     });
     expect(s.rows.length).toBeGreaterThan(4);
+    const baseEvidence = ["doc_purchase_contract", "doc_transfer_tax", "doc_notary"];
+    // Before any retraction: nothing applied, amounts as if the events never happened.
+    expect(rowFor(s, 2025).appliedEventIds).toEqual([]);
+    expect(rowFor(s, 2025).evidenceDocumentIds).toEqual(baseEvidence);
+    // The retracted improvement never touches basis or evidence, but the
+    // retraction itself is recorded so the removal is explainable.
+    expect(rowFor(s, 2026).depreciableBasis).toBe("318000.00");
+    expect(rowFor(s, 2026).appliedEventIds).toEqual(["evt_retract_bath"]);
+    expect(rowFor(s, 2026).evidenceDocumentIds).toEqual(baseEvidence);
+    expect(rowFor(s, 2027).appliedEventIds).toEqual(["evt_retract_bath", "evt_retract_sale"]);
+    expect(rowFor(s, 2027).evidenceDocumentIds).toEqual([...baseEvidence, "doc_retraction_memo"]);
+    // Retractions carry no cost, so an undocumented retraction is not an evidence gap.
     for (const row of s.rows) {
-      expect(row.appliedEventIds).toEqual([]);
-      expect(row.evidenceDocumentIds).toEqual([
-        "doc_purchase_contract",
-        "doc_transfer_tax",
-        "doc_notary",
-      ]);
       expect(row.missingEvidenceFor).toEqual([]);
+      expect(row.evidenceDocumentIds).not.toContain("doc_bath_invoice");
+      expect(row.evidenceDocumentIds).not.toContain("doc_sale_contract");
     }
   });
 
