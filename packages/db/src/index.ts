@@ -10,6 +10,7 @@
 export const sonaDbVersion = "0.0.0" as const;
 
 export { CORE_MIGRATIONS, type Migration } from "./migrations/index";
+export { type RecordedDepreciationEntry, SqliteAssetRepository } from "./repositories/assets.js";
 export {
   type AuditEventCursor,
   type AuditEventPage,

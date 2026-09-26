@@ -9,6 +9,9 @@
  */
 import type {
   AccountKind,
+  AssetComponentRole,
+  AssetEventKind,
+  AssetKind,
   EvidenceLinkKind,
   JsonValue,
   RawSourceRecordType,
@@ -345,3 +348,79 @@ export const LEDGER_REPOSITORY_TABLES = [
 ] as const;
 
 export type LedgerRepositoryTableName = (typeof LEDGER_REPOSITORY_TABLES)[number];
+
+// --- Assets schema (migrations/0006_assets.sql) -----------------------------
+
+export interface AssetRow {
+  id: string;
+  workspace_id: string;
+  kind: AssetKind;
+  name: string;
+  commodity: string;
+  acquired_on: string;
+  acquisition_side_costs_json: string;
+  evidence_document_ids_json: string;
+  created_at: string;
+}
+
+export interface AssetComponentRow {
+  id: string;
+  workspace_id: string;
+  asset_id: string;
+  position: number;
+  role: AssetComponentRole;
+  label: string;
+  cost: string;
+  depreciable: 0 | 1;
+}
+
+export interface AssetEventRow {
+  id: string;
+  workspace_id: string;
+  asset_id: string;
+  kind: AssetEventKind;
+  component_id: string | null;
+  occurred_on: string;
+  description: string;
+  amount: string | null;
+  commodity: string | null;
+  evidence_document_ids_json: string;
+  created_at: string;
+}
+
+export interface AssetDepreciationScheduleRow {
+  id: string;
+  workspace_id: string;
+  asset_id: string;
+  version: number;
+  method_json: string;
+  pro_rata_temporis: 0 | 1;
+  residual_value: string | null;
+  residual_commodity: string | null;
+  rounding_scale: number | null;
+  expense_account: string;
+  accumulated_depreciation_account: string;
+  created_at: string;
+}
+
+export interface AssetDepreciationEntryRow {
+  id: string;
+  workspace_id: string;
+  asset_id: string;
+  schedule_id: string;
+  year: number;
+  transaction_id: string;
+  amount: string;
+  commodity: string;
+  created_at: string;
+}
+
+export const ASSET_TABLES = [
+  "assets",
+  "asset_components",
+  "asset_events",
+  "asset_depreciation_schedules",
+  "asset_depreciation_entries",
+] as const;
+
+export type AssetTableName = (typeof ASSET_TABLES)[number];

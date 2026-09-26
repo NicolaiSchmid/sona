@@ -1,0 +1,406 @@
+import {
+  type Asset,
+  type AssetComponent,
+  type AssetEvent,
+  acquisitionSideCostSchema,
+  assetEventSchema,
+  assetSchema,
+  type DepreciationScheduleConfig,
+  depreciationMethodSchema,
+  depreciationScheduleConfigSchema,
+  type MoneyAmount,
+} from "@sona/core";
+import type { DbClient } from "../runner.js";
+import { optionalString, requiredNumber, requiredString, row, rows } from "./helpers.js";
+
+/** A generated depreciation transaction recorded for one asset-year. */
+export interface RecordedDepreciationEntry {
+  id: string;
+  workspaceId: string;
+  assetId: string;
+  scheduleId: string;
+  year: number;
+  transactionId: string;
+  amount: MoneyAmount;
+  createdAt: string;
+}
+
+const sideCostsSchema = acquisitionSideCostSchema.array();
+
+/** Parses a stored JSON array of non-empty string ids. */
+function parseStringIds(json: string, column: string): string[] {
+  const parsed: unknown = JSON.parse(json);
+  if (!Array.isArray(parsed) || !parsed.every((v) => typeof v === "string" && v.length > 0)) {
+    throw new Error(`database column ${column} was not a JSON array of ids`);
+  }
+  return parsed;
+}
+
+/**
+ * Workspace-scoped persistence for assets, their append-only history,
+ * versioned schedule configuration, and generated depreciation entries.
+ * Every read and write is keyed by `workspace_id`; the composite foreign keys
+ * in `0006_assets.sql` reject cross-workspace references at the database too.
+ */
+export class SqliteAssetRepository {
+  readonly #db: DbClient;
+
+  constructor(db: DbClient) {
+    this.#db = db;
+  }
+
+  async create(input: Asset): Promise<Asset> {
+    const asset = assetSchema.parse(input);
+    if ((await this.getById(asset.workspaceId, asset.id)) !== undefined) {
+      throw new Error("asset already exists in workspace");
+    }
+    this.#transaction(() => {
+      this.#db
+        .prepare(
+          "INSERT INTO assets (id, workspace_id, kind, name, commodity, acquired_on, acquisition_side_costs_json, evidence_document_ids_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .run(
+          asset.id,
+          asset.workspaceId,
+          asset.kind,
+          asset.name,
+          asset.commodity,
+          asset.acquiredOn,
+          JSON.stringify(asset.acquisitionSideCosts),
+          JSON.stringify(asset.evidenceDocumentIds),
+          asset.createdAt,
+        );
+      const insertComponent = this.#db.prepare(
+        "INSERT INTO asset_components (id, workspace_id, asset_id, position, role, label, cost, depreciable) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+      );
+      for (const [position, component] of asset.components.entries()) {
+        insertComponent.run(
+          component.id,
+          asset.workspaceId,
+          asset.id,
+          position,
+          component.role,
+          component.label,
+          component.cost.amount,
+          component.depreciable ? 1 : 0,
+        );
+      }
+    });
+    return asset;
+  }
+
+  async getById(workspaceId: string, id: string): Promise<Asset | undefined> {
+    const result = row(
+      this.#db
+        .prepare("SELECT * FROM assets WHERE workspace_id = ? AND id = ?")
+        .get(workspaceId, id),
+    );
+    return result === undefined ? undefined : this.#assetFromRow(result);
+  }
+
+  async list(workspaceId: string): Promise<Asset[]> {
+    return rows(
+      this.#db
+        .prepare("SELECT * FROM assets WHERE workspace_id = ? ORDER BY acquired_on, id")
+        .all(workspaceId),
+    ).map((r) => this.#assetFromRow(r));
+  }
+
+  /** Appends an improvement or disposal. Events are never updated or deleted. */
+  async appendEvent(input: AssetEvent): Promise<void> {
+    const event = assetEventSchema.parse(input);
+    await this.#requireAsset(event.workspaceId, event.assetId);
+    const existing = row(
+      this.#db
+        .prepare("SELECT id FROM asset_events WHERE workspace_id = ? AND id = ?")
+        .get(event.workspaceId, event.id),
+    );
+    if (existing !== undefined) {
+      throw new Error("asset events are append-only");
+    }
+    const money = event.kind === "improvement" ? event.amount : event.proceeds;
+    this.#db
+      .prepare(
+        "INSERT INTO asset_events (id, workspace_id, asset_id, kind, component_id, occurred_on, description, amount, commodity, evidence_document_ids_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      )
+      .run(
+        event.id,
+        event.workspaceId,
+        event.assetId,
+        event.kind,
+        event.kind === "improvement" ? event.componentId : null,
+        event.occurredOn,
+        event.description,
+        money?.amount ?? null,
+        money?.commodity ?? null,
+        JSON.stringify(event.evidenceDocumentIds),
+        event.createdAt,
+      );
+  }
+
+  async listEvents(workspaceId: string, assetId: string): Promise<AssetEvent[]> {
+    return rows(
+      this.#db
+        .prepare(
+          "SELECT * FROM asset_events WHERE workspace_id = ? AND asset_id = ? ORDER BY occurred_on, created_at, id",
+        )
+        .all(workspaceId, assetId),
+    ).map(eventFromRow);
+  }
+
+  /** Appends a new configuration version. Existing versions are immutable. */
+  async saveScheduleConfig(input: DepreciationScheduleConfig): Promise<void> {
+    const config = depreciationScheduleConfigSchema.parse(input);
+    await this.#requireAsset(config.workspaceId, config.assetId);
+    const latest = await this.getLatestScheduleConfig(config.workspaceId, config.assetId);
+    if (latest !== undefined && config.version <= latest.version) {
+      throw new Error(
+        `schedule config version ${config.version} must exceed latest version ${latest.version}`,
+      );
+    }
+    this.#db
+      .prepare(
+        "INSERT INTO asset_depreciation_schedules (id, workspace_id, asset_id, version, method_json, pro_rata_temporis, residual_value, residual_commodity, rounding_scale, expense_account, accumulated_depreciation_account, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      )
+      .run(
+        config.id,
+        config.workspaceId,
+        config.assetId,
+        config.version,
+        JSON.stringify(config.method),
+        config.proRataTemporis ? 1 : 0,
+        config.residualValue?.amount ?? null,
+        config.residualValue?.commodity ?? null,
+        config.roundingScale ?? null,
+        config.expenseAccount,
+        config.accumulatedDepreciationAccount,
+        config.createdAt,
+      );
+  }
+
+  async getScheduleConfig(
+    workspaceId: string,
+    id: string,
+  ): Promise<DepreciationScheduleConfig | undefined> {
+    const result = row(
+      this.#db
+        .prepare("SELECT * FROM asset_depreciation_schedules WHERE workspace_id = ? AND id = ?")
+        .get(workspaceId, id),
+    );
+    return result === undefined ? undefined : configFromRow(result);
+  }
+
+  async getLatestScheduleConfig(
+    workspaceId: string,
+    assetId: string,
+  ): Promise<DepreciationScheduleConfig | undefined> {
+    const result = row(
+      this.#db
+        .prepare(
+          "SELECT * FROM asset_depreciation_schedules WHERE workspace_id = ? AND asset_id = ? ORDER BY version DESC LIMIT 1",
+        )
+        .get(workspaceId, assetId),
+    );
+    return result === undefined ? undefined : configFromRow(result);
+  }
+
+  async listScheduleConfigs(
+    workspaceId: string,
+    assetId: string,
+  ): Promise<DepreciationScheduleConfig[]> {
+    return rows(
+      this.#db
+        .prepare(
+          "SELECT * FROM asset_depreciation_schedules WHERE workspace_id = ? AND asset_id = ? ORDER BY version",
+        )
+        .all(workspaceId, assetId),
+    ).map(configFromRow);
+  }
+
+  /**
+   * Records the transaction generated for an asset-year. Idempotent: if the
+   * year is already recorded, the existing entry is returned unchanged and the
+   * new input is ignored — recorded years are never rewritten.
+   */
+  async recordDepreciationEntry(
+    entry: RecordedDepreciationEntry,
+  ): Promise<RecordedDepreciationEntry> {
+    const existing = await this.getDepreciationEntry(entry.workspaceId, entry.assetId, entry.year);
+    if (existing !== undefined) {
+      return existing;
+    }
+    this.#db
+      .prepare(
+        "INSERT INTO asset_depreciation_entries (id, workspace_id, asset_id, schedule_id, year, transaction_id, amount, commodity, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      )
+      .run(
+        entry.id,
+        entry.workspaceId,
+        entry.assetId,
+        entry.scheduleId,
+        entry.year,
+        entry.transactionId,
+        entry.amount.amount,
+        entry.amount.commodity,
+        entry.createdAt,
+      );
+    return entry;
+  }
+
+  async getDepreciationEntry(
+    workspaceId: string,
+    assetId: string,
+    year: number,
+  ): Promise<RecordedDepreciationEntry | undefined> {
+    const result = row(
+      this.#db
+        .prepare(
+          "SELECT * FROM asset_depreciation_entries WHERE workspace_id = ? AND asset_id = ? AND year = ?",
+        )
+        .get(workspaceId, assetId, year),
+    );
+    return result === undefined ? undefined : entryFromRow(result);
+  }
+
+  async listDepreciationEntries(
+    workspaceId: string,
+    assetId: string,
+  ): Promise<RecordedDepreciationEntry[]> {
+    return rows(
+      this.#db
+        .prepare(
+          "SELECT * FROM asset_depreciation_entries WHERE workspace_id = ? AND asset_id = ? ORDER BY year",
+        )
+        .all(workspaceId, assetId),
+    ).map(entryFromRow);
+  }
+
+  async #requireAsset(workspaceId: string, assetId: string): Promise<void> {
+    if ((await this.getById(workspaceId, assetId)) === undefined) {
+      throw new Error("asset not found in workspace");
+    }
+  }
+
+  #assetFromRow(source: Record<string, unknown>): Asset {
+    const workspaceId = requiredString(source, "workspace_id");
+    const id = requiredString(source, "id");
+    const commodity = requiredString(source, "commodity");
+    const components = rows(
+      this.#db
+        .prepare(
+          "SELECT * FROM asset_components WHERE workspace_id = ? AND asset_id = ? ORDER BY position",
+        )
+        .all(workspaceId, id),
+    ).map((r) => componentFromRow(r, commodity));
+    // assetSchema re-validates commodity consistency of the stored side costs.
+    return assetSchema.parse({
+      id,
+      workspaceId,
+      kind: requiredString(source, "kind"),
+      name: requiredString(source, "name"),
+      commodity,
+      acquiredOn: requiredString(source, "acquired_on"),
+      components,
+      acquisitionSideCosts: sideCostsSchema.parse(
+        JSON.parse(requiredString(source, "acquisition_side_costs_json")),
+      ),
+      evidenceDocumentIds: parseStringIds(
+        requiredString(source, "evidence_document_ids_json"),
+        "evidence_document_ids_json",
+      ),
+      createdAt: requiredString(source, "created_at"),
+    });
+  }
+
+  #transaction(work: () => void): void {
+    this.#db.exec("BEGIN");
+    try {
+      work();
+      this.#db.exec("COMMIT");
+    } catch (error) {
+      try {
+        this.#db.exec("ROLLBACK");
+      } catch {
+        // Surface the original write failure.
+      }
+      throw error;
+    }
+  }
+}
+
+/** Components store only the amount; the commodity is asset-level. */
+function componentFromRow(source: Record<string, unknown>, commodity: string): AssetComponent {
+  return {
+    id: requiredString(source, "id"),
+    role: requiredString(source, "role") as AssetComponent["role"],
+    label: requiredString(source, "label"),
+    cost: { amount: requiredString(source, "cost"), commodity },
+    depreciable: requiredNumber(source, "depreciable") === 1,
+  };
+}
+
+function eventFromRow(source: Record<string, unknown>): AssetEvent {
+  const base = {
+    id: requiredString(source, "id"),
+    workspaceId: requiredString(source, "workspace_id"),
+    assetId: requiredString(source, "asset_id"),
+    occurredOn: requiredString(source, "occurred_on"),
+    description: requiredString(source, "description"),
+    evidenceDocumentIds: parseStringIds(
+      requiredString(source, "evidence_document_ids_json"),
+      "evidence_document_ids_json",
+    ),
+    createdAt: requiredString(source, "created_at"),
+  };
+  const amount = optionalString(source, "amount");
+  const commodity = optionalString(source, "commodity");
+  const money = amount === undefined || commodity === undefined ? undefined : { amount, commodity };
+  const kind = requiredString(source, "kind");
+  if (kind === "improvement") {
+    return assetEventSchema.parse({
+      ...base,
+      kind,
+      componentId: requiredString(source, "component_id"),
+      amount: money,
+    });
+  }
+  return assetEventSchema.parse({ ...base, kind, proceeds: money });
+}
+
+function configFromRow(source: Record<string, unknown>): DepreciationScheduleConfig {
+  const residualValue = optionalString(source, "residual_value");
+  const residualCommodity = optionalString(source, "residual_commodity");
+  const roundingScale = source["rounding_scale"];
+  return depreciationScheduleConfigSchema.parse({
+    id: requiredString(source, "id"),
+    workspaceId: requiredString(source, "workspace_id"),
+    assetId: requiredString(source, "asset_id"),
+    version: requiredNumber(source, "version"),
+    method: depreciationMethodSchema.parse(JSON.parse(requiredString(source, "method_json"))),
+    proRataTemporis: requiredNumber(source, "pro_rata_temporis") === 1,
+    residualValue:
+      residualValue === undefined || residualCommodity === undefined
+        ? undefined
+        : { amount: residualValue, commodity: residualCommodity },
+    roundingScale: typeof roundingScale === "number" ? roundingScale : undefined,
+    expenseAccount: requiredString(source, "expense_account"),
+    accumulatedDepreciationAccount: requiredString(source, "accumulated_depreciation_account"),
+    createdAt: requiredString(source, "created_at"),
+  });
+}
+
+function entryFromRow(source: Record<string, unknown>): RecordedDepreciationEntry {
+  return {
+    id: requiredString(source, "id"),
+    workspaceId: requiredString(source, "workspace_id"),
+    assetId: requiredString(source, "asset_id"),
+    scheduleId: requiredString(source, "schedule_id"),
+    year: requiredNumber(source, "year"),
+    transactionId: requiredString(source, "transaction_id"),
+    amount: {
+      amount: requiredString(source, "amount"),
+      commodity: requiredString(source, "commodity"),
+    },
+    createdAt: requiredString(source, "created_at"),
+  };
+}
