@@ -71,31 +71,19 @@ export class SqliteAuthRepository implements AuthStore {
   }
 
   async getUserById(userId: string): Promise<AuthUser | undefined> {
-    const result = row(this.#db.prepare(`${USER_SELECT} WHERE id = ?`).get(userId));
-    return result === undefined ? undefined : userFromRow(result);
+    return this.#one(`${USER_SELECT} WHERE id = ?`, [userId], userFromRow);
   }
 
   async getUserByEmail(email: string): Promise<AuthUser | undefined> {
-    const result = row(this.#db.prepare(`${USER_SELECT} WHERE email = ?`).get(email));
-    return result === undefined ? undefined : userFromRow(result);
+    return this.#one(`${USER_SELECT} WHERE email = ?`, [email], userFromRow);
   }
 
   async getCredential(userId: string): Promise<UserCredential | undefined> {
-    const result = row(
-      this.#db
-        .prepare(
-          "SELECT user_id, password_hash, updated_at FROM user_credentials WHERE user_id = ?",
-        )
-        .get(userId),
+    return this.#one(
+      "SELECT user_id, password_hash, updated_at FROM user_credentials WHERE user_id = ?",
+      [userId],
+      credentialFromRow,
     );
-    if (result === undefined) {
-      return undefined;
-    }
-    return {
-      userId: requiredString(result, "user_id"),
-      passwordHash: requiredString(result, "password_hash"),
-      updatedAt: requiredString(result, "updated_at"),
-    };
   }
 
   async updateCredential(credential: UserCredential): Promise<void> {
@@ -109,11 +97,7 @@ export class SqliteAuthRepository implements AuthStore {
   }
 
   async countUsers(): Promise<number> {
-    const result = row(this.#db.prepare("SELECT COUNT(*) AS count FROM users").get());
-    if (result === undefined) {
-      throw new Error("database did not return a user count");
-    }
-    return requiredNumber(result, "count");
+    return this.#count("SELECT COUNT(*) AS count FROM users", []);
   }
 
   // --- Workspaces and memberships ---------------------------------------------
@@ -136,20 +120,19 @@ export class SqliteAuthRepository implements AuthStore {
     workspaceId: string,
     userId: string,
   ): Promise<WorkspaceMembership | undefined> {
-    const result = row(
-      this.#db
-        .prepare(`${MEMBERSHIP_SELECT} WHERE workspace_id = ? AND user_id = ?`)
-        .get(workspaceId, userId),
+    return this.#one(
+      `${MEMBERSHIP_SELECT} WHERE workspace_id = ? AND user_id = ?`,
+      [workspaceId, userId],
+      membershipFromRow,
     );
-    return result === undefined ? undefined : membershipFromRow(result);
   }
 
   async listMemberships(userId: string): Promise<WorkspaceMembership[]> {
-    return rows(
-      this.#db
-        .prepare(`${MEMBERSHIP_SELECT} WHERE user_id = ? ORDER BY created_at, workspace_id`)
-        .all(userId),
-    ).map(membershipFromRow);
+    return this.#all(
+      `${MEMBERSHIP_SELECT} WHERE user_id = ? ORDER BY created_at, workspace_id`,
+      [userId],
+      membershipFromRow,
+    );
   }
 
   // --- Invites ----------------------------------------------------------------
@@ -175,25 +158,23 @@ export class SqliteAuthRepository implements AuthStore {
   }
 
   async getInviteByTokenHash(tokenHash: string): Promise<WorkspaceInvite | undefined> {
-    const result = row(this.#db.prepare(`${INVITE_SELECT} WHERE token_hash = ?`).get(tokenHash));
-    return result === undefined ? undefined : inviteFromRow(result);
+    return this.#one(`${INVITE_SELECT} WHERE token_hash = ?`, [tokenHash], inviteFromRow);
   }
 
   async getInvite(workspaceId: string, inviteId: string): Promise<WorkspaceInvite | undefined> {
-    const result = row(
-      this.#db
-        .prepare(`${INVITE_SELECT} WHERE workspace_id = ? AND id = ?`)
-        .get(workspaceId, inviteId),
+    return this.#one(
+      `${INVITE_SELECT} WHERE workspace_id = ? AND id = ?`,
+      [workspaceId, inviteId],
+      inviteFromRow,
     );
-    return result === undefined ? undefined : inviteFromRow(result);
   }
 
   async listInvites(workspaceId: string): Promise<WorkspaceInvite[]> {
-    return rows(
-      this.#db
-        .prepare(`${INVITE_SELECT} WHERE workspace_id = ? ORDER BY created_at, id`)
-        .all(workspaceId),
-    ).map(inviteFromRow);
+    return this.#all(
+      `${INVITE_SELECT} WHERE workspace_id = ? ORDER BY created_at, id`,
+      [workspaceId],
+      inviteFromRow,
+    );
   }
 
   async claimInvite(
@@ -235,21 +216,23 @@ export class SqliteAuthRepository implements AuthStore {
   }
 
   async getSessionByTokenHash(tokenHash: string): Promise<AuthSession | undefined> {
-    const result = row(this.#db.prepare(`${SESSION_SELECT} WHERE token_hash = ?`).get(tokenHash));
-    return result === undefined ? undefined : sessionFromRow(result);
+    return this.#one(`${SESSION_SELECT} WHERE token_hash = ?`, [tokenHash], sessionFromRow);
   }
 
   async getSession(userId: string, sessionId: string): Promise<AuthSession | undefined> {
-    const result = row(
-      this.#db.prepare(`${SESSION_SELECT} WHERE user_id = ? AND id = ?`).get(userId, sessionId),
+    return this.#one(
+      `${SESSION_SELECT} WHERE user_id = ? AND id = ?`,
+      [userId, sessionId],
+      sessionFromRow,
     );
-    return result === undefined ? undefined : sessionFromRow(result);
   }
 
   async listSessions(userId: string): Promise<AuthSession[]> {
-    return rows(
-      this.#db.prepare(`${SESSION_SELECT} WHERE user_id = ? ORDER BY created_at, id`).all(userId),
-    ).map(sessionFromRow);
+    return this.#all(
+      `${SESSION_SELECT} WHERE user_id = ? ORDER BY created_at, id`,
+      [userId],
+      sessionFromRow,
+    );
   }
 
   async renewSession(sessionId: string, expiresAt: string, lastSeenAt: string): Promise<void> {
@@ -277,23 +260,11 @@ export class SqliteAuthRepository implements AuthStore {
   // --- TOTP -------------------------------------------------------------------
 
   async getTotpEnrollment(userId: string): Promise<TotpEnrollment | undefined> {
-    const result = row(
-      this.#db
-        .prepare(
-          "SELECT user_id, secret_ciphertext, last_used_step, created_at, confirmed_at FROM user_totp_enrollments WHERE user_id = ?",
-        )
-        .get(userId),
+    return this.#one(
+      "SELECT user_id, secret_ciphertext, last_used_step, created_at, confirmed_at FROM user_totp_enrollments WHERE user_id = ?",
+      [userId],
+      totpEnrollmentFromRow,
     );
-    if (result === undefined) {
-      return undefined;
-    }
-    return {
-      userId: requiredString(result, "user_id"),
-      secretCiphertext: requiredString(result, "secret_ciphertext"),
-      lastUsedStep: requiredNumber(result, "last_used_step"),
-      createdAt: requiredString(result, "created_at"),
-      confirmedAt: optionalString(result, "confirmed_at"),
-    };
   }
 
   async saveTotpEnrollment(enrollment: TotpEnrollment): Promise<void> {
@@ -359,17 +330,10 @@ export class SqliteAuthRepository implements AuthStore {
   }
 
   async countUnusedRecoveryCodes(userId: string): Promise<number> {
-    const result = row(
-      this.#db
-        .prepare(
-          "SELECT COUNT(*) AS count FROM user_recovery_codes WHERE user_id = ? AND used_at IS NULL",
-        )
-        .get(userId),
+    return this.#count(
+      "SELECT COUNT(*) AS count FROM user_recovery_codes WHERE user_id = ? AND used_at IS NULL",
+      [userId],
     );
-    if (result === undefined) {
-      throw new Error("database did not return a recovery code count");
-    }
-    return requiredNumber(result, "count");
   }
 
   // --- API tokens -------------------------------------------------------------
@@ -394,25 +358,23 @@ export class SqliteAuthRepository implements AuthStore {
   }
 
   async getApiTokenByHash(tokenHash: string): Promise<ApiToken | undefined> {
-    const result = row(this.#db.prepare(`${API_TOKEN_SELECT} WHERE token_hash = ?`).get(tokenHash));
-    return result === undefined ? undefined : apiTokenFromRow(result);
+    return this.#one(`${API_TOKEN_SELECT} WHERE token_hash = ?`, [tokenHash], apiTokenFromRow);
   }
 
   async getApiToken(workspaceId: string, tokenId: string): Promise<ApiToken | undefined> {
-    const result = row(
-      this.#db
-        .prepare(`${API_TOKEN_SELECT} WHERE workspace_id = ? AND id = ?`)
-        .get(workspaceId, tokenId),
+    return this.#one(
+      `${API_TOKEN_SELECT} WHERE workspace_id = ? AND id = ?`,
+      [workspaceId, tokenId],
+      apiTokenFromRow,
     );
-    return result === undefined ? undefined : apiTokenFromRow(result);
   }
 
   async listApiTokens(workspaceId: string): Promise<ApiToken[]> {
-    return rows(
-      this.#db
-        .prepare(`${API_TOKEN_SELECT} WHERE workspace_id = ? ORDER BY created_at, id`)
-        .all(workspaceId),
-    ).map(apiTokenFromRow);
+    return this.#all(
+      `${API_TOKEN_SELECT} WHERE workspace_id = ? ORDER BY created_at, id`,
+      [workspaceId],
+      apiTokenFromRow,
+    );
   }
 
   async touchApiToken(tokenId: string, lastUsedAt: string): Promise<void> {
@@ -427,6 +389,24 @@ export class SqliteAuthRepository implements AuthStore {
   }
 
   // --- Internals --------------------------------------------------------------
+
+  #one<T>(sql: string, params: DbValue[], map: (source: Row) => T): T | undefined {
+    const result = row(this.#db.prepare(sql).get(...params));
+    return result === undefined ? undefined : map(result);
+  }
+
+  #all<T>(sql: string, params: DbValue[], map: (source: Row) => T): T[] {
+    return rows(this.#db.prepare(sql).all(...params)).map(map);
+  }
+
+  /** Runs a `SELECT COUNT(*) AS count ...` statement. */
+  #count(sql: string, params: DbValue[]): number {
+    const result = row(this.#db.prepare(sql).get(...params));
+    if (result === undefined) {
+      throw new Error("database did not return a count");
+    }
+    return requiredNumber(result, "count");
+  }
 
   /** Runs a statement and reports whether at least one row changed. */
   #run(sql: string, params: DbValue[]): boolean {
@@ -447,6 +427,14 @@ function userFromRow(source: Row): AuthUser {
     id: requiredString(source, "id"),
     email: requiredString(source, "email"),
     createdAt: requiredString(source, "created_at"),
+  };
+}
+
+function credentialFromRow(source: Row): UserCredential {
+  return {
+    userId: requiredString(source, "user_id"),
+    passwordHash: requiredString(source, "password_hash"),
+    updatedAt: requiredString(source, "updated_at"),
   };
 }
 
@@ -486,6 +474,16 @@ function sessionFromRow(source: Row): AuthSession {
     lastSeenAt: requiredString(source, "last_seen_at"),
     revokedAt: optionalString(source, "revoked_at"),
     clientLabel: optionalString(source, "client_label"),
+  };
+}
+
+function totpEnrollmentFromRow(source: Row): TotpEnrollment {
+  return {
+    userId: requiredString(source, "user_id"),
+    secretCiphertext: requiredString(source, "secret_ciphertext"),
+    lastUsedStep: requiredNumber(source, "last_used_step"),
+    createdAt: requiredString(source, "created_at"),
+    confirmedAt: optionalString(source, "confirmed_at"),
   };
 }
 

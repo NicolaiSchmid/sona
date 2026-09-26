@@ -14,7 +14,6 @@ import {
   can,
   createApiTokenAccess,
   createSessionAccess,
-  ROLE_GRANTS,
   SCOPE_GRANTS,
   type WorkspaceAccess,
 } from "./authorization.js";
@@ -436,18 +435,16 @@ export class AuthService {
       }
       throw new AuthError(code);
     };
-    const hash = hashTokenOfKind(token, "invite");
-    const invite = hash === undefined ? undefined : await this.#store.getInviteByTokenHash(hash);
-    if (invite === undefined || hash === undefined || !constantTimeEqual(invite.tokenHash, hash)) {
-      return fail("invite_invalid");
-    }
-    if (invite.revokedAt !== undefined) {
+    const invite = await findByToken(token, "invite", (hash) =>
+      this.#store.getInviteByTokenHash(hash),
+    );
+    if (invite === undefined || invite.revokedAt !== undefined) {
       return fail("invite_invalid");
     }
     if (invite.acceptedAt !== undefined) {
       return fail("invite_used");
     }
-    if (Date.parse(invite.expiresAt) <= now.getTime()) {
+    if (isExpired(invite.expiresAt, now)) {
       return fail("invite_expired");
     }
     return invite;
@@ -585,9 +582,7 @@ export class AuthService {
       userId,
       tokenHash: hashToken(token),
       createdAt: now.toISOString(),
-      expiresAt: new Date(
-        Math.min(now.getTime() + this.#sessionPolicy.idleTtlMs, absoluteExpiresAt),
-      ).toISOString(),
+      expiresAt: this.#slidingExpiry(now, absoluteExpiresAt),
       absoluteExpiresAt: new Date(absoluteExpiresAt).toISOString(),
       lastSeenAt: now.toISOString(),
       revokedAt: undefined,
@@ -600,16 +595,10 @@ export class AuthService {
   /** Validates a session token, applies sliding renewal, and returns the user. */
   async resolveSession(token: string): Promise<AuthenticatedSession> {
     const now = this.#now();
-    const hash = hashTokenOfKind(token, "session");
-    const session = hash === undefined ? undefined : await this.#store.getSessionByTokenHash(hash);
-    if (
-      session === undefined ||
-      hash === undefined ||
-      !constantTimeEqual(session.tokenHash, hash) ||
-      session.revokedAt !== undefined ||
-      Date.parse(session.expiresAt) <= now.getTime() ||
-      Date.parse(session.absoluteExpiresAt) <= now.getTime()
-    ) {
+    const session = await findByToken(token, "session", (hash) =>
+      this.#store.getSessionByTokenHash(hash),
+    );
+    if (session === undefined || !isSessionActive(session, now)) {
       throw new AuthError("session_invalid");
     }
     const user = await this.#store.getUserById(session.userId);
@@ -618,30 +607,22 @@ export class AuthService {
     }
     let current = session;
     if (now.getTime() - Date.parse(session.lastSeenAt) >= this.#sessionPolicy.renewIntervalMs) {
-      const expiresAt = new Date(
-        Math.min(
-          now.getTime() + this.#sessionPolicy.idleTtlMs,
-          Date.parse(session.absoluteExpiresAt),
-        ),
-      ).toISOString();
+      const expiresAt = this.#slidingExpiry(now, Date.parse(session.absoluteExpiresAt));
       await this.#store.renewSession(session.id, expiresAt, now.toISOString());
       current = { ...session, expiresAt, lastSeenAt: now.toISOString() };
     }
     return { user, session: stripHash(current) };
   }
 
+  /** Idempotent: unknown or already-revoked tokens are silently ignored. */
   async logout(token: string): Promise<void> {
-    const now = this.#timestamp();
-    const hash = hashTokenOfKind(token, "session");
-    const session = hash === undefined ? undefined : await this.#store.getSessionByTokenHash(hash);
-    if (
-      session === undefined ||
-      hash === undefined ||
-      !constantTimeEqual(session.tokenHash, hash)
-    ) {
+    const session = await findByToken(token, "session", (hash) =>
+      this.#store.getSessionByTokenHash(hash),
+    );
+    if (session === undefined) {
       return;
     }
-    if (await this.#store.revokeSession(session.userId, session.id, now)) {
+    if (await this.#store.revokeSession(session.userId, session.id, this.#timestamp())) {
       await this.#recordForUser(session.userId, {
         action: "auth.logout",
         actor: session.userId,
@@ -653,16 +634,9 @@ export class AuthService {
 
   /** Active (unrevoked, unexpired) sessions of the signed-in user. */
   async listSessions(session: AuthenticatedSession): Promise<SessionView[]> {
-    const now = this.#now().getTime();
+    const now = this.#now();
     const sessions = await this.#store.listSessions(session.user.id);
-    return sessions
-      .filter(
-        (entry) =>
-          entry.revokedAt === undefined &&
-          Date.parse(entry.expiresAt) > now &&
-          Date.parse(entry.absoluteExpiresAt) > now,
-      )
-      .map(stripHash);
+    return sessions.filter((entry) => isSessionActive(entry, now)).map(stripHash);
   }
 
   async revokeSession(input: { session: AuthenticatedSession; sessionId: string }): Promise<void> {
@@ -706,7 +680,7 @@ export class AuthService {
     return createSessionAccess({
       membership,
       sessionId: input.session.session.id,
-      ...(input.requestId === undefined ? {} : { requestId: input.requestId }),
+      requestId: input.requestId,
     });
   }
 
@@ -831,7 +805,7 @@ export class AuthService {
     assertCan(access, "read");
     const scopes = uniqueScopes(input.scopes);
     for (const scope of scopes) {
-      if (!SCOPE_GRANTS[scope].every((action) => ROLE_GRANTS[access.role].includes(action))) {
+      if (!SCOPE_GRANTS[scope].every((action) => can(access, action))) {
         throw new AuthError("invalid_scope", [scope]);
       }
     }
@@ -879,15 +853,10 @@ export class AuthService {
     options: { requestId?: string } = {},
   ): Promise<WorkspaceAccess> {
     const now = this.#now();
-    const hash = hashTokenOfKind(secret, "apiToken");
-    const token = hash === undefined ? undefined : await this.#store.getApiTokenByHash(hash);
-    if (
-      token === undefined ||
-      hash === undefined ||
-      !constantTimeEqual(token.tokenHash, hash) ||
-      token.revokedAt !== undefined ||
-      Date.parse(token.expiresAt) <= now.getTime()
-    ) {
+    const token = await findByToken(secret, "apiToken", (hash) =>
+      this.#store.getApiTokenByHash(hash),
+    );
+    if (token === undefined || token.revokedAt !== undefined || isExpired(token.expiresAt, now)) {
       throw new AuthError("api_token_invalid");
     }
     const membership = await this.#store.getMembership(token.workspaceId, token.createdByUserId);
@@ -904,7 +873,7 @@ export class AuthService {
       membership,
       tokenId: token.id,
       scopes: token.scopes,
-      ...(options.requestId === undefined ? {} : { requestId: options.requestId }),
+      requestId: options.requestId,
     });
   }
 
@@ -912,10 +881,9 @@ export class AuthService {
   async listApiTokens(access: WorkspaceAccess): Promise<ApiTokenView[]> {
     assertCan(access, "read");
     const tokens = await this.#store.listApiTokens(access.context.workspaceId);
+    const seesAll = can(access, "admin");
     const userId = access.context.userId;
-    return tokens
-      .filter((token) => can(access, "admin") || token.createdByUserId === userId)
-      .map(stripHash);
+    return tokens.filter((token) => seesAll || token.createdByUserId === userId).map(stripHash);
   }
 
   /** The creator or an admin may revoke; agent tokens cannot revoke tokens. */
@@ -948,6 +916,13 @@ export class AuthService {
 
   #timestamp(): string {
     return this.#now().toISOString();
+  }
+
+  /** Idle expiry from `now`, never past the session's absolute cap. */
+  #slidingExpiry(now: Date, absoluteExpiresAtMs: number): string {
+    return new Date(
+      Math.min(now.getTime() + this.#sessionPolicy.idleTtlMs, absoluteExpiresAtMs),
+    ).toISOString();
   }
 
   #dummyPasswordHash(): Promise<string> {
@@ -1001,8 +976,34 @@ export class AuthService {
   }
 }
 
-function hashTokenOfKind(token: string, kind: TokenKind): string | undefined {
-  return token.startsWith(TOKEN_PREFIXES[kind]) ? hashToken(token) : undefined;
+/**
+ * Looks a bearer token up by its digest. The store already keys on the hash;
+ * the constant-time re-compare is defence in depth against a lookup that
+ * matches loosely (collation, trimming) and keeps the reject path timing-flat.
+ */
+async function findByToken<T extends { tokenHash: string }>(
+  token: string,
+  kind: TokenKind,
+  lookup: (hash: string) => Promise<T | undefined>,
+): Promise<T | undefined> {
+  if (!token.startsWith(TOKEN_PREFIXES[kind])) {
+    return undefined;
+  }
+  const hash = hashToken(token);
+  const record = await lookup(hash);
+  return record !== undefined && constantTimeEqual(record.tokenHash, hash) ? record : undefined;
+}
+
+function isExpired(isoTimestamp: string, now: Date): boolean {
+  return Date.parse(isoTimestamp) <= now.getTime();
+}
+
+function isSessionActive(session: AuthSession, now: Date): boolean {
+  return (
+    session.revokedAt === undefined &&
+    !isExpired(session.expiresAt, now) &&
+    !isExpired(session.absoluteExpiresAt, now)
+  );
 }
 
 function stripHash<T extends { tokenHash: string }>(record: T): Omit<T, "tokenHash"> {

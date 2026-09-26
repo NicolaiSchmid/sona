@@ -92,11 +92,7 @@ export function createSessionAccess(input: {
   requestId?: string;
 }): WorkspaceAccess {
   return Object.freeze({
-    context: createWorkspaceContext({
-      workspaceId: input.membership.workspaceId,
-      userId: input.membership.userId,
-      ...(input.requestId === undefined ? {} : { requestId: input.requestId }),
-    }),
+    context: accessContext(input.membership, input.requestId),
     role: input.membership.role,
     principal: Object.freeze({ kind: "session", sessionId: input.sessionId }),
     grants: grantsForRole(input.membership.role),
@@ -110,13 +106,21 @@ export function createApiTokenAccess(input: {
   requestId?: string;
 }): WorkspaceAccess {
   return Object.freeze({
-    context: createWorkspaceContext({
-      workspaceId: input.membership.workspaceId,
-      userId: input.membership.userId,
-      ...(input.requestId === undefined ? {} : { requestId: input.requestId }),
-    }),
+    context: accessContext(input.membership, input.requestId),
     role: input.membership.role,
     principal: Object.freeze({ kind: "api_token", tokenId: input.tokenId, scopes: input.scopes }),
     grants: grantsForScopes(input.scopes, input.membership.role),
   } satisfies WorkspaceAccess);
+}
+
+/** `requestId` is omitted rather than set to `undefined` so the frozen context has no phantom keys. */
+function accessContext(
+  membership: WorkspaceMembership,
+  requestId: string | undefined,
+): WorkspaceContext {
+  return createWorkspaceContext({
+    workspaceId: membership.workspaceId,
+    userId: membership.userId,
+    ...(requestId === undefined ? {} : { requestId }),
+  });
 }
