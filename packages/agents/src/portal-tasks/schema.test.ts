@@ -3,7 +3,12 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { parse } from "yaml";
 import { syntheticReferencePortalTask } from "./definitions/synthetic-reference-portal.js";
-import { parsePortalTask, safeParsePortalTask } from "./schema.js";
+import {
+  PORTAL_EXCEPTION_HTTP_METHODS,
+  parsePortalTask,
+  portalTaskStepSchema,
+  safeParsePortalTask,
+} from "./schema.js";
 
 function loadFixture(): unknown {
   const path = fileURLToPath(
@@ -140,5 +145,174 @@ describe("portalTaskSchema", () => {
         steps: [{ kind: "navigate", url: "http://localhost:3000/login" }],
       }).success,
     ).toBe(true);
+  });
+
+  it("only ever justifies POST as a non-idempotent method", () => {
+    expect(PORTAL_EXCEPTION_HTTP_METHODS).toEqual(["POST"]);
+  });
+
+  it("rejects every userinfo form in navigation URLs", () => {
+    const raw = loadFixture() as Record<string, unknown>;
+    const navigate = (url: string) =>
+      safeParsePortalTask({ ...raw, steps: [{ kind: "navigate", url }] }).success;
+
+    expect(navigate("https://:pw@amazon.de/login")).toBe(false);
+    expect(navigate("https://user@amazon.de/login")).toBe(false);
+    expect(navigate("https://user:@amazon.de/login")).toBe(false);
+    expect(navigate("https://amazon.de/login?next=user@example.test")).toBe(true);
+  });
+
+  it("rejects exception endpoints with destructive intent in path or query", () => {
+    const raw = loadFixture() as Record<string, unknown>;
+    const exception = (urlPattern: string) =>
+      safeParsePortalTask({
+        ...raw,
+        httpMethodExceptions: [
+          {
+            method: "POST",
+            urlPattern,
+            reason: "search",
+            justification: "Invoice search form posts its filter before listing results.",
+          },
+        ],
+      });
+
+    expect(exception("https://amazon.de/orders/cancel").success).toBe(false);
+    expect(exception("https://amazon.de/api?do=refund").success).toBe(false);
+    expect(exception("https://amazon.de/account/payment-method").success).toBe(false);
+    expect(exception("https://amazon.de/Orders/DELETE").success).toBe(false);
+    // Only the path and query are inspected; the host is bound by the allowlist.
+    expect(exception("https://pay.amazon.de/invoices/search").success).toBe(true);
+    // "payments" is not the forbidden token "pay".
+    expect(exception("https://amazon.de/payments/invoices/search").success).toBe(true);
+
+    const failure = exception("https://amazon.de/api?do=refund");
+    if (failure.success) {
+      throw new Error("expected refund endpoint to be rejected");
+    }
+    expect(failure.error.issues[0]?.path).toEqual(["httpMethodExceptions", 0, "urlPattern"]);
+  });
+
+  it("requires a strict exception shape with a meaningful justification", () => {
+    const raw = loadFixture() as Record<string, unknown>;
+    const exception = (overrides: Record<string, unknown>) =>
+      safeParsePortalTask({
+        ...raw,
+        httpMethodExceptions: [
+          {
+            method: "POST",
+            urlPattern: "https://amazon.de/login",
+            reason: "login",
+            justification: "Portal login requires POST before read-only invoice access.",
+            ...overrides,
+          },
+        ],
+      }).success;
+
+    expect(exception({})).toBe(true);
+    expect(exception({ justification: "short" })).toBe(false);
+    expect(exception({ justification: "           x           " })).toBe(false);
+    expect(exception({ reason: "checkout" })).toBe(false);
+    expect(exception({ extra: true })).toBe(false);
+  });
+
+  it("accepts an optional boolean sensitive flag on every step kind", () => {
+    const raw = loadFixture() as Record<string, unknown>;
+    const withSteps = (steps: unknown[]) => safeParsePortalTask({ ...raw, steps });
+
+    const accepted = withSteps([
+      { kind: "navigate", url: "https://amazon.de/login", sensitive: true },
+      { kind: "fill", selector: "#pw", credentialKey: "password", sensitive: true },
+      { kind: "click", selector: "button.login", sensitive: false },
+      { kind: "waitForSelector", selector: "#list" },
+      { kind: "downloadLinks", selector: "a.pdf" },
+    ]);
+    if (!accepted.success) {
+      throw new Error(accepted.error.message);
+    }
+    expect(accepted.data.steps.map((step) => step.sensitive)).toEqual([
+      true,
+      true,
+      false,
+      undefined,
+      undefined,
+    ]);
+    expect(
+      withSteps([{ kind: "navigate", url: "https://amazon.de/login", sensitive: "yes" }]).success,
+    ).toBe(false);
+  });
+
+  it("applies downloadLinks defaults and rejects empty attribute names", () => {
+    const parsed = portalTaskStepSchema.parse({ kind: "downloadLinks", selector: "a.pdf" });
+    if (parsed.kind !== "downloadLinks") {
+      throw new Error("expected a downloadLinks step");
+    }
+
+    expect(parsed.hrefAttribute).toBe("href");
+    expect(parsed.mimeType).toBe("application/pdf");
+    expect(parsed.filenameAttribute).toBeUndefined();
+    expect(
+      portalTaskStepSchema.safeParse({
+        kind: "downloadLinks",
+        selector: "a.pdf",
+        hrefAttribute: "",
+      }).success,
+    ).toBe(false);
+    expect(
+      portalTaskStepSchema.safeParse({ kind: "downloadLinks", selector: "a.pdf", mimeType: "" })
+        .success,
+    ).toBe(false);
+    expect(portalTaskStepSchema.safeParse({ kind: "downloadLinks", selector: "" }).success).toBe(
+      false,
+    );
+  });
+
+  it("requires waitForSelector.timeoutMs to be a positive integer when present", () => {
+    const wait = (timeoutMs: unknown) =>
+      portalTaskStepSchema.safeParse({ kind: "waitForSelector", selector: "#list", timeoutMs })
+        .success;
+
+    expect(wait(undefined)).toBe(true);
+    expect(wait(1)).toBe(true);
+    expect(wait(30_000)).toBe(true);
+    expect(wait(0)).toBe(false);
+    expect(wait(-1)).toBe(false);
+    expect(wait(1.5)).toBe(false);
+    expect(wait("1000")).toBe(false);
+  });
+
+  it("rejects fill steps without a credential key and unknown step kinds", () => {
+    expect(portalTaskStepSchema.safeParse({ kind: "fill", selector: "#pw" }).success).toBe(false);
+    expect(
+      portalTaskStepSchema.safeParse({ kind: "fill", selector: "#pw", credentialKey: "" }).success,
+    ).toBe(false);
+    expect(portalTaskStepSchema.safeParse({ kind: "evaluate", script: "1" }).success).toBe(false);
+  });
+
+  it("preserves the synthetic reference task's sensitive flags and login exception", () => {
+    const parsed = parsePortalTask(syntheticReferencePortalTask);
+
+    expect(parsed.steps.map((step) => step.sensitive ?? false)).toEqual([
+      true,
+      false,
+      true,
+      false,
+      false,
+      false,
+    ]);
+    expect(parsed.httpMethodExceptions).toEqual([
+      expect.objectContaining({
+        method: "POST",
+        urlPattern: "https://portal.test/login",
+        reason: "login",
+      }),
+    ]);
+    const download = parsed.steps.at(-1);
+    expect(download).toMatchObject({
+      kind: "downloadLinks",
+      hrefAttribute: "href",
+      filenameAttribute: "data-filename",
+      mimeType: "application/pdf",
+    });
   });
 });

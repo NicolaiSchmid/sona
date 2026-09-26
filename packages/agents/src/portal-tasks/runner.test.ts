@@ -50,4 +50,27 @@ describe("FakePortalTaskRunner", () => {
     expect(result.documents).toEqual([]);
     expect(result.errors.join(" ")).toContain("cancel");
   });
+
+  it("marks a destructive task policy_refused while still returning run provenance", async () => {
+    const unsafe: PortalTask = {
+      ...safeTask,
+      allowedActions: ["download_invoice_pdf", "purchase"],
+    };
+    const result = await new FakePortalTaskRunner().runTask(input(unsafe));
+
+    expect(result.status).toBe("policy_refused");
+    expect(result.errors).toEqual(['refused: action "purchase" implies purchase']);
+    expect(result.documents).toEqual([]);
+    expect(result.storedDocuments).toEqual([]);
+    expect(result.provenance).toMatchObject({
+      runId: "run_1",
+      taskId: "amazon-de-invoices",
+      taskVersion: 1,
+      portalDomain: "amazon.de",
+      browserProvider: "fake",
+      workspaceId: "ws_1",
+      blockedRequests: [],
+      allowedNonIdempotentRequests: [],
+    });
+  });
 });
