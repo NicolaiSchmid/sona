@@ -20,6 +20,7 @@ import {
   requiredString,
   row,
   rows,
+  withTransaction,
 } from "./helpers.js";
 
 /**
@@ -40,7 +41,7 @@ export class SqliteAssetRepository {
     if ((await this.getById(asset.workspaceId, asset.id)) !== undefined) {
       throw new Error("asset already exists in workspace");
     }
-    this.#transaction(() => {
+    withTransaction(this.#db, () => {
       this.#db
         .prepare(
           "INSERT INTO assets (id, workspace_id, kind, name, commodity, acquired_on, acquisition_side_costs_json, evidence_document_ids_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -337,21 +338,6 @@ export class SqliteAssetRepository {
       evidenceDocumentIds: parseJson(requiredString(source, "evidence_document_ids_json")),
       createdAt: requiredString(source, "created_at"),
     });
-  }
-
-  #transaction(work: () => void): void {
-    this.#db.exec("BEGIN");
-    try {
-      work();
-      this.#db.exec("COMMIT");
-    } catch (error) {
-      try {
-        this.#db.exec("ROLLBACK");
-      } catch {
-        // Surface the original write failure.
-      }
-      throw error;
-    }
   }
 }
 
