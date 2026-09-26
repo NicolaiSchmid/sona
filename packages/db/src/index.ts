@@ -11,7 +11,6 @@ export const sonaDbVersion = "0.0.0" as const;
 
 export { CORE_MIGRATIONS, type Migration } from "./migrations/index";
 export {
-  type AuditEvent,
   type AuditEventCursor,
   type AuditEventPage,
   type ListAuditEventsOptions,
@@ -30,10 +29,7 @@ export {
   type StoredDocumentExtraction,
 } from "./repositories/documents.js";
 export {
-  EVIDENCE_RECORD_TYPES,
-  type EvidenceRecordType,
   type LinkEvidenceResult,
-  type RecordRef,
   SqliteEvidenceLinkRepository,
 } from "./repositories/evidence-links.js";
 export { withTransaction, withTransactionAsync } from "./repositories/helpers.js";
@@ -59,6 +55,7 @@ export {
 export { SqliteMatchCandidateRepository } from "./repositories/matches.js";
 export { SqlitePortalTaskRunRepository } from "./repositories/portal-task-runs.js";
 export { SqliteRawRecordRepository } from "./repositories/raw-records.js";
+export { RECORD_TYPES, type RecordRef, type RecordType } from "./repositories/records.js";
 export { reviewEventId, SqliteReviewEventRepository } from "./repositories/review-events.js";
 export {
   type ReviewTransitionInput,

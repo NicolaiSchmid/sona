@@ -1,7 +1,20 @@
 import type { MoneyAmount } from "../money/types";
 import type { ReviewState } from "../review/types";
 
-export type AccountKind = "asset" | "liability" | "equity" | "income" | "expense" | "suspense";
+export const ACCOUNT_KINDS = [
+  "asset",
+  "liability",
+  "equity",
+  "income",
+  "expense",
+  "suspense",
+] as const;
+
+export type AccountKind = (typeof ACCOUNT_KINDS)[number];
+
+export function isAccountKind(value: string): value is AccountKind {
+  return (ACCOUNT_KINDS as readonly string[]).includes(value);
+}
 
 export interface LedgerAccount {
   id: string;

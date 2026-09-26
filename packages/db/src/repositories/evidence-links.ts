@@ -11,21 +11,7 @@
 import { type EvidenceLink, evidenceLinkSchema, isEvidenceLinkKind } from "@sona/core";
 import type { DbClient } from "../runner.js";
 import { optionalString, type Row, requiredLiteral, requiredString, row, rows } from "./helpers.js";
-
-/** Record type names used on evidence link and review event endpoints across Sona. */
-export const EVIDENCE_RECORD_TYPES = {
-  ledgerTransaction: "ledger_transaction",
-  ledgerPosting: "ledger_posting",
-  document: "document",
-  rawSourceRecord: "raw_source_record",
-  bankTransaction: "bank_transaction",
-  matchDecision: "match_decision",
-  reviewEvent: "review_event",
-  reviewItem: "review_item",
-  taxExportLine: "tax_export_line",
-} as const;
-
-export type EvidenceRecordType = (typeof EVIDENCE_RECORD_TYPES)[keyof typeof EVIDENCE_RECORD_TYPES];
+import { RECORD_TYPES, type RecordRef, type RecordType } from "./records.js";
 
 /** Tables backing the endpoint types that can be verified; the rest are trusted as-is. */
 const ENDPOINT_TABLES = {
@@ -37,16 +23,12 @@ const ENDPOINT_TABLES = {
   match_decision: "match_decisions",
   review_event: "review_events",
   review_item: "review_items",
-} as const satisfies Partial<Record<EvidenceRecordType, string>>;
+} as const satisfies Partial<Record<RecordType, string>>;
 
 function endpointTable(type: string): string | undefined {
-  return (ENDPOINT_TABLES as Readonly<Record<string, string | undefined>>)[type];
-}
-
-/** A polymorphic reference to any domain record. */
-export interface RecordRef {
-  type: string;
-  id: string;
+  return Object.hasOwn(ENDPOINT_TABLES, type)
+    ? (ENDPOINT_TABLES as Readonly<Record<string, string>>)[type]
+    : undefined;
 }
 
 export interface LinkEvidenceResult {
@@ -120,16 +102,13 @@ export class SqliteEvidenceLinkRepository {
 
   async listForTransaction(workspaceId: string, transactionId: string): Promise<EvidenceLink[]> {
     return this.listForRecord(workspaceId, {
-      type: EVIDENCE_RECORD_TYPES.ledgerTransaction,
+      type: RECORD_TYPES.ledgerTransaction,
       id: transactionId,
     });
   }
 
   async listForDocument(workspaceId: string, documentId: string): Promise<EvidenceLink[]> {
-    return this.listForRecord(workspaceId, {
-      type: EVIDENCE_RECORD_TYPES.document,
-      id: documentId,
-    });
+    return this.listForRecord(workspaceId, { type: RECORD_TYPES.document, id: documentId });
   }
 
   #assertEndpointExists(workspaceId: string, endpoint: RecordRef): void {

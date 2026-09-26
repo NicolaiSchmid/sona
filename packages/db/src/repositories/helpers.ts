@@ -80,14 +80,6 @@ export function stringifyJson(value: JsonValue): string {
   return JSON.stringify(value);
 }
 
-export function nullToUndefined(value: string | null): string | undefined {
-  return value ?? undefined;
-}
-
-export function undefinedToNull(value: string | undefined): string | null {
-  return value ?? null;
-}
-
 /** Builds a `(?, ?, ...)` placeholder list for a parameterized `IN` clause. */
 export function placeholders(count: number): string {
   return `(${Array.from({ length: count }, () => "?").join(", ")})`;
@@ -95,7 +87,11 @@ export function placeholders(count: number): string {
 
 // --- Transactions -----------------------------------------------------------
 
-/** Nesting depth per executor: depth 0 opens a real transaction, deeper levels use savepoints. */
+/**
+ * Nesting depth per executor: depth 0 opens a real transaction, deeper levels
+ * use savepoints. Keyed by the executor object, so use one `DbClient` per
+ * connection — two wrappers over the same connection cannot see each other.
+ */
 const transactionDepth = new WeakMap<SqlExecutor, number>();
 
 interface TransactionScope {

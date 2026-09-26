@@ -179,10 +179,19 @@ describe("core migrations", () => {
         CORE_MIGRATIONS.filter((migration) => migration.id >= "0004"),
       );
 
-      const remaining = db.prepare("SELECT id FROM evidence_links ORDER BY id").all() as Array<{
-        id: string;
-      }>;
-      expect(remaining.map((r) => r.id)).toEqual(["el_early", "el_tie_a"]);
+      const remainingIds = () =>
+        (
+          db.prepare("SELECT id FROM evidence_links ORDER BY id").all() as Array<{ id: string }>
+        ).map((r) => r.id);
+      expect(remainingIds()).toEqual(["el_early", "el_tie_a"]);
+      expect(() => insertEdge("el_dup", "substantiates", "2026-01-04T00:00:00Z")).toThrow(
+        /UNIQUE constraint failed/i,
+      );
+
+      // Re-running the complete set on the already-deduplicated database is a no-op, twice over.
+      expect(() => applyMigrations(db, CORE_MIGRATIONS)).not.toThrow();
+      expect(() => applyMigrations(db, CORE_MIGRATIONS)).not.toThrow();
+      expect(remainingIds()).toEqual(["el_early", "el_tie_a"]);
       expect(() => insertEdge("el_dup", "substantiates", "2026-01-04T00:00:00Z")).toThrow(
         /UNIQUE constraint failed/i,
       );

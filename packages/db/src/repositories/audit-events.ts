@@ -4,9 +4,9 @@
  * responsible for keeping `metadata` to a redacted summary — never raw
  * credentials, tokens, or full financial payloads.
  *
- * Timestamps are stored in canonical `toISOString()` form so that the
- * `(created_at, id)` keyset order is chronological even when writers pass
- * different offsets or precisions.
+ * Timestamps must carry an explicit offset and are stored in canonical
+ * `toISOString()` form, so the `(created_at, id)` keyset order is
+ * chronological regardless of the writer's offset or precision.
  */
 import type { AuditEvent } from "@sona/core";
 import type { DbClient, DbValue } from "../runner.js";
@@ -19,8 +19,6 @@ import {
   rows,
   stringifyJson,
 } from "./helpers.js";
-
-export type { AuditEvent } from "@sona/core";
 
 /** Keyset cursor: events are ordered by `(createdAt, id)`. */
 export interface AuditEventCursor {
@@ -44,6 +42,10 @@ export interface AuditEventPage {
 const DEFAULT_PAGE_SIZE = 100;
 const MAX_PAGE_SIZE = 1000;
 
+/** ISO-8601 date-time with an explicit `Z` or `±HH:MM` offset (no host-local guessing). */
+const OFFSET_DATETIME_RE =
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,9})?)?(Z|[+-]\d{2}:\d{2})$/;
+
 const EVENT_SELECT =
   "SELECT id, workspace_id, action, actor, target_type, target_id, metadata_json, created_at FROM audit_events";
 
@@ -58,6 +60,7 @@ export class SqliteAuditEventRepository {
     if (event.actor.trim() === "") {
       throw new Error("audit event actor is required");
     }
+    const createdAt = canonicalTimestamp(event.createdAt);
     const existing = await this.getById(event.workspaceId, event.id);
     if (existing !== undefined) {
       throw new Error("audit events are append-only");
@@ -74,7 +77,7 @@ export class SqliteAuditEventRepository {
         event.targetType ?? null,
         event.targetId ?? null,
         event.metadata === undefined ? null : stringifyJson(event.metadata),
-        canonicalTimestamp(event.createdAt),
+        createdAt,
       );
   }
 
@@ -117,10 +120,10 @@ export class SqliteAuditEventRepository {
 }
 
 function canonicalTimestamp(value: string): string {
-  const time = Date.parse(value);
+  const time = OFFSET_DATETIME_RE.test(value) ? Date.parse(value) : Number.NaN;
   if (Number.isNaN(time)) {
     throw new Error(
-      `audit event timestamp is not a valid ISO-8601 date-time: ${JSON.stringify(value)}`,
+      `audit event timestamp must be an ISO-8601 date-time with an explicit offset, got ${JSON.stringify(value)}`,
     );
   }
   return new Date(time).toISOString();

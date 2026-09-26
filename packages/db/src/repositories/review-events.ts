@@ -2,14 +2,18 @@
  * The shared `review_events` log: every review-state transition on any record
  * (review items, ledger transactions, ...) is appended here with its actor.
  */
-import { isReviewState, type ReviewEvent } from "@sona/core";
+import { isReviewState, type ReviewEvent, type ReviewState } from "@sona/core";
 import type { DbClient } from "../runner.js";
-import type { RecordRef } from "./evidence-links.js";
 import { optionalString, type Row, requiredLiteral, requiredString, rows } from "./helpers.js";
+import type { RecordRef } from "./records.js";
 
-/** Deterministic id for the transition of `target` recorded at `at`. */
-export function reviewEventId(target: RecordRef, at: string): string {
-  return `review_event:${target.type}:${target.id}:${at}`;
+/**
+ * Deterministic id for the transition recorded against `key` at `at`. The
+ * target state is part of the id so a transition and a supersession (or two
+ * distinct transitions) at the same instant do not collide.
+ */
+export function reviewEventId(key: RecordRef, at: string, toState: ReviewState): string {
+  return `review_event:${key.type}:${key.id}:${at}:${toState}`;
 }
 
 /** Appends a review event; meant to be called inside the caller's transaction. */

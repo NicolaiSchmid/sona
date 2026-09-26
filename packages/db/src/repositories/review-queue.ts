@@ -3,6 +3,7 @@ import type { DbClient } from "../runner.js";
 import type { ReviewItem } from "../schema.js";
 import {
   parseJson,
+  type Row,
   requiredLiteral,
   requiredString,
   row,
@@ -10,6 +11,7 @@ import {
   stringifyJson,
   withTransaction,
 } from "./helpers.js";
+import { RECORD_TYPES } from "./records.js";
 import { insertReviewEvent, reviewEventId } from "./review-events.js";
 
 export interface ReviewTransitionInput {
@@ -44,19 +46,24 @@ export class SqliteReviewQueueRepository {
       );
   }
 
+  /**
+   * Moves a review item to another state and records the decision. The event
+   * targets the item's underlying record, but its id is keyed on the review
+   * item so two items about the same record never collide.
+   */
   async transition(workspaceId: string, input: ReviewTransitionInput): Promise<void> {
-    const current = await this.getById(workspaceId, input.id);
-    if (current === undefined) {
-      throw new Error("review item not found in workspace");
-    }
     withTransaction(this.#db, () => {
+      const current = this.#itemById(workspaceId, input.id);
+      if (current === undefined) {
+        throw new Error("review item not found in workspace");
+      }
       this.#db
         .prepare(
           "UPDATE review_items SET state = ?, updated_at = ? WHERE workspace_id = ? AND id = ?",
         )
         .run(input.toState, input.at, workspaceId, input.id);
       insertReviewEvent(this.#db, {
-        id: reviewEventId({ type: "review_item", id: input.id }, input.at),
+        id: reviewEventId({ type: RECORD_TYPES.reviewItem, id: input.id }, input.at, input.toState),
         workspaceId,
         targetType: current.targetType,
         targetId: current.targetId,
@@ -70,12 +77,7 @@ export class SqliteReviewQueueRepository {
   }
 
   async getById(workspaceId: string, id: string): Promise<ReviewItem | undefined> {
-    const result = row(
-      this.#db
-        .prepare("SELECT * FROM review_items WHERE workspace_id = ? AND id = ?")
-        .get(workspaceId, id),
-    );
-    return result === undefined ? undefined : itemFromRow(result);
+    return this.#itemById(workspaceId, id);
   }
 
   async listByState(workspaceId: string, state: ReviewState): Promise<ReviewItem[]> {
@@ -87,9 +89,18 @@ export class SqliteReviewQueueRepository {
         .all(workspaceId, state),
     ).map(itemFromRow);
   }
+
+  #itemById(workspaceId: string, id: string): ReviewItem | undefined {
+    const result = row(
+      this.#db
+        .prepare("SELECT * FROM review_items WHERE workspace_id = ? AND id = ?")
+        .get(workspaceId, id),
+    );
+    return result === undefined ? undefined : itemFromRow(result);
+  }
 }
 
-function itemFromRow(source: Record<string, unknown>): ReviewItem {
+function itemFromRow(source: Row): ReviewItem {
   return {
     id: requiredString(source, "id"),
     workspaceId: requiredString(source, "workspace_id"),
