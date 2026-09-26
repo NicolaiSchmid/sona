@@ -15,7 +15,7 @@
 import type { EvidenceLink } from "../evidence/types";
 import { validateBalancedTransaction } from "../ledger/balance";
 import type { LedgerPosting, LedgerTransaction } from "../ledger/types";
-import { isZeroDecimal, negateDecimal, sumDecimals } from "../money/decimal";
+import { decimalsEqual, negateDecimal } from "../money/decimal";
 import type { MoneyAmount } from "../money/types";
 import type { ReviewState } from "../review/types";
 import {
@@ -218,11 +218,20 @@ export interface PlanDepreciationDraftsInput {
   createdAt: string;
 }
 
-function sameAmount(recorded: MoneyAmount, scheduled: string, commodity: string): boolean {
-  return (
-    recorded.commodity === commodity &&
-    isZeroDecimal(sumDecimals([recorded.amount, negateDecimal(scheduled)]))
-  );
+function discrepancyFor(
+  entry: RecordedDepreciation,
+  reason: DepreciationDiscrepancyReason,
+  scheduledAmount: string,
+): DepreciationDiscrepancy {
+  return {
+    year: entry.year,
+    transactionId: entry.transactionId,
+    reason,
+    recordedAmount: entry.amount.amount,
+    scheduledAmount,
+    reviewState: entry.reviewState,
+    resolution: "adjustment_posting_required",
+  };
 }
 
 /**
@@ -245,20 +254,6 @@ export function planDepreciationDrafts(input: PlanDepreciationDraftsInput): Depr
   }
 
   const plan: DepreciationPlan = { create: [], skipped: [], discrepancies: [] };
-  const discrepancy = (
-    entry: RecordedDepreciation,
-    reason: DepreciationDiscrepancyReason,
-    scheduledAmount: string,
-  ): DepreciationDiscrepancy => ({
-    year: entry.year,
-    transactionId: entry.transactionId,
-    reason,
-    recordedAmount: entry.amount.amount,
-    scheduledAmount,
-    reviewState: entry.reviewState,
-    resolution: "adjustment_posting_required",
-  });
-
   const scheduledYears = new Set<number>();
   for (const row of input.schedule.rows) {
     if (row.year > input.throughYear) {
@@ -284,18 +279,21 @@ export function planDepreciationDrafts(input: PlanDepreciationDraftsInput): Depr
       transactionId: existing.transactionId,
       reason: "already_recorded",
     });
-    if (!sameAmount(existing.amount, row.amount, input.schedule.commodity)) {
-      plan.discrepancies.push(discrepancy(existing, "amount_mismatch", row.amount));
+    if (
+      existing.amount.commodity !== input.schedule.commodity ||
+      !decimalsEqual(existing.amount.amount, row.amount)
+    ) {
+      plan.discrepancies.push(discrepancyFor(existing, "amount_mismatch", row.amount));
     }
     for (const duplicate of duplicates) {
-      plan.discrepancies.push(discrepancy(duplicate, "duplicate_recording", row.amount));
+      plan.discrepancies.push(discrepancyFor(duplicate, "duplicate_recording", row.amount));
     }
   }
 
   for (const [year, entries] of live) {
     if (year <= input.throughYear && !scheduledYears.has(year)) {
       for (const entry of entries) {
-        plan.discrepancies.push(discrepancy(entry, "not_in_schedule", "0"));
+        plan.discrepancies.push(discrepancyFor(entry, "not_in_schedule", "0"));
       }
     }
   }

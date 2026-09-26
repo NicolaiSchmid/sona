@@ -6,6 +6,7 @@
 import {
   type DepreciationExportRow,
   type DepreciationScheduleExportInput,
+  depreciationRowReference,
   generateDepreciationSection,
 } from "./depreciation.js";
 import { generateExportLines } from "./generate.js";
@@ -127,16 +128,10 @@ function evidenceBearing(
       sectionId: l.sectionId,
       documentIds: l.evidenceDocumentIds,
     })),
-    ...depreciationRows.map((r) => {
-      const reference = `schedule:${r.configId}:${r.year}`;
-      return {
-        postingId: r.postingIds[0] ?? reference,
-        transactionId: r.transactionId ?? reference,
-        account: `asset:${r.assetId}`,
-        sectionId: "depreciation",
-        documentIds: r.evidenceDocumentIds,
-      };
-    }),
+    ...depreciationRows.map((r) => ({
+      ...depreciationRowReference(r),
+      documentIds: r.evidenceDocumentIds,
+    })),
   ];
 }
 

@@ -70,6 +70,14 @@ export function isZeroDecimal(value: string): boolean {
   return parseScaled(value).value === 0n;
 }
 
+/** Returns true if two decimal strings denote the same value regardless of scale ("6360" equals "6360.00"). */
+export function decimalsEqual(a: string, b: string): boolean {
+  const left = parseScaled(a);
+  const right = parseScaled(b);
+  const scale = Math.max(left.scale, right.scale);
+  return rescale(left, scale) === rescale(right, scale);
+}
+
 /**
  * Parses a decimal string into a signed integer at exactly `scale` fractional
  * digits. Throws {@link InvalidDecimalError} on bad input and a plain `Error`

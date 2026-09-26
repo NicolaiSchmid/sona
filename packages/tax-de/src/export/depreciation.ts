@@ -18,13 +18,11 @@ import {
   type AssetKind,
   type DepreciationRowNote,
   type DepreciationSchedule,
+  decimalsEqual,
   describeDepreciationMethod,
-  isZeroDecimal,
   type MoneyAmount,
   meetsReviewState,
-  negateDecimal,
   type ReviewState,
-  sumDecimals,
 } from "@sona/core";
 import { REQUIRED_STATE } from "./generate.js";
 import type { MissingEvidenceRow } from "./missing-evidence.js";
@@ -138,11 +136,31 @@ function reviewGap(
   }
   const same =
     transaction.amount.commodity === scheduled.commodity &&
-    isZeroDecimal(sumDecimals([transaction.amount.amount, negateDecimal(scheduled.amount)]));
+    decimalsEqual(transaction.amount.amount, scheduled.amount);
   if (!same) {
     return `recorded amount ${transaction.amount.amount} ${transaction.amount.commodity} (config v${transaction.configVersion}) differs from configured schedule ${scheduled.amount} ${scheduled.commodity}; adjustment review required`;
   }
   return undefined;
+}
+
+/**
+ * Where an exported depreciation row lives in the evidence reports: its ledger
+ * transaction/posting once generated, otherwise the stable placeholder
+ * `schedule:<configId>:<year>` so a not-yet-generated year is still addressable.
+ */
+export function depreciationRowReference(
+  row: Pick<
+    DepreciationExportRow,
+    "assetId" | "configId" | "year" | "transactionId" | "postingIds"
+  >,
+): Pick<MissingEvidenceRow, "postingId" | "transactionId" | "account" | "sectionId"> {
+  const placeholder = `schedule:${row.configId}:${row.year}`;
+  return {
+    postingId: row.postingIds[0] ?? placeholder,
+    transactionId: row.transactionId ?? placeholder,
+    account: `asset:${row.assetId}`,
+    sectionId: "depreciation",
+  };
 }
 
 export function generateDepreciationSection(
@@ -194,7 +212,7 @@ export function generateDepreciationSection(
       ...row.notes.map((n) => ROW_NOTE_LABELS[n]),
     ].join("; ");
 
-    result.rows.push({
+    const exportRow: DepreciationExportRow = {
       assetId: input.assetId,
       assetName: input.assetName,
       assetKind: input.assetKind,
@@ -215,17 +233,13 @@ export function generateDepreciationSection(
       status,
       evidenceDocumentIds: row.evidenceDocumentIds,
       notes,
-    });
+    };
+    result.rows.push(exportRow);
 
     if (missingEvidence) {
-      // Reference for a scheduled year that has no transaction yet.
-      const reference = `schedule:${schedule.configId}:${row.year}`;
       result.missingEvidence.push({
-        postingId: transaction?.postingIds[0] ?? reference,
-        transactionId: transaction?.transactionId ?? reference,
+        ...depreciationRowReference(exportRow),
         date: `${row.year}-12-31`,
-        account: `asset:${input.assetId}`,
-        sectionId: "depreciation",
         amount: row.amount,
         currency: schedule.commodity,
       });
