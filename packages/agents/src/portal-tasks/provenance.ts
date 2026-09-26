@@ -5,6 +5,7 @@
  */
 import type { JsonValue } from "@sona/core";
 import type { StoredDocument } from "@sona/receipts";
+import { sanitizeUrl } from "./url.js";
 
 /** Per-run provenance for an executed portal task. */
 export interface TaskRunProvenance {
@@ -114,22 +115,9 @@ export function toStoredDocument(input: ToStoredDocumentInput): StoredDocument {
   };
 }
 
-/**
- * Drops query strings and fragments from a URL before persisting it, since
- * authenticated invoice URLs often carry session ids / signed params that must
- * not land in stored metadata, exports, or MCP output. Returns null if the URL
- * can't be parsed.
- */
-function sanitizeUrl(raw: string | undefined): string | null {
-  if (raw === undefined) {
-    return null;
-  }
-  try {
-    const url = new URL(raw);
-    return `${url.protocol}//${url.host}${url.pathname}`;
-  } catch {
-    return null;
-  }
+/** Provenance JSON carries the sanitized URL, or null when absent or unparseable. */
+function jsonSourceUrl(raw: string | undefined): string | null {
+  return raw === undefined ? null : (sanitizeUrl(raw) ?? null);
 }
 
 function provenanceToJson(provenance: FetchedDocumentProvenance): JsonValue {
@@ -138,7 +126,7 @@ function provenanceToJson(provenance: FetchedDocumentProvenance): JsonValue {
     taskId: provenance.taskId,
     taskVersion: provenance.taskVersion,
     runId: provenance.runId,
-    sourceUrl: sanitizeUrl(provenance.sourceUrl),
+    sourceUrl: jsonSourceUrl(provenance.sourceUrl),
     downloadedFilename: provenance.downloadedFilename,
     contentHash: provenance.contentHash,
     fetchedAt: provenance.fetchedAt,

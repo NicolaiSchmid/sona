@@ -9,6 +9,14 @@
 /** Package version marker, used to verify wiring and test discovery. */
 export const sonaAgentsVersion = "0.0.0" as const;
 
+export type {
+  PortalBrowserPage,
+  PortalBrowserProvider,
+  PortalBrowserSession,
+  PortalBrowserSessionInput,
+  PortalDownloadResponse,
+  PortalElementHandle,
+} from "./portal-tasks/browser.js";
 export {
   BrowserbasePortalTaskRunner,
   type BrowserbasePortalTaskRunnerOptions,
@@ -25,20 +33,16 @@ export {
 export {
   createCdpPlaywrightBrowserProvider,
   createLocalPlaywrightBrowserProvider,
+} from "./portal-tasks/playwright-adapter.js";
+export {
   type GetPortalConnectionInput,
   InMemoryPortalConnectionRepository,
   InMemoryPortalDocumentRegistry,
   LocalPlaywrightPortalTaskRunner,
   type LocalPlaywrightPortalTaskRunnerOptions,
-  type PortalBrowserPage,
-  type PortalBrowserProvider,
-  type PortalBrowserSession,
-  type PortalBrowserSessionInput,
   type PortalConnection,
   type PortalConnectionRepository,
   type PortalDocumentRegistry,
-  type PortalDownloadResponse,
-  type PortalElementHandle,
 } from "./portal-tasks/playwright-runner.js";
 export {
   destructiveSelectorConceptFor,

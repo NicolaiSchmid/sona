@@ -1,11 +1,11 @@
 /**
  * Portal task runner interface plus a fake in-memory runner for tests.
  *
- * Real execution backends implement {@link PortalTaskRunner}. Planned adapters:
- * - `BrowserbasePortalTaskRunner` — managed remote browser (Sona pays).
+ * Real execution backends implement {@link PortalTaskRunner}:
  * - `LocalPlaywrightPortalTaskRunner` — self-hosted local browser.
- * - `UserDelegatedAgentTaskRunner` — runs in the user's own agent/browser
- *   subscription where available.
+ * - `BrowserbasePortalTaskRunner` — managed remote browser (Sona pays).
+ * - `UserDelegatedAgentTaskRunner` (planned) — runs in the user's own
+ *   agent/browser subscription where available.
  *
  * Every runner MUST enforce the domain allowlist and the read-only policy at
  * execution time — the definition-time schema check is not sufficient on its own.
@@ -49,27 +49,59 @@ export type PortalTaskRunStatus =
   | "selector_missing"
   | "failed";
 
-function baseResult(input: RunPortalTaskInput, provider: string): RunPortalTaskResult {
-  const domain = input.task.domains[0] ?? "unknown";
+/**
+ * The result skeleton every runner starts from. It is built before the task is
+ * validated so a malformed definition still yields a structured
+ * `policy_refused` result; task identity is therefore read defensively from
+ * the unvalidated input.
+ */
+export function createBaseRunResult(
+  input: RunPortalTaskInput,
+  provider: string,
+): RunPortalTaskResult {
+  const identity = taskIdentity(input.task);
   return {
     status: "completed",
     runId: input.runId,
-    taskId: input.task.id,
-    taskVersion: input.task.version,
+    taskId: identity.id,
+    taskVersion: identity.version,
     documents: [],
     storedDocuments: [],
     provenance: {
       runId: input.runId,
-      taskId: input.task.id,
-      taskVersion: input.task.version,
-      portalDomain: domain,
+      taskId: identity.id,
+      taskVersion: identity.version,
+      portalDomain: identity.domain,
       browserProvider: provider,
       workspaceId: input.workspaceId,
       fetchedAt: input.now,
+      blockedRequests: [],
+      allowedNonIdempotentRequests: [],
     },
     warnings: [],
     errors: [],
   };
+}
+
+interface TaskIdentity {
+  id: string;
+  version: number;
+  domain: string;
+}
+
+function taskIdentity(task: unknown): TaskIdentity {
+  const raw: Record<string, unknown> = isObject(task) ? task : {};
+  const domains = Array.isArray(raw["domains"]) ? raw["domains"] : [];
+  const firstDomain: unknown = domains[0];
+  return {
+    id: typeof raw["id"] === "string" ? raw["id"] : "unknown",
+    version: typeof raw["version"] === "number" ? raw["version"] : 0,
+    domain: typeof firstDomain === "string" ? firstDomain : "unknown",
+  };
+}
+
+function isObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
 }
 
 /**
@@ -79,7 +111,7 @@ function baseResult(input: RunPortalTaskInput, provider: string): RunPortalTaskR
  */
 export class FakePortalTaskRunner implements PortalTaskRunner {
   async runTask(input: RunPortalTaskInput): Promise<RunPortalTaskResult> {
-    const result = baseResult(input, "fake");
+    const result = createBaseRunResult(input, "fake");
 
     const policy = validateReadOnlyActions(input.task.allowedActions);
     if (!policy.valid) {

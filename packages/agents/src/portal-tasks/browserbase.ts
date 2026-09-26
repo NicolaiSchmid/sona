@@ -1,8 +1,6 @@
+import { createCdpPlaywrightBrowserProvider } from "./playwright-adapter.js";
 import type { LocalPlaywrightPortalTaskRunnerOptions } from "./playwright-runner.js";
-import {
-  createCdpPlaywrightBrowserProvider,
-  LocalPlaywrightPortalTaskRunner,
-} from "./playwright-runner.js";
+import { LocalPlaywrightPortalTaskRunner } from "./playwright-runner.js";
 
 export interface BrowserbasePortalTaskRunnerOptions
   extends Omit<LocalPlaywrightPortalTaskRunnerOptions, "browserProvider"> {

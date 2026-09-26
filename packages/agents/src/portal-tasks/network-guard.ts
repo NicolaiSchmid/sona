@@ -4,6 +4,7 @@ import type {
   BlockedPortalRequestReason,
 } from "./provenance.js";
 import type { PortalHttpMethodException, PortalTask } from "./schema.js";
+import { sanitizeUrl } from "./url.js";
 
 export interface PortalRequest {
   url: string;
@@ -57,7 +58,7 @@ export class NetworkGuard {
     }
 
     this.#allowedNonIdempotentRequests.push({
-      url: sanitizeRequestUrl(request.url),
+      url: sanitizeUrl(request.url) ?? request.url,
       method,
       reason: exception.reason,
       justification: exception.justification,
@@ -108,7 +109,7 @@ export class NetworkGuard {
 
   private block(request: PortalRequest, reason: BlockedPortalRequestReason): PortalRequestDecision {
     this.#blockedRequests.push({
-      url: sanitizeRequestUrl(request.url),
+      url: sanitizeUrl(request.url) ?? request.url,
       method: request.method.toUpperCase(),
       resourceType: request.resourceType,
       reason,
@@ -119,15 +120,6 @@ export class NetworkGuard {
 
 export function createNetworkGuard(options: NetworkGuardOptions): NetworkGuard {
   return new NetworkGuard(options);
-}
-
-function sanitizeRequestUrl(rawUrl: string): string {
-  try {
-    const url = new URL(rawUrl);
-    return `${url.protocol}//${url.host}${url.pathname}`;
-  } catch {
-    return rawUrl;
-  }
 }
 
 function exceptionMatchKey(rawUrl: string): string {

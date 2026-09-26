@@ -61,3 +61,20 @@ export function parseContentLength(value: string | null | undefined): number | u
   const parsed = Number.parseInt(value, 10);
   return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : undefined;
 }
+
+export function isSuccessfulStatus(status: number): boolean {
+  return status >= 200 && status < 300;
+}
+
+export function isRedirectStatus(status: number): boolean {
+  return status >= 300 && status < 400;
+}
+
+/** Compares media types only; parameters such as `charset` are ignored. */
+export function isExpectedMimeType(actual: string, expected: string): boolean {
+  return mediaType(actual) === mediaType(expected);
+}
+
+function mediaType(contentType: string): string {
+  return contentType.split(";", 1)[0]?.trim().toLowerCase() ?? "";
+}
