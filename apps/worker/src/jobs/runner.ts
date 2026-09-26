@@ -182,19 +182,28 @@ export class JobRunner {
     this.#options = options;
   }
 
-  /** Claims and processes one batch of runnable jobs sequentially. */
+  /**
+   * Processes up to `limit` runnable jobs sequentially. Jobs are claimed one
+   * at a time right before they run, so a lease starts when its work starts
+   * rather than when the batch was assembled — a long first job cannot expire
+   * the leases of the jobs queued behind it.
+   */
   async runOnce(options: RunOnceOptions = {}): Promise<JobRunOutcome[]> {
-    const claimed = await this.#deps.jobs.claim({
-      workerId: this.#options.workerId,
-      now: this.#options.now(),
-      leaseMs: this.#options.leaseMs,
-      limit: options.limit ?? DEFAULT_RUN_LIMIT,
-      kinds: options.kinds,
-      runIdFor: (job, attempt) => jobRunId(job.id, attempt),
-    });
+    const limit = options.limit ?? DEFAULT_RUN_LIMIT;
     const outcomes: JobRunOutcome[] = [];
-    for (const { job, run } of claimed) {
-      outcomes.push(await this.#process(job, run));
+    while (outcomes.length < limit) {
+      const [claimed] = await this.#deps.jobs.claim({
+        workerId: this.#options.workerId,
+        now: this.#options.now(),
+        leaseMs: this.#options.leaseMs,
+        limit: 1,
+        kinds: options.kinds,
+        runIdFor: (job, attempt) => jobRunId(job.id, attempt),
+      });
+      if (claimed === undefined) {
+        break;
+      }
+      outcomes.push(await this.#process(claimed.job, claimed.run));
     }
     return outcomes;
   }

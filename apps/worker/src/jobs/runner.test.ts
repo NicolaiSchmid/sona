@@ -38,6 +38,7 @@ async function createRunnerHarness(handlers: Partial<JobHandlers>) {
         extraction: unused,
         reconciliation: unused,
         export_generation: unused,
+        portal_fetch: unused,
         ...handlers,
       },
     },
@@ -387,6 +388,35 @@ describe("JobRunner", () => {
       expect((await runner.runOnce()).map((o) => [o.jobId, o.attempt, o.state])).toEqual([
         [slow.job.id, 3, "succeeded"],
       ]);
+    } finally {
+      harness.close();
+    }
+  });
+
+  it("starts each lease when its job starts, so a slow job cannot expire the ones behind it", async () => {
+    const { harness, queue, runner } = await createRunnerHarness({
+      extraction: async ({ job }) => {
+        if (job.payload.documentId === "slow") {
+          // Longer than the 60s lease.
+          harness.clock.advance(90_000);
+        }
+        return { documentId: job.payload.documentId };
+      },
+    });
+    try {
+      const slow = await queue.enqueue(context, "extraction", { documentId: "slow" });
+      const quick = await queue.enqueue(context, "extraction", { documentId: "quick" });
+      const outcomes = await runner.runOnce();
+      expect(outcomes.map((o) => [o.jobId, o.state])).toEqual([
+        [slow.job.id, "succeeded"],
+        [quick.job.id, "succeeded"],
+      ]);
+      // `quick` was claimed only after `slow` finished, so its lease and run
+      // start 90s later rather than at batch time.
+      const slowRun = (await queue.listRuns(context, slow.job.id))[0];
+      const quickRun = (await queue.listRuns(context, quick.job.id))[0];
+      expect(slowRun?.startedAt).toBe("2026-02-01T00:00:00.000Z");
+      expect(quickRun?.startedAt).toBe("2026-02-01T00:01:30.000Z");
     } finally {
       harness.close();
     }

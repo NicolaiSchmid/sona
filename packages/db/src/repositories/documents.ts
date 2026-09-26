@@ -48,6 +48,24 @@ export class SqliteDocumentRepository {
     return result === undefined ? undefined : documentFromRow(result);
   }
 
+  /**
+   * Documents no `substantiates` evidence link starts from — receipts still
+   * waiting for their transaction. Oldest first; used to re-run reconciliation
+   * once new bank transactions arrive.
+   */
+  async listUnsubstantiated(workspaceId: string, limit = 500): Promise<StoredDocument[]> {
+    if (!Number.isInteger(limit) || limit < 1) {
+      throw new Error(`document list limit must be a positive integer, got ${String(limit)}`);
+    }
+    return rows(
+      this.#db
+        .prepare(
+          "SELECT d.* FROM documents d WHERE d.workspace_id = ? AND d.retention_state = 'active' AND NOT EXISTS (SELECT 1 FROM evidence_links e WHERE e.workspace_id = d.workspace_id AND e.from_type = 'document' AND e.from_id = d.id AND e.kind = 'substantiates') ORDER BY d.created_at, d.id LIMIT ?",
+        )
+        .all(workspaceId, limit),
+    ).map(documentFromRow);
+  }
+
   async findByContentHash(
     workspaceId: string,
     contentHash: string,

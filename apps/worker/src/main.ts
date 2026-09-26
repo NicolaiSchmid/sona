@@ -1,9 +1,9 @@
 /**
  * CLI entry point for a local/self-hosted worker:
  *
- *   SONA_CONFIG_PATH=./config/sona.json pnpm --filter @sona/worker start
+ *   SONA_CONFIG_PATH=./config/sona.yaml pnpm --filter @sona/worker start
  *
- * Reads the runtime config (JSON with the shape of `config/sona.example.yaml`),
+ * Reads the runtime config (YAML or JSON with the shape of `config/sona.example.yaml`),
  * opens the SQLite database, applies migrations, and runs the interval
  * scheduler until SIGINT/SIGTERM. Enable Banking credentials come from the
  * environment (`.env.example`); per-source consents come from the secret store.
@@ -20,6 +20,7 @@ import {
   type SqliteDatabase,
 } from "@sona/db";
 import { PdfTextExtractionProvider } from "@sona/receipts";
+import { parse as parseYaml } from "yaml";
 import { runScheduler } from "./scheduler.js";
 import { createSecretStoreSourceSyncGateway } from "./source-sync-gateway.js";
 import { createWorker, createWorkerRepositories } from "./worker.js";
@@ -38,6 +39,12 @@ function requireEnv(name: string): string {
   return value;
 }
 
+/** YAML by extension (`.yaml`/`.yml`), JSON otherwise; both decode to the same object shape. */
+function loadConfigFile(path: string): unknown {
+  const text = readFileSync(path, "utf8");
+  return /\.ya?ml$/i.test(path) ? parseYaml(text) : JSON.parse(text);
+}
+
 function intervalFromEnv(): number {
   const raw = process.env["SONA_WORKER_INTERVAL_MS"];
   if (raw === undefined) {
@@ -51,8 +58,8 @@ function intervalFromEnv(): number {
 }
 
 async function main(): Promise<void> {
-  const configPath = resolve(process.env["SONA_CONFIG_PATH"] ?? "./config/sona.json");
-  const config = parseSonaRuntimeConfig(JSON.parse(readFileSync(configPath, "utf8")));
+  const configPath = resolve(process.env["SONA_CONFIG_PATH"] ?? "./config/sona.yaml");
+  const config = parseSonaRuntimeConfig(loadConfigFile(configPath));
   if (config.storage.database.provider !== "sqlite") {
     throw new Error("the local worker supports the sqlite database provider only");
   }
@@ -82,7 +89,7 @@ async function main(): Promise<void> {
     sourceSync: createSecretStoreSourceSyncGateway({
       sources: repositories.sources,
       secrets: backends.secrets,
-      client,
+      enableBankingClient: client,
     }),
     // Provider selection through runtime config is deferred to a later phase;
     // the local text-layer extractor needs no credentials.

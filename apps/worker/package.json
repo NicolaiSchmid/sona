@@ -23,6 +23,7 @@
     "@sona/db": "workspace:*",
     "@sona/receipts": "workspace:*",
     "@sona/tax-de": "workspace:*",
+    "yaml": "^2.9.0",
     "zod": "^3.24.0"
   }
 }

@@ -5,7 +5,7 @@
  * deterministic clock/id sequence. No real account, IBAN, or credential data.
  */
 import { createRequire } from "node:module";
-import type { enableBanking } from "@sona/connectors";
+import type { email, enableBanking } from "@sona/connectors";
 import {
   createWorkspaceContext,
   InMemoryDocumentStorage,
@@ -269,9 +269,16 @@ export interface TestHarness {
   close(): void;
 }
 
+export interface FakeMailbox {
+  client: email.ImapClient;
+  policy?: email.EmailSourcePolicy;
+}
+
 export interface TestHarnessOptions {
   worker?: Partial<Omit<WorkerRuntimeOptions, "db" | "storage" | "sourceSync" | "extraction">>;
   bankSessions?: Record<string, FakeBankSession>;
+  /** Fake IMAP mailboxes by email source id. */
+  mailboxes?: Record<string, FakeMailbox>;
   /** Seed both workspaces with an Enable Banking source (default true). */
   seedSources?: boolean;
 }
@@ -330,6 +337,14 @@ export async function createTestHarness(options: TestHarnessOptions = {}): Promi
     async resolveEnableBanking(context, sourceId) {
       gatewayCalls.push({ workspaceId: context.workspaceId, sourceId });
       return { client: bank, sessionId: sourceId === SRC_1 ? SESSION_1 : SESSION_2 };
+    },
+    async resolveEmail(context, sourceId) {
+      gatewayCalls.push({ workspaceId: context.workspaceId, sourceId });
+      const mailbox = options.mailboxes?.[sourceId];
+      if (mailbox === undefined) {
+        throw new Error(`no fake mailbox configured for ${sourceId}`);
+      }
+      return { client: mailbox.client, policy: mailbox.policy };
     },
   };
   const provider = new SwappableExtractionProvider();

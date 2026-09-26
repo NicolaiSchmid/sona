@@ -66,10 +66,10 @@ describe("scheduler", () => {
     const h = await createTestHarness();
     try {
       await h.worker.repositories.sources.create({
-        id: "src_mail",
+        id: "src_pp",
         workspaceId: WS_1,
-        kind: "email",
-        displayName: "Mailbox",
+        kind: "portfolio",
+        displayName: "Portfolio export",
         status: "active",
         createdAt: h.clock.now(),
       });

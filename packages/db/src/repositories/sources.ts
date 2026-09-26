@@ -169,14 +169,22 @@ export class SqliteSourceRepository {
     workspaceId: string,
     sourceId: string,
   ): Promise<PersistedSourceCredential | undefined> {
-    const result = row(
+    const newest = rows(
       this.#db
         .prepare(
-          `${CREDENTIAL_SELECT} WHERE workspace_id = ? AND source_id = ? ORDER BY created_at DESC, id DESC LIMIT 1`,
+          `${CREDENTIAL_SELECT} WHERE workspace_id = ? AND source_id = ? AND created_at = (SELECT MAX(created_at) FROM source_credentials WHERE workspace_id = ? AND source_id = ?) ORDER BY id`,
         )
-        .get(workspaceId, sourceId),
+        .all(workspaceId, sourceId, workspaceId, sourceId),
+    ).map(credentialFromRow);
+    // Rotations recorded in the same instant are told apart by the secret's
+    // monotonic version, not by id ordering.
+    return newest.reduce<PersistedSourceCredential | undefined>(
+      (best, candidate) =>
+        best === undefined || candidate.secretRef.version >= best.secretRef.version
+          ? candidate
+          : best,
+      undefined,
     );
-    return result === undefined ? undefined : credentialFromRow(result);
   }
 
   async #require(workspaceId: string, id: string): Promise<Source> {

@@ -71,6 +71,9 @@ export const DEFAULT_RECONCILIATION_WINDOW_DAYS = 60;
 /** Upper bound on transactions scored per document. */
 const MAX_CANDIDATE_TRANSACTIONS = 1000;
 
+/** How far back an undated document looks for its payment. */
+const UNDATED_LOOKBACK_DAYS = 365;
+
 export const SCORER_VERSION = "receipts-scoring@1" as const;
 
 export const AUTO_APPLY_ACTOR = "policy:auto_apply@1" as const;
@@ -211,9 +214,12 @@ export async function reconcileDocument(
   }
 
   const matchable = extractionToMatchableDocument(extraction);
+  // Without a document date, search the recent past instead of the oldest
+  // rows in the workspace: receipts almost always arrive after their payment.
+  const today = input.now.slice(0, 10);
   const window =
     extraction.documentDate === undefined
-      ? {}
+      ? { from: shiftIsoDate(today, -UNDATED_LOOKBACK_DAYS), to: today }
       : {
           from: shiftIsoDate(extraction.documentDate, -windowDays),
           to: shiftIsoDate(extraction.documentDate, windowDays),

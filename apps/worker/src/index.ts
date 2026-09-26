@@ -65,6 +65,11 @@ export {
   runPortalFetchJob,
 } from "./jobs/portal-fetch.js";
 export {
+  createPortalFetchHandler,
+  DEFAULT_PORTAL_FETCH_COOLDOWN_MS,
+  type PortalFetchDependencies,
+} from "./jobs/portal-fetch-handler.js";
+export {
   type EnqueueOptions,
   type EnqueueResult,
   JobQueue,
@@ -99,7 +104,10 @@ export {
   type RunOnceOptions,
 } from "./jobs/runner.js";
 export {
+  type BankSourceSyncResult,
   createSourceSyncHandler,
+  type EmailSession,
+  type EmailSourceSyncResult,
   type EnableBankingSession,
   isSyncableSourceKind,
   type RunSourceSyncInput,
@@ -109,6 +117,7 @@ export {
   type SourceSyncResult,
   SYNCABLE_SOURCE_KINDS,
   type SyncableSourceKind,
+  type SyncError,
 } from "./jobs/source-sync.js";
 export {
   DOCUMENT_SOURCE_KINDS,

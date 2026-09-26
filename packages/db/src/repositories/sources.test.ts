@@ -133,7 +133,7 @@ describe("SqliteSourceRepository", () => {
     }
   });
 
-  it("breaks a created_at tie between credentials by the higher id", async () => {
+  it("breaks a created_at tie between credentials by the higher secret version, not the id", async () => {
     const t = createTestDatabase();
     try {
       const repo = new SqliteSourceRepository(t.db);
@@ -143,22 +143,31 @@ describe("SqliteSourceRepository", () => {
         label: "eb session",
         version,
       });
+      // The rotation with the higher version has the lower id: version wins.
       await repo.saveCredential("ws_1", {
-        id: "cred_b",
+        id: "cred_a",
         sourceId: "src_1",
         secretRef: ref(2),
         createdAt: T0,
       });
       await repo.saveCredential("ws_1", {
-        id: "cred_a",
+        id: "cred_b",
         sourceId: "src_1",
         secretRef: ref(1),
         createdAt: T0,
       });
       expect(await repo.currentCredential("ws_1", "src_1")).toMatchObject({
-        id: "cred_b",
+        id: "cred_a",
         secretRef: ref(2),
       });
+      // A later row always wins regardless of version.
+      await repo.saveCredential("ws_1", {
+        id: "cred_c",
+        sourceId: "src_1",
+        secretRef: ref(1),
+        createdAt: "2026-02-02T00:00:00.000Z",
+      });
+      expect((await repo.currentCredential("ws_1", "src_1"))?.id).toBe("cred_c");
       // Credentials are per source: another source in the workspace has none.
       expect(await repo.currentCredential("ws_1", "src_other")).toBeUndefined();
     } finally {

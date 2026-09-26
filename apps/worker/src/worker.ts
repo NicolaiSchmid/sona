@@ -10,6 +10,7 @@ import {
   SqliteBankRecordRepository,
   SqliteDocumentExtractionRepository,
   SqliteDocumentRepository,
+  SqliteEmailSyncRunRepository,
   SqliteEvidenceLinkRepository,
   SqliteJobRepository,
   SqliteLedgerRepository,
@@ -24,6 +25,10 @@ import type { TaxTemplate } from "@sona/tax-de";
 import { createDocumentIngestHandler } from "./jobs/document-ingest.js";
 import { createExportGenerationHandler } from "./jobs/export-generation.js";
 import { createExtractionHandler } from "./jobs/extraction.js";
+import {
+  createPortalFetchHandler,
+  type PortalFetchDependencies,
+} from "./jobs/portal-fetch-handler.js";
 import { JobQueue } from "./jobs/queue.js";
 import { createReconciliationHandler } from "./jobs/reconciliation.js";
 import {
@@ -40,6 +45,7 @@ export interface WorkerRepositories {
   jobs: SqliteJobRepository;
   sources: SqliteSourceRepository;
   syncRuns: SqliteSyncRunRepository;
+  emailSyncRuns: SqliteEmailSyncRunRepository;
   rawRecords: SqliteRawRecordRepository;
   bankRecords: SqliteBankRecordRepository;
   ledger: SqliteLedgerRepository;
@@ -56,6 +62,7 @@ export function createWorkerRepositories(db: DbClient): WorkerRepositories {
     jobs: new SqliteJobRepository(db),
     sources: new SqliteSourceRepository(db),
     syncRuns: new SqliteSyncRunRepository(db),
+    emailSyncRuns: new SqliteEmailSyncRunRepository(db),
     rawRecords: new SqliteRawRecordRepository(db),
     bankRecords: new SqliteBankRecordRepository(db),
     ledger: new SqliteLedgerRepository(db),
@@ -81,6 +88,8 @@ export interface WorkerRuntimeOptions {
     windowDays?: number;
   };
   taxTemplates?: Readonly<Record<string, TaxTemplate>>;
+  /** Browser portal fetching; when omitted, `portal_fetch` jobs are dead-lettered. */
+  portalFetch?: PortalFetchDependencies;
   /** Stable identity of this worker process; owns job leases. */
   workerId?: string;
   ids?: () => string;
@@ -124,14 +133,18 @@ export function createWorker(options: WorkerRuntimeOptions): WorkerRuntime {
       db: options.db,
       sources: repositories.sources,
       syncRuns: repositories.syncRuns,
+      emailSyncRuns: repositories.emailSyncRuns,
       rawRecords: repositories.rawRecords,
       bankRecords: repositories.bankRecords,
+      documents: repositories.documents,
+      storage: options.storage,
       ledger: repositories.ledger,
       evidenceLinks: repositories.evidenceLinks,
       reviewQueue: repositories.reviewQueue,
       gateway: options.sourceSync,
       ids,
     }),
+    portal_fetch: createPortalFetchHandler(options.portalFetch),
     document_ingest: createDocumentIngestHandler({
       documents: repositories.documents,
       storage: options.storage,

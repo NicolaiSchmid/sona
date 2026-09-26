@@ -15,6 +15,7 @@ export const RECORD_TYPES = {
   matchDecision: "match_decision",
   reviewEvent: "review_event",
   reviewItem: "review_item",
+  portalTaskRun: "portal_task_run",
   taxExportLine: "tax_export_line",
   asset: "asset",
   /** Named after its table; matches core's `ASSET_RECORD_TYPES.scheduleConfig`. */

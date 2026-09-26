@@ -340,7 +340,7 @@ describe("source_sync job", () => {
         syncStatus: string;
         accountsSynced: number;
         drafts: Record<string, number>;
-        errors: Array<{ accountUid: string; message: string }>;
+        errors: Array<{ scope: string; message: string }>;
       };
       expect(result).toMatchObject({
         syncStatus: "completed_with_errors",
@@ -348,7 +348,7 @@ describe("source_sync job", () => {
         drafts: { created: 2, unchanged: 0, superseded: 0, skipped: 0 },
       });
       expect(result.errors).toHaveLength(1);
-      expect(result.errors[0]?.accountUid).toBe("acc_bad");
+      expect(result.errors[0]?.scope).toBe("acc_bad");
       expect(result.errors[0]?.message).toContain("ASPSP timeout");
       expect(result.errors[0]?.message).not.toContain("sess_leaky_1");
       // The sync run row is redacted too, not just the job result.
@@ -374,7 +374,7 @@ describe("source_sync job", () => {
     try {
       await h.worker.repositories.sources.create({
         ...syntheticSource(WS_1, "src_mail"),
-        kind: "email",
+        kind: "portfolio",
       });
       await h.worker.repositories.sources.setStatus(WS_1, SRC_1, "paused");
       await h.worker.queue.enqueue(h.context, "source_sync", { sourceId: "missing" });
@@ -384,7 +384,7 @@ describe("source_sync job", () => {
       const outcomes = await h.worker.runOnce();
       expect(outcomes.map((o) => [o.state, o.error])).toEqual([
         ["dead", "NonRetryableJobError: source missing not found in workspace"],
-        ["dead", "NonRetryableJobError: source kind email cannot be synced by this worker"],
+        ["dead", "NonRetryableJobError: source kind portfolio cannot be synced by this worker"],
         ["dead", "NonRetryableJobError: source src_1 is paused, not active"],
       ]);
       expect(h.gatewayCalls).toEqual([]);

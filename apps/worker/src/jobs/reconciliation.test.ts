@@ -304,8 +304,30 @@ describe("reconciliation job", () => {
     }
   });
 
-  it("searches only the configured window around the document date, or the whole workspace without one", async () => {
-    const h = await syncedHarness({ worker: { reconciliation: { windowDays: 3 } } });
+  it("searches only the configured window around the document date, or the recent past without one", async () => {
+    const h = await syncedHarness({
+      worker: { reconciliation: { windowDays: 3 } },
+      bankSessions: {
+        [SESSION_1]: {
+          status: "AUTHORIZED",
+          accounts: [
+            syntheticAccount({
+              transactions: [
+                SYNTHETIC_TRANSACTIONS.handwerk,
+                SYNTHETIC_TRANSACTIONS.rent,
+                // Two years old: outside the lookback an undated receipt gets.
+                {
+                  ...SYNTHETIC_TRANSACTIONS.handwerk,
+                  entry_reference: "txn_ancient",
+                  booking_date: "2024-01-15",
+                  value_date: "2024-01-15",
+                },
+              ],
+            }),
+          ],
+        },
+      },
+    });
     try {
       // Dated five days after the Handwerk booking: outside a 3-day window.
       h.provider.current = new FakeExtractionProvider({
@@ -319,7 +341,8 @@ describe("reconciliation job", () => {
       ).toMatchObject({ scored: 0, autoMatched: 0 });
       expect(await h.worker.repositories.matchCandidates.listForDocument(WS_1, dated)).toEqual([]);
 
-      // No document date at all: every transaction in the workspace is a candidate.
+      // No document date at all: the recent past is searched (the two-year-old
+      // twin of the Handwerk payment is not), so the current one still matches.
       const undatedBytes = new TextEncoder().encode("%PDF-1.4 receipt without a date");
       h.provider.current = {
         name: "undated",
@@ -336,7 +359,18 @@ describe("reconciliation job", () => {
       const [undatedOutcome] = await h.worker.runOnce({ kinds: ["reconciliation"] });
       expect(
         (await h.worker.queue.listRuns(h.context, undatedOutcome?.jobId ?? ""))[0]?.result,
-      ).toMatchObject({ scored: 2 });
+      ).toMatchObject({ scored: 2, autoMatched: 0, queuedForReview: 1 });
+      // Without a date distance the policy never auto-applies; the current
+      // payment is held for review, the ancient twin was never a candidate.
+      expect(
+        await h.worker.repositories.matchCandidates.getById(
+          WS_1,
+          candidateId(
+            documentIdForHash(WS_1, hashDocumentContent(undatedBytes)),
+            "bank_transaction:src_1:idhash_synth_1:txn_ancient",
+          ),
+        ),
+      ).toBeUndefined();
     } finally {
       h.close();
     }

@@ -14,6 +14,7 @@ export const JOB_KINDS = [
   "extraction",
   "reconciliation",
   "export_generation",
+  "portal_fetch",
 ] as const;
 
 export type JobKind = (typeof JOB_KINDS)[number];
@@ -76,12 +77,31 @@ export const JOB_PAYLOAD_SCHEMAS = {
     })
     .strict(),
   extraction: z.object({ documentId: nonEmpty }).strict(),
-  reconciliation: z.object({ documentId: nonEmpty }).strict(),
+  reconciliation: z
+    .object({
+      documentId: nonEmpty,
+      /**
+       * What prompted this pass (e.g. `sync:<runId>` after new bank
+       * transactions arrived). Part of the idempotency key, so a document is
+       * reconciled once per trigger; omit it for the pass after extraction.
+       */
+      trigger: nonEmpty.optional(),
+    })
+    .strict(),
   export_generation: z
     .object({
       year: z.number().int().min(1900).max(9999),
       mode: z.enum(EXPORT_MODES).default("draft"),
       templateId: nonEmpty.default("private-de"),
+    })
+    .strict(),
+  portal_fetch: z
+    .object({
+      connectionId: nonEmpty,
+      /** Scheduling window, like `source_sync`; omit for a one-off fetch. */
+      window: nonEmpty.optional(),
+      /** Overrides the worker's default per-connection cooldown. */
+      cooldownMs: z.number().int().nonnegative().optional(),
     })
     .strict(),
 } as const satisfies Record<JobKind, z.ZodTypeAny>;
@@ -143,16 +163,21 @@ export function narrowJobKind(job: PersistedJob): Job {
 
 type IdempotencyKeyDerivers = { [K in JobKind]: (payload: JobPayload<K>) => string };
 
-const IDEMPOTENCY_KEYS: IdempotencyKeyDerivers = {
-  source_sync: (p) =>
-    p.window === undefined ? `source_sync:${p.sourceId}` : `source_sync:${p.sourceId}:${p.window}`,
-  document_ingest: (p) => `document_ingest:${p.uploadId}`,
-  extraction: (p) => `extraction:${p.documentId}`,
-  reconciliation: (p) => `reconciliation:${p.documentId}`,
-  export_generation: (p) => `export_generation:${p.year}:${p.mode}:${p.templateId}`,
+/** `prefix:a:b` with undefined parts dropped. */
+function key(...parts: ReadonlyArray<string | number | undefined>): string {
+  return parts.filter((part) => part !== undefined).join(":");
+}
+
+const IDEMPOTENCY_KEY_DERIVERS: IdempotencyKeyDerivers = {
+  source_sync: (p) => key("source_sync", p.sourceId, p.window),
+  document_ingest: (p) => key("document_ingest", p.uploadId),
+  extraction: (p) => key("extraction", p.documentId),
+  reconciliation: (p) => key("reconciliation", p.documentId, p.trigger),
+  export_generation: (p) => key("export_generation", p.year, p.mode, p.templateId),
+  portal_fetch: (p) => key("portal_fetch", p.connectionId, p.window),
 };
 
 /** Default workspace-scoped idempotency key for a kind and parsed payload. */
 export function defaultIdempotencyKey<K extends JobKind>(kind: K, payload: JobPayload<K>): string {
-  return IDEMPOTENCY_KEYS[kind](payload);
+  return IDEMPOTENCY_KEY_DERIVERS[kind](payload);
 }
