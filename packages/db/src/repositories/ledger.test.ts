@@ -1,8 +1,8 @@
-import { DEFAULT_ACCOUNTS, type EvidenceLink } from "@sona/core";
+import { type AuditEvent, DEFAULT_ACCOUNTS, type EvidenceLink, type ReviewEvent } from "@sona/core";
 import { describe, expect, it } from "vitest";
 import type { DbClient } from "../runner.js";
-import { type AuditEvent, SqliteAuditEventRepository } from "./audit-events.js";
-import { EVIDENCE_RECORD_TYPES, SqliteEvidenceLinkRepository } from "./evidence-links.js";
+import { SqliteAuditEventRepository } from "./audit-events.js";
+import { SqliteEvidenceLinkRepository } from "./evidence-links.js";
 import { requiredNumber, row, withTransaction, withTransactionAsync } from "./helpers.js";
 import {
   type CreateLedgerTransactionInput,
@@ -11,6 +11,7 @@ import {
   SqliteLedgerRepository,
   UnbalancedLedgerTransactionError,
 } from "./ledger.js";
+import { RECORD_TYPES } from "./records.js";
 import { SqliteReviewEventRepository } from "./review-events.js";
 import { createTestDatabase } from "./test-support.js";
 
@@ -33,7 +34,7 @@ const MAINTENANCE = "Expenses:RealEstate:Maintenance";
 async function seedAccounts(ledger: SqliteLedgerRepository, workspaceId: string): Promise<void> {
   await ledger.ensureDefaultAccounts(workspaceId, {
     createdAt: AT,
-    accountId: (path) => `acct:${workspaceId}:${path}`,
+    accountIdFor: (path) => `acct:${workspaceId}:${path}`,
   });
 }
 
@@ -59,6 +60,25 @@ function count(db: DbClient, table: string, workspaceId: string): number {
     throw new Error("count query returned no row");
   }
   return requiredNumber(result, "n");
+}
+
+/**
+ * Wraps a client so every `exec` (BEGIN/COMMIT/SAVEPOINT/...) is recorded. The
+ * transaction helpers track nesting depth per executor object, so tests must use
+ * the returned `db` consistently instead of the wrapped one.
+ */
+function recordingExecutor(db: DbClient): { db: DbClient; statements: string[] } {
+  const statements: string[] = [];
+  return {
+    statements,
+    db: {
+      exec: (sql) => {
+        statements.push(sql);
+        db.exec(sql);
+      },
+      prepare: (sql) => db.prepare(sql),
+    },
+  };
 }
 
 /** Audit timestamps are stored canonically (`toISOString()`), so expectations use that form. */
@@ -174,7 +194,7 @@ describe("SqliteLedgerRepository accounts", () => {
 
       const reinstalled = await ledger.ensureDefaultAccounts("ws_1", {
         createdAt: "2026-03-01T00:00:00Z",
-        accountId: (path) => `other:${path}`,
+        accountIdFor: (path) => `other:${path}`,
       });
 
       expect(reinstalled.map((account) => account.id)).toEqual(
@@ -267,6 +287,37 @@ describe("SqliteLedgerRepository accounts", () => {
         }),
       ).toMatchObject({ commodity: "EUR" });
       expect(await ledger.getAccountByPath("ws_1", "Mystery:Box")).toMatchObject({ kind: "asset" });
+    } finally {
+      t.close();
+    }
+  });
+
+  it("lets receiptRequired change on an account with postings; only kind and commodity are guarded", async () => {
+    const t = createTestDatabase();
+    try {
+      const ledger = new SqliteLedgerRepository(t.db);
+      await seedAccounts(ledger, "ws_1");
+      await ledger.createTransaction("ws_1", draft("tx_1"));
+      const before = await ledger.getAccountByPath("ws_1", SUSPENSE);
+      expect(before).toMatchObject({ kind: "suspense", receiptRequired: false });
+
+      const flagged = await ledger.upsertAccount("ws_1", {
+        id: "ignored",
+        path: SUSPENSE,
+        receiptRequired: true,
+        createdAt: AT,
+      });
+      expect(flagged).toEqual({ ...before, receiptRequired: true });
+
+      // Flipping it back is fine too; the original id survives every upsert of an existing path.
+      const cleared = await ledger.upsertAccount("ws_1", {
+        id: "ignored",
+        path: SUSPENSE,
+        createdAt: AT,
+      });
+      expect(cleared).toEqual(before);
+      expect(await ledger.getAccountByPath("ws_1", SUSPENSE)).toEqual(before);
+      expect(count(t.db, "ledger_postings", "ws_1")).toBe(2);
     } finally {
       t.close();
     }
@@ -536,7 +587,7 @@ describe("SqliteLedgerRepository transactions", () => {
       const target = { type: "ledger_transaction", id: "tx_1" };
       expect(await reviewEvents.listForTarget("ws_1", target)).toEqual([
         {
-          id: "review_event:ledger_transaction:tx_1:2026-02-02T00:00:00Z",
+          id: "review_event:ledger_transaction:tx_1:2026-02-02T00:00:00Z:superseded",
           workspaceId: "ws_1",
           targetType: "ledger_transaction",
           targetId: "tx_1",
@@ -972,7 +1023,7 @@ describe("SqliteLedgerRepository transactions", () => {
       expect((await transition()).reviewState).toBe("user_reviewed");
       expect(await reviewEvents.listForTarget("ws_1", target)).toEqual([
         {
-          id: "review_event:ledger_transaction:tx_1:2026-02-02T00:00:00Z",
+          id: "review_event:ledger_transaction:tx_1:2026-02-02T00:00:00Z:user_reviewed",
           workspaceId: "ws_1",
           targetType: "ledger_transaction",
           targetId: "tx_1",
@@ -1014,15 +1065,352 @@ describe("SqliteLedgerRepository transactions", () => {
       t.close();
     }
   });
+
+  it("treats posting order and empty-versus-absent memos as content on idempotent retries", async () => {
+    const t = createTestDatabase();
+    try {
+      const ledger = new SqliteLedgerRepository(t.db);
+      await seedAccounts(ledger, "ws_1");
+      const legs = [eur(BANK, "-84.23"), eur(SUSPENSE, "84.23")];
+      // Retries below spread `imported` so only the field under test differs
+      // (`draft()` derives the description from the id).
+      const imported = draft("tx_1", { idempotencyKey: "import:1", postings: legs });
+      const first = await ledger.createTransaction("ws_1", imported);
+
+      // Documented behavior: the same legs in another order are an idempotency
+      // conflict, not a replay. Posting ids encode input order, so postings are
+      // compared as an ordered list rather than as a set.
+      await expect(
+        ledger.createTransaction("ws_1", {
+          ...imported,
+          id: "tx_1_reordered",
+          postings: [...legs].reverse(),
+        }),
+      ).rejects.toMatchObject({ code: "idempotency_conflict" });
+
+      // memo "" and an absent memo are different content as well.
+      await expect(
+        ledger.createTransaction("ws_1", {
+          ...imported,
+          id: "tx_1_memo",
+          postings: [eur(BANK, "-84.23", ""), eur(SUSPENSE, "84.23")],
+        }),
+      ).rejects.toMatchObject({ code: "idempotency_conflict" });
+
+      // Fields outside the financial content (id, createdAt, reviewState) do not count:
+      // the retry replays and the stored transaction keeps its original values.
+      const replay = await ledger.createTransaction("ws_1", {
+        ...imported,
+        id: "tx_1_retry",
+        reviewState: "suggested",
+        createdAt: "2026-02-09T00:00:00Z",
+      });
+      expect(replay.created).toBe(false);
+      expect(replay.transaction).toEqual(first.transaction);
+
+      // A retry that repeats the same empty memo replays too.
+      const withEmptyMemo = draft("tx_2", {
+        idempotencyKey: "import:2",
+        postings: [eur(BANK, "-1.00", ""), eur(SUSPENSE, "1.00")],
+      });
+      await ledger.createTransaction("ws_1", withEmptyMemo);
+      const emptyMemoRetry = await ledger.createTransaction("ws_1", {
+        ...withEmptyMemo,
+        id: "tx_2_retry",
+      });
+      expect(emptyMemoRetry.created).toBe(false);
+
+      expect(count(t.db, "ledger_transactions", "ws_1")).toBe(2);
+      expect(count(t.db, "ledger_postings", "ws_1")).toBe(4);
+      expect(count(t.db, "ledger_transaction_idempotency_keys", "ws_1")).toBe(2);
+      for (const id of ["tx_1_reordered", "tx_1_memo", "tx_1_retry", "tx_2_retry"]) {
+        expect(await ledger.getTransaction("ws_1", id)).toBeUndefined();
+      }
+    } finally {
+      t.close();
+    }
+  });
+
+  it("rejects a supersession retry whose replacement reuses the key or id with other content", async () => {
+    const t = createTestDatabase();
+    try {
+      const ledger = new SqliteLedgerRepository(t.db);
+      await seedAccounts(ledger, "ws_1");
+      await ledger.createTransaction("ws_1", draft("tx_1"));
+      const corrected = [eur(BANK, "-84.23"), eur(MAINTENANCE, "84.23")];
+      const supersede = (replacement: CreateLedgerTransactionInput) =>
+        ledger.supersedeTransaction("ws_1", {
+          supersedesTransactionId: "tx_1",
+          replacement,
+          actor: "user:test",
+          supersededAt: "2026-02-02T00:00:00Z",
+        });
+
+      const first = await supersede(
+        draft("tx_2", { idempotencyKey: "fix:1", postings: corrected }),
+      );
+      expect(first.created).toBe(true);
+      const snapshot = async () => ({
+        original: await ledger.getTransaction("ws_1", "tx_1"),
+        replacement: await ledger.getTransaction("ws_1", "tx_2"),
+        transactions: count(t.db, "ledger_transactions", "ws_1"),
+        postings: count(t.db, "ledger_postings", "ws_1"),
+        supersessions: count(t.db, "ledger_transaction_supersessions", "ws_1"),
+        keys: count(t.db, "ledger_transaction_idempotency_keys", "ws_1"),
+        reviewEvents: count(t.db, "review_events", "ws_1"),
+      });
+      const before = await snapshot();
+      expect(before).toMatchObject({
+        transactions: 2,
+        postings: 4,
+        supersessions: 1,
+        keys: 1,
+        reviewEvents: 1,
+      });
+
+      // Same key and id, but the description drifted.
+      await expect(
+        supersede(
+          draft("tx_2", { idempotencyKey: "fix:1", postings: corrected, description: "changed" }),
+        ),
+      ).rejects.toMatchObject({ code: "already_superseded" });
+      // Same key under a fresh id with different postings.
+      await expect(
+        supersede(
+          draft("tx_2_again", {
+            idempotencyKey: "fix:1",
+            postings: [eur(BANK, "-84.23"), eur("Expenses:Insurance", "84.23")],
+          }),
+        ),
+      ).rejects.toMatchObject({ code: "already_superseded" });
+      // Same id and content without a key: the id alone identifies the replacement.
+      expect((await supersede(draft("tx_2", { postings: corrected }))).created).toBe(false);
+      // Identical content under a new id and no key is a different transaction and is refused.
+      await expect(supersede(draft("tx_2_clone", { postings: corrected }))).rejects.toMatchObject({
+        code: "already_superseded",
+      });
+
+      expect(await snapshot()).toEqual(before);
+    } finally {
+      t.close();
+    }
+  });
+
+  it("allows backwards moves between open states but treats exported as terminal", async () => {
+    const t = createTestDatabase();
+    try {
+      const ledger = new SqliteLedgerRepository(t.db);
+      const reviewEvents = new SqliteReviewEventRepository(t.db);
+      await seedAccounts(ledger, "ws_1");
+      await ledger.createTransaction("ws_1", draft("tx_1"));
+
+      // Open states may move in any direction as long as the move is attributed.
+      const path = [
+        "suggested",
+        "user_reviewed",
+        "advisor_reviewed",
+        "draft",
+        "user_reviewed",
+        "exported",
+      ] as const;
+      const actors: string[] = [];
+      for (const [index, toState] of path.entries()) {
+        const actor = index % 2 === 0 ? "user:test" : "rule:synthetic";
+        actors.push(actor);
+        const result = await ledger.transitionReviewState("ws_1", {
+          id: "tx_1",
+          toState,
+          actor,
+          at: `2026-02-0${index + 2}T00:00:00Z`,
+        });
+        expect(result.reviewState).toBe(toState);
+      }
+
+      const target = { type: "ledger_transaction", id: "tx_1" };
+      const events = await reviewEvents.listForTarget("ws_1", target);
+      expect(events.map((event) => [event.fromState, event.toState])).toEqual([
+        ["draft", "suggested"],
+        ["suggested", "user_reviewed"],
+        ["user_reviewed", "advisor_reviewed"],
+        ["advisor_reviewed", "draft"],
+        ["draft", "user_reviewed"],
+        ["user_reviewed", "exported"],
+      ]);
+      expect(events.map((event) => event.actor)).toEqual(actors);
+
+      // Exported is terminal: no quiet regression to draft, only supersession.
+      await expect(
+        ledger.transitionReviewState("ws_1", {
+          id: "tx_1",
+          toState: "draft",
+          actor: "rule:synthetic",
+          at: "2026-02-08T00:00:00Z",
+        }),
+      ).rejects.toMatchObject({ code: "invalid_review_state" });
+      expect(await ledger.getTransaction("ws_1", "tx_1")).toMatchObject({
+        reviewState: "exported",
+      });
+      // Re-asserting the same state stays a no-op.
+      expect(
+        (
+          await ledger.transitionReviewState("ws_1", {
+            id: "tx_1",
+            toState: "exported",
+            actor: "user:test",
+            at: "2026-02-08T00:00:00Z",
+          })
+        ).reviewState,
+      ).toBe("exported");
+      expect(count(t.db, "review_events", "ws_1")).toBe(6);
+
+      const corrected = await ledger.supersedeTransaction("ws_1", {
+        supersedesTransactionId: "tx_1",
+        replacement: draft("tx_2", { postings: [eur(BANK, "-84.23"), eur(MAINTENANCE, "84.23")] }),
+        actor: "user:test",
+        supersededAt: "2026-02-09T00:00:00Z",
+      });
+      expect(corrected.superseded.reviewState).toBe("superseded");
+      expect((await reviewEvents.listForTarget("ws_1", target)).at(-1)).toMatchObject({
+        fromState: "exported",
+        toState: "superseded",
+      });
+      // Transitions never touch the postings.
+      expect(count(t.db, "ledger_postings", "ws_1")).toBe(4);
+    } finally {
+      t.close();
+    }
+  });
+
+  it("keeps distinct transitions and a supersession at the same instant apart", async () => {
+    const t = createTestDatabase();
+    try {
+      const ledger = new SqliteLedgerRepository(t.db);
+      const reviewEvents = new SqliteReviewEventRepository(t.db);
+      await seedAccounts(ledger, "ws_1");
+      await ledger.createTransaction("ws_1", draft("tx_1"));
+      const at = "2026-02-02T00:00:00Z";
+      const transition = (toState: "user_reviewed" | "advisor_reviewed") =>
+        ledger.transitionReviewState("ws_1", { id: "tx_1", toState, actor: "user:test", at });
+
+      // A batch job reusing one `now` for several decisions must not collide on event ids.
+      await transition("user_reviewed");
+      await transition("advisor_reviewed");
+      await ledger.supersedeTransaction("ws_1", {
+        supersedesTransactionId: "tx_1",
+        replacement: draft("tx_2", { postings: [eur(BANK, "-84.23"), eur(MAINTENANCE, "84.23")] }),
+        actor: "user:test",
+        supersededAt: at,
+      });
+
+      const events = await reviewEvents.listForTarget("ws_1", {
+        type: "ledger_transaction",
+        id: "tx_1",
+      });
+      expect(events.map((event) => event.id).sort()).toEqual([
+        `review_event:ledger_transaction:tx_1:${at}:advisor_reviewed`,
+        `review_event:ledger_transaction:tx_1:${at}:superseded`,
+        `review_event:ledger_transaction:tx_1:${at}:user_reviewed`,
+      ]);
+      expect(await ledger.getTransaction("ws_1", "tx_1")).toMatchObject({
+        reviewState: "superseded",
+        supersededByTransactionId: "tx_2",
+      });
+    } finally {
+      t.close();
+    }
+  });
+
+  it("rolls back a review transition and its review event with the outer unit it runs in", async () => {
+    const t = createTestDatabase();
+    try {
+      const ledger = new SqliteLedgerRepository(t.db);
+      await seedAccounts(ledger, "ws_1");
+      await ledger.createTransaction("ws_1", draft("tx_1"));
+      const transition = () =>
+        ledger.transitionReviewState("ws_1", {
+          id: "tx_1",
+          toState: "user_reviewed",
+          actor: "user:test",
+          at: "2026-02-02T00:00:00Z",
+        });
+
+      await expect(
+        withTransactionAsync(t.db, async () => {
+          const inside = await transition();
+          expect(inside.reviewState).toBe("user_reviewed");
+          expect(count(t.db, "review_events", "ws_1")).toBe(1);
+          throw new Error("outer job failed after the transition");
+        }),
+      ).rejects.toThrow("outer job failed after the transition");
+
+      expect(await ledger.getTransaction("ws_1", "tx_1")).toMatchObject({ reviewState: "draft" });
+      expect(count(t.db, "review_events", "ws_1")).toBe(0);
+      // The same transition at the same `at` succeeds afterwards: no ghost event survived.
+      expect((await transition()).reviewState).toBe("user_reviewed");
+      expect(count(t.db, "review_events", "ws_1")).toBe(1);
+    } finally {
+      t.close();
+    }
+  });
+
+  it("applies limit after the review-state and date filters, oldest first", async () => {
+    const t = createTestDatabase();
+    try {
+      const ledger = new SqliteLedgerRepository(t.db);
+      await seedAccounts(ledger, "ws_1");
+      await ledger.createTransaction("ws_1", draft("tx_a", { bookedOn: "2026-01-10" }));
+      await ledger.createTransaction("ws_1", draft("tx_b", { bookedOn: "2026-02-10" }));
+      await ledger.createTransaction("ws_1", draft("tx_c", { bookedOn: "2026-03-10" }));
+      await ledger.createTransaction("ws_1", draft("tx_d", { bookedOn: "2026-04-10" }));
+      for (const id of ["tx_a", "tx_c", "tx_d"]) {
+        await ledger.transitionReviewState("ws_1", {
+          id,
+          toState: "user_reviewed",
+          actor: "user:test",
+          at: AT,
+        });
+      }
+      const ids = (list: Awaited<ReturnType<typeof ledger.listTransactions>>) =>
+        list.map((transaction) => transaction.id);
+
+      expect(
+        ids(await ledger.listTransactions("ws_1", { reviewStates: ["user_reviewed"], limit: 2 })),
+      ).toEqual(["tx_a", "tx_c"]);
+      expect(
+        ids(await ledger.listTransactions("ws_1", { reviewStates: ["user_reviewed"], limit: 1 })),
+      ).toEqual(["tx_a"]);
+      expect(
+        ids(await ledger.listTransactions("ws_1", { reviewStates: ["draft"], limit: 5 })),
+      ).toEqual(["tx_b"]);
+      expect(
+        ids(
+          await ledger.listTransactions("ws_1", {
+            reviewStates: ["user_reviewed"],
+            from: "2026-03-01",
+            limit: 1,
+          }),
+        ),
+      ).toEqual(["tx_c"]);
+      expect(await ledger.listTransactions("ws_1", { reviewStates: [], limit: 1 })).toEqual([]);
+      for (const transaction of await ledger.listTransactions("ws_1", {
+        reviewStates: ["user_reviewed"],
+        limit: 2,
+      })) {
+        expect(transaction.postings).toHaveLength(2);
+      }
+    } finally {
+      t.close();
+    }
+  });
 });
 
 describe("SqliteEvidenceLinkRepository", () => {
   const link = (overrides: Partial<EvidenceLink> = {}): EvidenceLink => ({
     id: "el_1",
     workspaceId: "ws_1",
-    fromType: EVIDENCE_RECORD_TYPES.document,
+    fromType: RECORD_TYPES.document,
     fromId: "doc_1",
-    toType: EVIDENCE_RECORD_TYPES.ledgerTransaction,
+    toType: RECORD_TYPES.ledgerTransaction,
     toId: "tx_1",
     kind: "substantiates",
     createdAt: AT,
@@ -1103,9 +1491,9 @@ describe("SqliteEvidenceLinkRepository", () => {
       const exported = await repo.link(
         link({
           id: "el_export",
-          fromType: EVIDENCE_RECORD_TYPES.ledgerTransaction,
+          fromType: RECORD_TYPES.ledgerTransaction,
           fromId: "tx_1",
-          toType: EVIDENCE_RECORD_TYPES.taxExportLine,
+          toType: RECORD_TYPES.taxExportLine,
           toId: "line_1",
           kind: "exported_as",
         }),
@@ -1121,8 +1509,8 @@ describe("SqliteEvidenceLinkRepository", () => {
     try {
       const repo = new SqliteEvidenceLinkRepository(t.db);
       seedEvidenceEndpoints(t.db, "ws_1", "src_1", "1");
-      const raw = EVIDENCE_RECORD_TYPES.rawSourceRecord;
-      const tx = EVIDENCE_RECORD_TYPES.ledgerTransaction;
+      const raw = RECORD_TYPES.rawSourceRecord;
+      const tx = RECORD_TYPES.ledgerTransaction;
 
       const forward = await repo.link(
         link({
@@ -1169,6 +1557,141 @@ describe("SqliteEvidenceLinkRepository", () => {
       // The type is part of the endpoint: a matching id under another type is a different record.
       expect(await idsFor("ws_1", raw, "tx_1")).toEqual([]);
       expect(await idsFor("ws_2", raw, "raw_1")).toEqual([]);
+    } finally {
+      t.close();
+    }
+  });
+
+  it("verifies every table-backed endpoint type against its own workspace", async () => {
+    const t = createTestDatabase();
+    try {
+      const repo = new SqliteEvidenceLinkRepository(t.db);
+      const ledger = new SqliteLedgerRepository(t.db);
+      seedEvidenceEndpoints(t.db, "ws_1", "src_1", "1");
+      seedEvidenceEndpoints(t.db, "ws_2", "src_2", "2");
+      await seedAccounts(ledger, "ws_1");
+      await ledger.createTransaction("ws_1", draft("tx_posted"));
+      t.db
+        .prepare(
+          "INSERT INTO bank_transactions (id, workspace_id, source_id, account_external_id, external_id, amount, currency, raw_json, raw_record_id, updated_at) VALUES (?, ?, ?, 'acct_ext_1', 'ext_1', '-84.23', 'EUR', '{}', ?, ?)",
+        )
+        .run("bt_1", "ws_1", "src_1", "raw_1", AT);
+      t.db
+        .prepare(
+          "INSERT INTO review_items (id, workspace_id, target_type, target_id, state, reason_json, created_at, updated_at) VALUES (?, ?, 'ledger_transaction', 'tx_1', 'suggested', '{}', ?, ?)",
+        )
+        .run("review_1", "ws_1", AT, AT);
+      t.db
+        .prepare(
+          "INSERT INTO match_candidates (id, workspace_id, document_id, transaction_account_ref, transaction_ref, scorer_version, score, reasons_json, blockers_json, warnings_json, outcome, created_at) VALUES (?, ?, 'doc_1', 'acct_ext_1', 'ext_1', 'scorer@1', '0.9', '[]', '[]', '[]', 'review', ?)",
+        )
+        .run("cand_1", "ws_1", AT);
+      t.db
+        .prepare(
+          "INSERT INTO match_decisions (id, workspace_id, candidate_id, decision, actor, created_at) VALUES (?, ?, 'cand_1', 'approved', 'user:test', ?)",
+        )
+        .run("dec_1", "ws_1", AT);
+      await new SqliteReviewEventRepository(t.db).append({
+        id: "rev_1",
+        workspaceId: "ws_1",
+        targetType: RECORD_TYPES.reviewItem,
+        targetId: "review_1",
+        fromState: "suggested",
+        toState: "user_reviewed",
+        actor: "user:test",
+        createdAt: AT,
+      });
+
+      const endpoints = [
+        [RECORD_TYPES.ledgerPosting, "tx_posted:001"],
+        [RECORD_TYPES.bankTransaction, "bt_1"],
+        [RECORD_TYPES.reviewItem, "review_1"],
+        [RECORD_TYPES.matchDecision, "dec_1"],
+        [RECORD_TYPES.reviewEvent, "rev_1"],
+      ] as const;
+      for (const [type, id] of endpoints) {
+        const edge = (overrides: Partial<EvidenceLink>) =>
+          link({ id: `el_${type}`, toType: type, toId: id, kind: "reviewed_by", ...overrides });
+        expect((await repo.link(edge({}))).created).toBe(true);
+        await expect(
+          repo.link(edge({ id: `el_${type}_missing`, toId: `${id}_missing` })),
+        ).rejects.toThrow(`${type}:${id}_missing not found in workspace`);
+        // ws_2 owns a document of the right shape but none of ws_1's records.
+        await expect(
+          repo.link(edge({ id: `el_${type}_leak`, workspaceId: "ws_2", fromId: "doc_2" })),
+        ).rejects.toThrow(`${type}:${id} not found in workspace`);
+        // The `from` side is verified the same way.
+        await expect(
+          repo.link(
+            edge({
+              id: `el_${type}_from_missing`,
+              fromType: type,
+              fromId: `${id}_missing`,
+              toType: RECORD_TYPES.ledgerTransaction,
+              toId: "tx_1",
+            }),
+          ),
+        ).rejects.toThrow(`${type}:${id}_missing not found in workspace`);
+      }
+      expect(count(t.db, "evidence_links", "ws_1")).toBe(endpoints.length);
+      expect(count(t.db, "evidence_links", "ws_2")).toBe(0);
+    } finally {
+      t.close();
+    }
+  });
+});
+
+describe("SqliteReviewEventRepository", () => {
+  const event = (id: string, overrides: Partial<ReviewEvent> = {}): ReviewEvent => ({
+    id,
+    workspaceId: "ws_1",
+    targetType: RECORD_TYPES.ledgerPosting,
+    targetId: "post_1",
+    fromState: "draft",
+    toState: "suggested",
+    actor: "rule:synthetic",
+    createdAt: AT,
+    ...overrides,
+  });
+
+  it("rejects blank actors and lists one target's history per workspace, oldest first", async () => {
+    const t = createTestDatabase();
+    try {
+      const repo = new SqliteReviewEventRepository(t.db);
+      await expect(repo.append(event("rev_blank", { actor: "" }))).rejects.toThrow(
+        /actor is required/,
+      );
+      await expect(repo.append(event("rev_blank", { actor: " \t" }))).rejects.toThrow(
+        /actor is required/,
+      );
+      expect(count(t.db, "review_events", "ws_1")).toBe(0);
+
+      const later = event("rev_2", {
+        createdAt: "2026-02-02T00:00:00Z",
+        fromState: "suggested",
+        toState: "user_reviewed",
+        actor: "user:test",
+        notes: "checked",
+      });
+      await repo.append(later);
+      await repo.append(event("rev_1"));
+      await repo.append(event("rev_ws2", { workspaceId: "ws_2" }));
+      await repo.append(event("rev_other_target", { targetId: "post_2" }));
+      // Same id twice is a hard error: the log is append-only.
+      await expect(repo.append(event("rev_1"))).rejects.toThrow(/UNIQUE|PRIMARY KEY/i);
+
+      const target = { type: RECORD_TYPES.ledgerPosting, id: "post_1" };
+      const history = await repo.listForTarget("ws_1", target);
+      expect(history.map((e) => e.id)).toEqual(["rev_1", "rev_2"]);
+      expect(history[1]).toEqual(later);
+      expect(history[0]?.notes).toBeUndefined();
+      expect((await repo.listForTarget("ws_2", target)).map((e) => e.id)).toEqual(["rev_ws2"]);
+      // The type is part of the target: the same id under another type has no history.
+      expect(
+        await repo.listForTarget("ws_1", { type: RECORD_TYPES.reviewItem, id: "post_1" }),
+      ).toEqual([]);
+      expect("update" in repo).toBe(false);
+      expect("delete" in repo).toBe(false);
     } finally {
       t.close();
     }
@@ -1307,6 +1830,49 @@ describe("SqliteAuditEventRepository", () => {
       t.close();
     }
   });
+
+  it("requires an explicit offset and accepts cursors in any offset form", async () => {
+    const t = createTestDatabase();
+    try {
+      const repo = new SqliteAuditEventRepository(t.db);
+      // Offset-less values would be read in the host's zone, so they are rejected outright.
+      for (const createdAt of ["2026-02-01", "2026-02-01T10:00:00", "March 7, 2026"]) {
+        await expect(repo.append(auditEvent("audit_local", { createdAt }))).rejects.toThrow(
+          /explicit offset/,
+        );
+      }
+      await repo.append(auditEvent("audit_mid", { createdAt: "2026-02-01T00:00:00Z" }));
+      await repo.append(auditEvent("audit_later", { createdAt: "2026-02-01T00:00:01Z" }));
+      await repo.append(auditEvent("audit_earlier", { createdAt: "2026-01-31T23:59:59.999Z" }));
+      const ids = (page: Awaited<ReturnType<typeof repo.list>>) => page.events.map((e) => e.id);
+
+      expect(ids(await repo.list("ws_1"))).toEqual(["audit_earlier", "audit_mid", "audit_later"]);
+
+      // A cursor in any equivalent offset form resolves to the stored canonical instant.
+      for (const createdAt of [
+        "2026-02-01T00:00:00Z",
+        "2026-02-01T01:00:00+01:00",
+        "2026-01-31T19:00:00.000-05:00",
+      ]) {
+        expect(ids(await repo.list("ws_1", { after: { createdAt, id: "audit_mid" } }))).toEqual([
+          "audit_later",
+        ]);
+      }
+      // Tie-breaking on id still applies through a non-canonical cursor.
+      expect(
+        ids(
+          await repo.list("ws_1", { after: { createdAt: "2026-02-01T00:00:00Z", id: "audit_a" } }),
+        ),
+      ).toEqual(["audit_mid", "audit_later"]);
+      for (const createdAt of ["not-a-date", "2026-02-01"]) {
+        await expect(repo.list("ws_1", { after: { createdAt, id: "audit_a" } })).rejects.toThrow(
+          /explicit offset/,
+        );
+      }
+    } finally {
+      t.close();
+    }
+  });
 });
 
 describe("withTransaction", () => {
@@ -1404,9 +1970,9 @@ describe("withTransaction", () => {
       const importedAs: EvidenceLink = {
         id: "el_atomic",
         workspaceId: "ws_1",
-        fromType: EVIDENCE_RECORD_TYPES.rawSourceRecord,
+        fromType: RECORD_TYPES.rawSourceRecord,
         fromId: "raw_1",
-        toType: EVIDENCE_RECORD_TYPES.ledgerTransaction,
+        toType: RECORD_TYPES.ledgerTransaction,
         toId: "tx_atomic",
         kind: "imported_as",
         createdAt: AT,
@@ -1428,6 +1994,117 @@ describe("withTransaction", () => {
       });
       expect(committed).toBe("tx_atomic");
       expect(await links.listForTransaction("ws_1", "tx_atomic")).toHaveLength(1);
+    } finally {
+      t.close();
+    }
+  });
+
+  it("restores nesting depth after failures and keeps savepoint names unique per level", async () => {
+    const t = createTestDatabase();
+    try {
+      const rec = recordingExecutor(t.db);
+      const insert = (id: string) =>
+        rec.db
+          .prepare(
+            "INSERT INTO audit_events (id, workspace_id, action, actor, created_at) VALUES (?, ?, ?, ?, ?)",
+          )
+          .run(id, "ws_1", "test.write", "system", AT);
+      const auditIds = () =>
+        rec.db
+          .prepare("SELECT id FROM audit_events WHERE workspace_id = ? ORDER BY id")
+          .all("ws_1")
+          .map((r) => (r as { id: string }).id);
+
+      // After a failed top-level unit, the next top-level unit opens a real transaction.
+      expect(() =>
+        withTransaction(rec.db, () => {
+          insert("top_failed");
+          throw new Error("top");
+        }),
+      ).toThrow("top");
+      rec.statements.length = 0;
+      withTransaction(rec.db, () => insert("after_top_failure"));
+      expect(rec.statements).toEqual(["BEGIN", "COMMIT"]);
+
+      // A failed inner unit frees its savepoint name for the next sibling, and the outer commits.
+      rec.statements.length = 0;
+      withTransaction(rec.db, () => {
+        expect(() =>
+          withTransaction(rec.db, () => {
+            insert("inner_failed");
+            throw new Error("inner");
+          }),
+        ).toThrow("inner");
+        withTransaction(rec.db, () => insert("inner_sibling"));
+      });
+      expect(rec.statements).toEqual([
+        "BEGIN",
+        "SAVEPOINT sona_savepoint_1",
+        "ROLLBACK TO SAVEPOINT sona_savepoint_1",
+        "RELEASE SAVEPOINT sona_savepoint_1",
+        "SAVEPOINT sona_savepoint_1",
+        "RELEASE SAVEPOINT sona_savepoint_1",
+        "COMMIT",
+      ]);
+      rec.statements.length = 0;
+      withTransaction(rec.db, () => insert("after_inner_failure"));
+      expect(rec.statements).toEqual(["BEGIN", "COMMIT"]);
+
+      // Three levels: each depth gets its own savepoint name; a level-3 failure only loses its own write.
+      rec.statements.length = 0;
+      withTransaction(rec.db, () => {
+        insert("level_1");
+        withTransaction(rec.db, () => {
+          insert("level_2");
+          expect(() =>
+            withTransaction(rec.db, () => {
+              insert("level_3_failed");
+              throw new Error("level 3");
+            }),
+          ).toThrow("level 3");
+          withTransaction(rec.db, () => insert("level_3_ok"));
+        });
+      });
+      expect(rec.statements).toEqual([
+        "BEGIN",
+        "SAVEPOINT sona_savepoint_1",
+        "SAVEPOINT sona_savepoint_2",
+        "ROLLBACK TO SAVEPOINT sona_savepoint_2",
+        "RELEASE SAVEPOINT sona_savepoint_2",
+        "SAVEPOINT sona_savepoint_2",
+        "RELEASE SAVEPOINT sona_savepoint_2",
+        "RELEASE SAVEPOINT sona_savepoint_1",
+        "COMMIT",
+      ]);
+      expect(auditIds()).toEqual([
+        "after_inner_failure",
+        "after_top_failure",
+        "inner_sibling",
+        "level_1",
+        "level_2",
+        "level_3_ok",
+      ]);
+
+      // Async: the very same rejection value is rethrown and the depth is restored.
+      const failure = new Error("async failure");
+      let caught: unknown;
+      try {
+        await withTransactionAsync(rec.db, async () => {
+          insert("async_rolled_back");
+          await Promise.resolve();
+          throw failure;
+        });
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught).toBe(failure);
+      const plain = { reason: "not an Error instance" };
+      await expect(withTransactionAsync(rec.db, () => Promise.reject(plain))).rejects.toBe(plain);
+      rec.statements.length = 0;
+      await withTransactionAsync(rec.db, async () => insert("async_ok"));
+      expect(rec.statements).toEqual(["BEGIN", "COMMIT"]);
+      expect(auditIds()).not.toContain("async_rolled_back");
+      expect(auditIds()).toContain("async_ok");
     } finally {
       t.close();
     }

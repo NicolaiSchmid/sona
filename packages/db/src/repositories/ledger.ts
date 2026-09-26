@@ -19,6 +19,7 @@
 import {
   type AccountKind,
   DEFAULT_ACCOUNTS,
+  isAccountKind,
   isReviewState,
   type LedgerAccount,
   type LedgerPosting,
@@ -30,7 +31,6 @@ import {
   validateBalancedTransaction,
 } from "@sona/core";
 import type { DbClient, DbValue } from "../runner.js";
-import { EVIDENCE_RECORD_TYPES } from "./evidence-links.js";
 import {
   optionalString,
   placeholders,
@@ -42,6 +42,7 @@ import {
   rows,
   withTransaction,
 } from "./helpers.js";
+import { RECORD_TYPES } from "./records.js";
 import { insertReviewEvent, reviewEventId } from "./review-events.js";
 
 // --- Public types -----------------------------------------------------------
@@ -63,7 +64,7 @@ export interface LedgerAccountInput {
 export interface EnsureDefaultAccountsInput {
   createdAt: string;
   /** Generates the id for a default account path that does not exist yet. */
-  accountId: (path: string) => string;
+  accountIdFor: (path: string) => string;
 }
 
 export interface LedgerPostingInput {
@@ -93,7 +94,9 @@ export interface CreateLedgerTransactionInput {
   /**
    * Workspace-scoped natural key of the logical import (e.g. a bank transaction
    * reference). Creating again with the same key and content returns the
-   * existing transaction; the same key with different content is rejected.
+   * existing transaction (even after it was superseded); the same key with
+   * different content is rejected. "Same content" is byte-exact: importers
+   * must emit stable posting order, amount strings, and memos.
    */
   idempotencyKey?: string;
 }
@@ -212,19 +215,6 @@ const ACCOUNT_SELECT =
 const ACCOUNT_INSERT =
   "INSERT INTO ledger_accounts (id, workspace_id, path, kind, commodity, receipt_required, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)";
 
-const ACCOUNT_KINDS: Readonly<Record<AccountKind, true>> = {
-  asset: true,
-  liability: true,
-  equity: true,
-  income: true,
-  expense: true,
-  suspense: true,
-};
-
-function isAccountKind(value: string): value is AccountKind {
-  return Object.hasOwn(ACCOUNT_KINDS, value);
-}
-
 // --- Repository -------------------------------------------------------------
 
 export class SqliteLedgerRepository {
@@ -282,7 +272,7 @@ export class SqliteLedgerRepository {
     return withTransaction(this.#db, () =>
       DEFAULT_ACCOUNTS.map((account) =>
         this.#ensureAccount(workspaceId, {
-          id: input.accountId(account.path),
+          id: input.accountIdFor(account.path),
           path: account.path,
           kind: account.kind,
           receiptRequired: account.receiptRequired,
@@ -307,7 +297,7 @@ export class SqliteLedgerRepository {
   /**
    * Writes a balanced transaction and its postings atomically. Rejects
    * unbalanced postings, unknown accounts, commodity mismatches, malformed
-   * dates, and non-creation review states before touching the database.
+   * dates, and non-creation review states before writing anything.
    */
   async createTransaction(
     workspaceId: string,
@@ -375,20 +365,31 @@ export class SqliteLedgerRepository {
 
   /**
    * Moves a transaction to another review state and records who did it. The
-   * same state again is an idempotent no-op; superseded transactions are
-   * terminal and cannot be transitioned.
+   * same state again is an idempotent no-op. `superseded` and `exported` are
+   * terminal: a correction to either is a new transaction via supersession,
+   * never a quiet regression to `draft`. Who may approve what (user vs. rule
+   * vs. agent) is policy for the service layer; this only guarantees the
+   * transition is attributed and recorded.
    */
   async transitionReviewState(
     workspaceId: string,
     input: LedgerReviewTransitionInput,
   ): Promise<PersistedLedgerTransaction> {
     return withTransaction(this.#db, () => {
-      const current = this.#requireExistingTransaction(workspaceId, input.id);
-      if ((input.toState as ReviewState) === "superseded") {
+      if (input.actor.trim() === "") {
+        throw new LedgerError("invalid_input", "review transition actor is required");
+      }
+      // The type already excludes this; the runtime check guards callers arriving via JSON/MCP.
+      const toState: string = input.toState;
+      if (toState === "superseded") {
         throw new LedgerError(
           "invalid_review_state",
           "ledger transactions reach superseded only through supersession",
         );
+      }
+      const current = this.#requireExistingTransaction(workspaceId, input.id);
+      if (current.reviewState === toState) {
+        return current;
       }
       if (current.reviewState === "superseded") {
         throw new LedgerError(
@@ -396,8 +397,11 @@ export class SqliteLedgerRepository {
           `ledger transaction ${current.id} is already superseded`,
         );
       }
-      if (current.reviewState === input.toState) {
-        return current;
+      if (current.reviewState === "exported") {
+        throw new LedgerError(
+          "invalid_review_state",
+          `ledger transaction ${current.id} is exported; correct it by supersession instead of changing its state`,
+        );
       }
       this.#setReviewState(workspaceId, current, input.toState, {
         actor: input.actor,
@@ -667,9 +671,9 @@ export class SqliteLedgerRepository {
     this.#db
       .prepare("UPDATE ledger_transactions SET review_state = ? WHERE workspace_id = ? AND id = ?")
       .run(toState, workspaceId, current.id);
-    const target = { type: EVIDENCE_RECORD_TYPES.ledgerTransaction, id: current.id };
+    const target = { type: RECORD_TYPES.ledgerTransaction, id: current.id };
     insertReviewEvent(this.#db, {
-      id: reviewEventId(target, decision.at),
+      id: reviewEventId(target, decision.at, toState),
       workspaceId,
       targetType: target.type,
       targetId: target.id,

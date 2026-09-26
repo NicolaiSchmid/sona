@@ -11,6 +11,7 @@ import { SqliteDocumentExtractionRepository, SqliteDocumentRepository } from "./
 import { SqliteMatchCandidateRepository } from "./matches.js";
 import { SqlitePortalTaskRunRepository } from "./portal-task-runs.js";
 import { SqliteRawRecordRepository } from "./raw-records.js";
+import { SqliteReviewEventRepository } from "./review-events.js";
 import { SqliteReviewQueueRepository } from "./review-queue.js";
 import { createWorkspaceSyncRunStore, SqliteSyncRunRepository } from "./sync-runs.js";
 import { createTestDatabase } from "./test-support.js";
@@ -353,6 +354,24 @@ describe("SQLite receipt repositories", () => {
         state: "user_reviewed" satisfies ReviewState,
       });
       expect(await reviewQueue.getById("ws_2", "review_1")).toBeUndefined();
+
+      // The transition is logged once under the review-item id scheme, against the item's target.
+      const reviewEvents = new SqliteReviewEventRepository(t.db);
+      const target = { type: "match_candidate", id: "cand_1" };
+      expect(await reviewEvents.listForTarget("ws_1", target)).toEqual([
+        {
+          id: "review_event:review_item:review_1:2026-02-01T00:06:00Z:user_reviewed",
+          workspaceId: "ws_1",
+          targetType: "match_candidate",
+          targetId: "cand_1",
+          fromState: "suggested",
+          toState: "user_reviewed",
+          actor: "user:test",
+          notes: "Reviewed synthetic match",
+          createdAt: "2026-02-01T00:06:00Z",
+        },
+      ]);
+      expect(await reviewEvents.listForTarget("ws_2", target)).toEqual([]);
     } finally {
       t.close();
     }
