@@ -1,4 +1,10 @@
-import type { JsonValue } from "@sona/core";
+import type {
+  BrokerAccountKind,
+  JsonValue,
+  PortfolioEvent,
+  SecurityRef,
+  ValuationSnapshot,
+} from "@sona/core";
 
 export interface SyncSummary {
   runId: string;
@@ -70,6 +76,37 @@ export interface BankRecordStore {
   saveAccount(account: NormalizedAccount, link: RawLink): Promise<void>;
   saveBalance(balance: NormalizedBalance, link: RawLink): Promise<void>;
   saveTransaction(transaction: NormalizedTransaction, link: RawLink): Promise<void>;
+}
+
+// Portfolio store contract mirrored from @sona/connectors (portfolio-performance).
+
+/**
+ * Whether a normalized record was newly created, already known with the same
+ * identity, or rejected because a different record already occupies its key.
+ */
+export type PortfolioSaveResult = "created" | "unchanged" | "conflict";
+
+export interface PortfolioBrokerAccountInput {
+  externalId: string;
+  name: string;
+  kind: BrokerAccountKind;
+  currency: string | undefined;
+}
+
+export interface PortfolioSecurityInput extends SecurityRef {
+  key: string;
+}
+
+export interface PortfolioStore {
+  saveBrokerAccount(account: PortfolioBrokerAccountInput): Promise<void>;
+  saveSecurity(security: PortfolioSecurityInput): Promise<void>;
+  /** MUST be idempotent on the event's external id within (workspace, source); never updates. */
+  saveEvent(event: PortfolioEvent, link: RawLink): Promise<PortfolioSaveResult>;
+  /**
+   * MUST be append-only and idempotent on (account, security, asOf) within
+   * (workspace, source); a differing snapshot for an occupied key is `conflict`.
+   */
+  saveValuation(snapshot: ValuationSnapshot): Promise<PortfolioSaveResult>;
 }
 
 export interface TaskRunProvenance {

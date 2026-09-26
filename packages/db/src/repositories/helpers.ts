@@ -183,3 +183,8 @@ export async function withTransactionAsync<T>(db: SqlExecutor, work: () => Promi
     scope.close();
   }
 }
+
+/** For NOT NULL columns that use '' as the "absent" sentinel. */
+export function emptyToUndefined(value: string): string | undefined {
+  return value === "" ? undefined : value;
+}

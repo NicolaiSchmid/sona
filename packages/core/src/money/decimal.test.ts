@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
+  absDecimal,
   decimalsEqual,
   divideRoundHalfAwayFromZero,
   fromScaledBigInt,
   InvalidDecimalError,
+  isNegativeDecimal,
   isValidDecimalString,
   isZeroDecimal,
   negateDecimal,
@@ -93,5 +95,46 @@ describe("scaled bigint helpers", () => {
     expect(divideRoundHalfAwayFromZero(7n, 3n)).toBe(2n);
     expect(divideRoundHalfAwayFromZero(8n, 3n)).toBe(3n);
     expect(() => divideRoundHalfAwayFromZero(1n, 0n)).toThrow(RangeError);
+  });
+});
+
+describe("sign helpers", () => {
+  it("detects strictly negative values and treats negative zero as zero", () => {
+    expect(isNegativeDecimal("-0.01")).toBe(true);
+    expect(isNegativeDecimal("-1")).toBe(true);
+    expect(isNegativeDecimal("0")).toBe(false);
+    expect(isNegativeDecimal("-0")).toBe(false);
+    expect(isNegativeDecimal("-0.00")).toBe(false);
+    expect(isNegativeDecimal("1.5")).toBe(false);
+    expect(() => isNegativeDecimal("1,5")).toThrow(InvalidDecimalError);
+  });
+
+  it("negates to a canonical string, preserving scale and dropping negative zero", () => {
+    expect(negateDecimal("84.23")).toBe("-84.23");
+    expect(negateDecimal("-84.23")).toBe("84.23");
+    expect(negateDecimal("-0")).toBe("0");
+    expect(negateDecimal("-0.00")).toBe("0.00");
+    expect(negateDecimal("0.00")).toBe("0.00");
+    expect(negateDecimal("007.50")).toBe("-7.50");
+    expect(negateDecimal("0.5")).toBe("-0.5");
+    expect(() => negateDecimal("")).toThrow(InvalidDecimalError);
+    expect(() => negateDecimal("+1")).toThrow(InvalidDecimalError);
+  });
+
+  it("takes the absolute value canonically", () => {
+    expect(absDecimal("-84.23")).toBe("84.23");
+    expect(absDecimal("84.23")).toBe("84.23");
+    expect(absDecimal("-0")).toBe("0");
+    expect(absDecimal("-0.00")).toBe("0.00");
+    expect(absDecimal("-000.10")).toBe("0.10");
+    expect(absDecimal("-1000")).toBe("1000");
+    expect(() => absDecimal("abc")).toThrow(InvalidDecimalError);
+  });
+
+  it("round-trips negate and abs without changing zero-padded scale", () => {
+    for (const value of ["-0.10", "12.000", "-5", "0.0"]) {
+      expect(negateDecimal(negateDecimal(value))).toBe(value);
+      expect(isNegativeDecimal(absDecimal(value))).toBe(false);
+    }
   });
 });

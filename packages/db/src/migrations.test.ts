@@ -6,6 +6,7 @@ import {
   ASSET_TABLES,
   CORE_TABLES,
   LEDGER_REPOSITORY_TABLES,
+  PORTFOLIO_TABLES,
   RECEIPT_TABLES,
   REPOSITORY_TABLES,
 } from "./schema";
@@ -36,6 +37,7 @@ describe("core migrations", () => {
         ...REPOSITORY_TABLES,
         ...LEDGER_REPOSITORY_TABLES,
         ...ASSET_TABLES,
+        ...PORTFOLIO_TABLES,
       ]) {
         expect(names.has(table), `missing table ${table}`).toBe(true);
       }
@@ -230,6 +232,92 @@ describe("core migrations", () => {
             " VALUES ('raw_x', 'ws_2', 'src_1', 'bank_transaction', '{}', 'h', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
         ),
       ).toThrow(/FOREIGN KEY constraint failed/i);
+    } finally {
+      db.close();
+    }
+  });
+
+  it("rejects portfolio rows that link to another workspace's raw record or source", () => {
+    const db = new DatabaseSync(":memory:");
+    try {
+      applyMigrations(db, CORE_MIGRATIONS);
+      db.exec("PRAGMA foreign_keys = ON");
+      for (const [ws, src] of [
+        ["ws_1", "src_1"],
+        ["ws_2", "src_2"],
+      ]) {
+        db.exec(
+          `INSERT INTO workspaces (id, name, created_at) VALUES ('${ws}', '${ws}', '2026-01-01T00:00:00Z')`,
+        );
+        db.exec(
+          "INSERT INTO sources (id, workspace_id, kind, display_name, status, created_at)" +
+            ` VALUES ('${src}', '${ws}', 'portfolio', '${src}', 'active', '2026-01-01T00:00:00Z')`,
+        );
+      }
+      db.exec(
+        "INSERT INTO raw_source_records (id, workspace_id, source_id, record_type, payload_json, payload_hash, observed_at, created_at)" +
+          " VALUES ('raw_ws1', 'ws_1', 'src_1', 'portfolio_event', '{}', 'h1', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+      );
+      const insertEvent = (id: string, ws: string, src: string, rawId: string) =>
+        db.exec(
+          "INSERT INTO portfolio_events (id, workspace_id, source_id, external_id, broker_account_external_id, kind, event_type, event_date, amount, currency, raw_json, raw_record_id, created_at)" +
+            ` VALUES ('${id}', '${ws}', '${src}', 'ext_${id}', 'acct', 'cash_movement', 'deposit', '2026-03-01', '1.00', 'EUR', '{}', '${rawId}', '2026-01-01T00:00:00Z')`,
+        );
+      const insertValuation = (id: string, ws: string, src: string, rawId: string) =>
+        db.exec(
+          "INSERT INTO portfolio_valuations (id, workspace_id, source_id, broker_account_ref, security_key, as_of, market_value, currency, valuation_source, raw_record_id, created_at)" +
+            ` VALUES ('${id}', '${ws}', '${src}', '', '', '2026-06-30', '1.00', 'EUR', 'manual', '${rawId}', '2026-01-01T00:00:00Z')`,
+        );
+
+      insertEvent("ev_ok", "ws_1", "src_1", "raw_ws1");
+      insertValuation("val_ok", "ws_1", "src_1", "raw_ws1");
+      // ws_2 cannot link to ws_1's raw record …
+      expect(() => insertEvent("ev_raw", "ws_2", "src_2", "raw_ws1")).toThrow(
+        /FOREIGN KEY constraint failed/i,
+      );
+      expect(() => insertValuation("val_raw", "ws_2", "src_2", "raw_ws1")).toThrow(
+        /FOREIGN KEY constraint failed/i,
+      );
+      // … nor to ws_1's source, and an unknown raw record is rejected outright.
+      expect(() => insertEvent("ev_src", "ws_2", "src_1", "raw_ws1")).toThrow(
+        /FOREIGN KEY constraint failed/i,
+      );
+      expect(() => insertEvent("ev_missing", "ws_1", "src_1", "raw_missing")).toThrow(
+        /FOREIGN KEY constraint failed/i,
+      );
+      expect(() =>
+        db.exec(
+          "INSERT INTO broker_accounts (id, workspace_id, source_id, external_id, name, kind, updated_at)" +
+            " VALUES ('ba_x', 'ws_2', 'src_1', 'Depot', 'Depot', 'cash', '2026-01-01T00:00:00Z')",
+        ),
+      ).toThrow(/FOREIGN KEY constraint failed/i);
+    } finally {
+      db.close();
+    }
+  });
+
+  it("enforces one portfolio event per (workspace, source, external id)", () => {
+    const db = new DatabaseSync(":memory:");
+    try {
+      applyMigrations(db, CORE_MIGRATIONS);
+      db.exec(
+        "INSERT INTO workspaces (id, name, created_at) VALUES ('ws_1', 'A', '2026-01-01T00:00:00Z')",
+      );
+      db.exec(
+        "INSERT INTO sources (id, workspace_id, kind, display_name, status, created_at)" +
+          " VALUES ('src_1', 'ws_1', 'portfolio', 'PP', 'active', '2026-01-01T00:00:00Z')",
+      );
+      db.exec(
+        "INSERT INTO raw_source_records (id, workspace_id, source_id, record_type, payload_json, payload_hash, observed_at, created_at)" +
+          " VALUES ('raw_1', 'ws_1', 'src_1', 'portfolio_event', '{}', 'h1', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+      );
+      const insertEvent = (id: string) =>
+        db.exec(
+          "INSERT INTO portfolio_events (id, workspace_id, source_id, external_id, broker_account_external_id, kind, event_type, event_date, amount, currency, raw_json, raw_record_id, created_at)" +
+            ` VALUES ('${id}', 'ws_1', 'src_1', 'pp_same', 'acct', 'cash_movement', 'deposit', '2026-03-01', '1.00', 'EUR', '{}', 'raw_1', '2026-01-01T00:00:00Z')`,
+        );
+      insertEvent("ev_1");
+      expect(() => insertEvent("ev_2")).toThrow(/UNIQUE constraint failed/i);
     } finally {
       db.close();
     }

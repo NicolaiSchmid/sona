@@ -20,6 +20,11 @@ export const REQUIRED_STATE: Record<ExportMode, ReviewState> = {
   final: "user_reviewed",
 };
 
+/** The review gate every export artifact applies for the given mode. */
+export function requiredReviewState(mode: ExportMode): ReviewState {
+  return REQUIRED_STATE[mode];
+}
+
 /** Returns the first section whose patterns match the account, else uncategorized. */
 export function sectionForAccount(template: TaxTemplate, account: string): TaxSection {
   for (const section of template.sections) {
@@ -52,7 +57,7 @@ export function generateExportLines(
   template: TaxTemplate,
   options: GenerateOptions,
 ): GenerateResult {
-  const required = REQUIRED_STATE[options.mode];
+  const required = requiredReviewState(options.mode);
   const lines: TaxExportLine[] = [];
   const excluded: Array<{ postingId: string; reason: string }> = [];
 

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { MatchableDocument, MatchableTransaction } from "./matches.js";
-import { scoreMatch, vendorSimilarity } from "./scoring.js";
+import { amountsEqual, scoreMatch, vendorSimilarity } from "./scoring.js";
 
 function tx(overrides: Partial<MatchableTransaction> = {}): MatchableTransaction {
   return {
@@ -122,5 +122,17 @@ describe("vendorSimilarity", () => {
   it("scores unrelated vendors at zero", () => {
     expect(vendorSimilarity("Rewe Markt", "Amazon")).toBe(0);
     expect(vendorSimilarity(undefined, "Amazon")).toBe(0);
+  });
+});
+
+describe("amountsEqual", () => {
+  it("compares numerically across scales and never throws on bad input", () => {
+    expect(amountsEqual("1.0", "1.00")).toBe(true);
+    expect(amountsEqual("84.23", "84.230")).toBe(true);
+    expect(amountsEqual("0", "-0.00")).toBe(true);
+    expect(amountsEqual("1.0", "1.01")).toBe(false);
+    expect(amountsEqual("abc", "1.00")).toBe(false);
+    expect(amountsEqual("1.00", "1,00")).toBe(false);
+    expect(amountsEqual("", "")).toBe(false);
   });
 });

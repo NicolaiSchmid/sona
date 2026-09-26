@@ -12,12 +12,16 @@ import type {
   AssetComponentRole,
   AssetEventKind,
   AssetKind,
+  BrokerAccountKind,
   EvidenceLinkKind,
   JsonValue,
+  PortfolioEvent,
+  PortfolioEventType,
   RawSourceRecordType,
   ReviewState,
   SourceKind,
   SourceStatus,
+  ValuationSource,
 } from "@sona/core";
 import type {
   DocumentSourceKind,
@@ -425,3 +429,83 @@ export const ASSET_TABLES = [
 ] as const;
 
 export type AssetTableName = (typeof ASSET_TABLES)[number];
+// --- Portfolio schema (migrations/0007_portfolio.sql) -----------------------
+
+export interface BrokerAccountRow {
+  id: string;
+  workspace_id: string;
+  source_id: string;
+  external_id: string;
+  name: string;
+  kind: BrokerAccountKind;
+  currency: string | null;
+  updated_at: string;
+}
+
+export interface SecurityRow {
+  id: string;
+  workspace_id: string;
+  security_key: string;
+  isin: string | null;
+  wkn: string | null;
+  ticker: string | null;
+  name: string | null;
+  updated_at: string;
+}
+
+export interface PortfolioEventRow {
+  id: string;
+  workspace_id: string;
+  source_id: string;
+  external_id: string;
+  broker_account_external_id: string;
+  kind: PortfolioEvent["kind"];
+  event_type: PortfolioEventType;
+  event_date: string;
+  amount: string;
+  currency: string;
+  isin: string | null;
+  wkn: string | null;
+  ticker: string | null;
+  security_name: string | null;
+  shares: string | null;
+  gross_amount: string | null;
+  gross_currency: string | null;
+  exchange_rate: string | null;
+  fees: string | null;
+  taxes: string | null;
+  note: string | null;
+  raw_json: string;
+  raw_record_id: string;
+  created_at: string;
+}
+
+export interface PortfolioValuationRow {
+  id: string;
+  workspace_id: string;
+  source_id: string;
+  /** '' when the snapshot is not account-specific. */
+  broker_account_ref: string;
+  /** '' when the snapshot is not security-specific. */
+  security_key: string;
+  isin: string | null;
+  wkn: string | null;
+  ticker: string | null;
+  security_name: string | null;
+  as_of: string;
+  shares: string | null;
+  market_value: string;
+  currency: string;
+  valuation_source: ValuationSource;
+  raw_record_id: string | null;
+  created_at: string;
+}
+
+export const PORTFOLIO_TABLES = [
+  "broker_accounts",
+  "securities",
+  "portfolio_events",
+  "portfolio_valuations",
+] as const;
+
+export type PortfolioTableName = (typeof PORTFOLIO_TABLES)[number];

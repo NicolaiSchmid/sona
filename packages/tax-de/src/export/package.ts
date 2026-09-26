@@ -11,6 +11,11 @@ import {
   generateDepreciationSection,
 } from "./depreciation.js";
 import { generateExportLines } from "./generate.js";
+import {
+  generateInvestmentEvidenceRows,
+  type InvestmentEvidenceInput,
+  type InvestmentEvidenceRow,
+} from "./investment-evidence.js";
 import { generateMissingEvidenceReport, type MissingEvidenceRow } from "./missing-evidence.js";
 import type { ExportMode, TaxExportLine, TaxPostingInput, TaxTemplate } from "./types.js";
 
@@ -33,6 +38,12 @@ export interface GeneratePackageInput {
   mode: ExportMode;
   /** Configured depreciation schedules to report on; omit if the workspace has no assets. */
   depreciation?: readonly DepreciationScheduleExportInput[];
+  /**
+   * Optional capital-income evidence (investment fees, withholding). When
+   * present, the package gains `investment-evidence.csv`; the rows follow the
+   * same review gate as export lines.
+   */
+  investmentEvidence?: readonly InvestmentEvidenceInput[];
 }
 
 /** File paths a generated package always contains. */
@@ -44,6 +55,11 @@ export const PACKAGE_FILES = [
   "evidence-links.json",
   "depreciation-schedules.csv",
 ] as const;
+
+/** File paths a package contains only when the matching input is supplied. */
+export const OPTIONAL_PACKAGE_FILES = {
+  investmentEvidence: "investment-evidence.csv",
+} as const;
 
 /**
  * Neutralizes spreadsheet formula injection: a field starting with `=`, `+`,
@@ -209,6 +225,54 @@ function receiptManifestCsv(records: readonly EvidenceBearing[]): string {
 interface SummaryCounts {
   missing: number;
   depreciation: DepreciationSectionResult;
+  investmentEvidence: readonly InvestmentEvidenceRow[] | undefined;
+}
+
+function investmentEvidenceCsv(rows: readonly InvestmentEvidenceRow[]): string {
+  return csv(
+    [
+      "date",
+      "kind",
+      "description",
+      "amount",
+      "currency",
+      "account",
+      "grossAmount",
+      "grossCurrency",
+      "isin",
+      "securityName",
+      "brokerAccountExternalId",
+      "section",
+      "reviewState",
+      "postingId",
+      "transactionId",
+      "eventExternalId",
+      "rawRecordId",
+      "foreignWithholdingSuggested",
+      "notes",
+    ],
+    rows.map((r) => [
+      r.date,
+      r.kind,
+      r.description,
+      r.amount,
+      r.currency,
+      r.account,
+      r.grossAmount ?? "",
+      r.grossCurrency ?? "",
+      r.isin ?? "",
+      r.securityName ?? "",
+      r.brokerAccountExternalId,
+      r.sectionId,
+      r.reviewState,
+      r.postingId,
+      r.transactionId,
+      r.eventExternalId,
+      r.rawRecordId,
+      r.foreignWithholdingSuggested ? "true" : "false",
+      r.notes,
+    ]),
+  );
 }
 
 function summaryMd(
@@ -216,7 +280,7 @@ function summaryMd(
   lines: readonly TaxExportLine[],
   counts: SummaryCounts,
 ): string {
-  const { missing, depreciation } = counts;
+  const { missing, depreciation, investmentEvidence } = counts;
   const excludedLines = depreciation.excluded.map(
     (e) => `- ${e.assetId} ${e.year}: ${e.reason}${e.transactionId ? ` (${e.transactionId})` : ""}`,
   );
@@ -248,6 +312,15 @@ function summaryMd(
     `### Scheduled years left out of this ${input.mode} package: ${depreciation.excluded.length}`,
     ...(excludedLines.length > 0 ? excludedLines : ["- (none)"]),
     "",
+    ...(investmentEvidence === undefined
+      ? []
+      : [
+          `## Investment evidence: ${investmentEvidence.length} row(s)`,
+          "Capital-income evidence with security, gross-currency, and raw-record provenance.",
+          `Foreign withholding is suggested for ${investmentEvidence.filter((r) => r.foreignWithholdingSuggested).length} row(s) — review required.`,
+          "See investment-evidence.csv.",
+          "",
+        ]),
   ].join("\n");
 }
 
@@ -277,10 +350,28 @@ export function generateExportPackage(input: GeneratePackageInput): TaxExportPac
   ];
   const evidence = evidenceBearing(lines, depreciation.rows);
 
+  // Evidence rows are annotations on export lines: a row whose posting is not
+  // in this package (other year, below the review gate, or simply not passed)
+  // would be an untraceable orphan, so it is dropped too.
+  const investmentEvidence =
+    input.investmentEvidence === undefined
+      ? undefined
+      : generateInvestmentEvidenceRows(
+          input.investmentEvidence.filter(
+            (row) => row.date.startsWith(yearPrefix) && includedIds.has(row.postingId),
+          ),
+          input.template,
+          { mode: input.mode },
+        ).rows;
+
   const files: ExportFile[] = [
     {
       path: "summary.md",
-      content: summaryMd(input, lines, { missing: missing.length, depreciation }),
+      content: summaryMd(input, lines, {
+        missing: missing.length,
+        depreciation,
+        investmentEvidence,
+      }),
     },
     { path: "tax-categories.csv", content: taxCategoriesCsv(lines) },
     {
@@ -302,6 +393,12 @@ export function generateExportPackage(input: GeneratePackageInput): TaxExportPac
     { path: "evidence-links.json", content: evidenceLinksJson(evidence) },
     { path: "depreciation-schedules.csv", content: depreciationSchedulesCsv(depreciation.rows) },
   ];
+  if (investmentEvidence !== undefined) {
+    files.push({
+      path: OPTIONAL_PACKAGE_FILES.investmentEvidence,
+      content: investmentEvidenceCsv(investmentEvidence),
+    });
+  }
 
   return { year: input.year, templateId: input.template.id, mode: input.mode, files };
 }

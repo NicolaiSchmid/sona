@@ -166,6 +166,19 @@ review_events
 
 Rules produce suggestions. Review events approve, reject, or adjust suggestions.
 
+## Portfolio
+
+```text
+broker_accounts
+securities
+portfolio_events
+portfolio_valuations
+```
+
+Each imported export is first preserved verbatim as a `source_file` raw record (keyed by content hash), then every row becomes its own raw record. Portfolio events (buy/sell/dividend/fee/tax/deposit/withdrawal …) are normalized from those rows and are idempotent on `(workspaceId, sourceId, externalId)`. They are evidence, not postings: balanced `draft` ledger transactions are derived from them with explicit legs (net cash, acquisition cost, fees, taxes, gross in original currency via a conversion pair) and reviewed like any other draft. Sale and outbound-delivery proceeds land in a disposal suspense account pending lot review, because Sona tracks no lots and never infers a realized gain.
+
+Valuation snapshots are append-only informational records and never enter the ledger. Broker deposits/withdrawals are matched to bank transaction legs through the reconciliation engine; uncertain or unmatched movements go to the review queue.
+
 ## Assets and depreciation
 
 ```text

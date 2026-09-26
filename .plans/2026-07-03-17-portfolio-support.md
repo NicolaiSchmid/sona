@@ -84,6 +84,7 @@ Write tests first with synthetic fixtures:
 
 ## Follow-Up
 
+- Worker job wiring (`apps/worker/src/jobs/portfolio-import.ts`) and the chained end-to-end run land with the worker-jobs phase; this phase delivers the library stages with per-stage tests.
 - Broker API/CSV adapters (comdirect, IBKR flex queries).
 - Vorabpauschale evidence collection as a configurable template.
 - Lot tracking for disposal review support.

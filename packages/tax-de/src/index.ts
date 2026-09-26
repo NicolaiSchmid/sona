@@ -23,8 +23,19 @@ export {
   type GenerateOptions,
   type GenerateResult,
   generateExportLines,
+  requiredReviewState,
   sectionForAccount,
 } from "./export/generate.js";
+export {
+  generateInvestmentEvidenceRows,
+  INVESTMENT_EVIDENCE_KINDS,
+  type InvestmentEvidenceFromDraftInput,
+  type InvestmentEvidenceInput,
+  type InvestmentEvidenceKind,
+  type InvestmentEvidenceResult,
+  type InvestmentEvidenceRow,
+  investmentEvidenceFromDraft,
+} from "./export/investment-evidence.js";
 export {
   generateMissingEvidenceReport,
   type MissingEvidenceRow,
@@ -33,6 +44,7 @@ export {
   type ExportFile,
   type GeneratePackageInput,
   generateExportPackage,
+  OPTIONAL_PACKAGE_FILES,
   PACKAGE_FILES,
   type TaxExportPackage,
 } from "./export/package.js";

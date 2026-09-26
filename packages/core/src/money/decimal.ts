@@ -98,6 +98,17 @@ export function negateDecimal(value: string): string {
   return fromScaledBigInt(-parsed.value, parsed.scale);
 }
 
+/** Returns true if the decimal string is strictly negative ("-0.00" is not). */
+export function isNegativeDecimal(value: string): boolean {
+  return parseScaled(value).value < 0n;
+}
+
+/** Returns the canonical absolute value of a decimal string, preserving scale. */
+export function absDecimal(value: string): string {
+  const parsed = parseScaled(value);
+  return fromScaledBigInt(parsed.value < 0n ? -parsed.value : parsed.value, parsed.scale);
+}
+
 /**
  * Divides `numerator` by `denominator` rounding half away from zero. Both
  * operands are plain integers; callers scale them first so the quotient lands
