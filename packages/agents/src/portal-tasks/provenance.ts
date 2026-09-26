@@ -32,21 +32,24 @@ export type BlockedPortalRequestReason =
   | "unreviewed_body"
   | "websocket";
 
-/** Playwright's resource classification; unknown kinds map to `other`. */
-export type PortalResourceType =
-  | "document"
-  | "stylesheet"
-  | "image"
-  | "media"
-  | "font"
-  | "script"
-  | "texttrack"
-  | "xhr"
-  | "fetch"
-  | "eventsource"
-  | "websocket"
-  | "manifest"
-  | "other";
+/** Playwright's resource classification; adapters map unknown kinds to `other`. */
+export const PORTAL_RESOURCE_TYPES = [
+  "document",
+  "stylesheet",
+  "image",
+  "media",
+  "font",
+  "script",
+  "texttrack",
+  "xhr",
+  "fetch",
+  "eventsource",
+  "websocket",
+  "manifest",
+  "other",
+] as const;
+
+export type PortalResourceType = (typeof PORTAL_RESOURCE_TYPES)[number];
 
 export interface BlockedPortalRequest {
   /** Sanitized: no query, fragment, or userinfo. */

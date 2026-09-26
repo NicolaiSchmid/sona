@@ -67,6 +67,7 @@ export {
   type FetchedContent,
   type FetchedDocument,
   type FetchedDocumentProvenance,
+  PORTAL_RESOURCE_TYPES,
   type PortalResourceType,
   STORED_DOCUMENT_URI_SCHEME,
   type TaskRunProvenance,
