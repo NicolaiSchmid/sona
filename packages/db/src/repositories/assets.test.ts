@@ -17,6 +17,7 @@ import {
   type SqliteDatabase,
 } from "../runner.js";
 import { SqliteAssetRepository } from "./assets.js";
+import { SqliteEvidenceLinkRepository } from "./evidence-links.js";
 
 const require = createRequire(import.meta.url);
 const { DatabaseSync } = require("node:sqlite") as typeof import("node:sqlite");
@@ -264,6 +265,40 @@ describe("SqliteAssetRepository", () => {
         repo.recordDepreciationEntry({ ...entry(2024), configId: "cfg_b" }),
       ).rejects.toThrow(/FOREIGN KEY/i);
       expect(await repo.listDepreciationEntries("ws_1", "asset_flat")).toEqual([]);
+    } finally {
+      close();
+    }
+  });
+
+  it("lets depreciation draft evidence links pass the evidence endpoint check", async () => {
+    const { db, close } = createTestDatabase();
+    try {
+      const repo = new SqliteAssetRepository(db);
+      const links = new SqliteEvidenceLinkRepository(db);
+      await repo.create(property());
+      await repo.saveScheduleConfig(config());
+      const schedule = computeDepreciationSchedule({ asset: property(), config: config() });
+      const [draft] = planDepreciationDrafts({
+        asset: property(),
+        config: config(),
+        schedule,
+        recorded: [],
+        throughYear: 2024,
+        createdAt: CREATED_AT,
+      }).create;
+      const scheduleLink = draft?.evidenceLinks.find((l) => l.kind === "generated_from");
+      if (scheduleLink === undefined) {
+        throw new Error("expected a generated_from link");
+      }
+      // The ledger transaction endpoint is verified too, so create it first.
+      db.prepare(
+        "INSERT INTO ledger_transactions (id, workspace_id, booked_on, description, review_state, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+      ).run(scheduleLink.fromId, "ws_1", "2024-12-31", "draft", "draft", CREATED_AT);
+      expect((await links.link(scheduleLink)).created).toBe(true);
+      // A link to a schedule config that does not exist in the workspace is refused.
+      await expect(
+        links.link({ ...scheduleLink, id: "link_bad", toId: "cfg_missing" }),
+      ).rejects.toThrow(/asset_depreciation_schedule:cfg_missing not found/);
     } finally {
       close();
     }

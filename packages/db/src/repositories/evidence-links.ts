@@ -23,6 +23,8 @@ const ENDPOINT_TABLES = {
   match_decision: "match_decisions",
   review_event: "review_events",
   review_item: "review_items",
+  asset: "assets",
+  asset_depreciation_schedule: "asset_depreciation_schedules",
 } as const satisfies Partial<Record<RecordType, string>>;
 
 function endpointTable(type: string): string | undefined {

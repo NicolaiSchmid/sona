@@ -14,6 +14,9 @@ export const RECORD_TYPES = {
   reviewEvent: "review_event",
   reviewItem: "review_item",
   taxExportLine: "tax_export_line",
+  asset: "asset",
+  /** Named after its table; matches core's `ASSET_RECORD_TYPES.scheduleConfig`. */
+  assetDepreciationSchedule: "asset_depreciation_schedule",
 } as const;
 
 export type RecordType = (typeof RECORD_TYPES)[keyof typeof RECORD_TYPES];
