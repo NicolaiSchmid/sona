@@ -29,7 +29,7 @@ describe("createSecretStoreSourceSyncGateway", () => {
       const gateway = createSecretStoreSourceSyncGateway({
         sources,
         secrets,
-        enableBankingClient: () => client,
+        createEnableBankingClient: () => client,
       });
       await expect(gateway.resolveEnableBanking(context, SRC_1)).resolves.toEqual({
         client,
@@ -70,7 +70,7 @@ describe("createSecretStoreSourceSyncGateway", () => {
       const gateway = createSecretStoreSourceSyncGateway({
         sources,
         secrets,
-        enableBankingClient: () => client,
+        createEnableBankingClient: () => client,
       });
       const error = await gateway.resolveEnableBanking(context, SRC_1).catch((e: unknown) => e);
       expect(error).toBeInstanceOf(Error);
@@ -109,7 +109,7 @@ describe("createSecretStoreSourceSyncGateway", () => {
       const gateway = createSecretStoreSourceSyncGateway({
         sources,
         secrets,
-        enableBankingClient: () => client,
+        createEnableBankingClient: () => client,
       });
       await expect(gateway.resolveEnableBanking(context, SRC_1)).rejects.toBeInstanceOf(
         NonRetryableJobError,
@@ -128,7 +128,7 @@ describe("createSecretStoreSourceSyncGateway", () => {
       const gateway = createSecretStoreSourceSyncGateway({
         sources,
         secrets,
-        enableBankingClient: () => client,
+        createEnableBankingClient: () => client,
       });
       await expect(gateway.resolveEnableBanking(context, SRC_1)).rejects.toThrow(
         /no stored credential/,

@@ -226,6 +226,59 @@ describe("reconciliation job", () => {
     }
   });
 
+  it("respects a match review item a human already has open or closed", async () => {
+    const h = await syncedHarness();
+    try {
+      h.provider.current = new FakeExtractionProvider(MATCHING_RECEIPT);
+      const documentId = await extractedReceipt(h);
+      const id = candidateId(documentId, HANDWERK_TX);
+      // An item for this exact pair is already open (e.g. raised by an earlier
+      // policy): a perfect score must not auto-apply around it.
+      await h.worker.repositories.reviewQueue.enqueue({
+        id: matchReviewItemId(id),
+        workspaceId: WS_1,
+        targetType: "match_candidate",
+        targetId: id,
+        state: "suggested",
+        reason: { kind: "receipt_match", candidateId: id },
+        createdAt: h.clock.now(),
+        updatedAt: h.clock.now(),
+      });
+      await h.worker.runOnce({ kinds: ["reconciliation"] });
+      const candidate = await h.worker.repositories.matchCandidates.getById(WS_1, id);
+      expect(candidate?.outcome).toBe("review");
+      expect(candidate?.reasons).toContainEqual("review item already open");
+      expect(await h.worker.repositories.matchCandidates.listDecisions(WS_1, id)).toEqual([]);
+      expect(await h.worker.repositories.evidenceLinks.listForDocument(WS_1, documentId)).toEqual(
+        [],
+      );
+
+      // The human closes the item without recording a decision row: later
+      // passes leave the pair alone entirely.
+      await h.worker.repositories.reviewQueue.transition(WS_1, {
+        id: matchReviewItemId(id),
+        toState: "user_reviewed",
+        actor: "user_1",
+        at: h.clock.now(),
+      });
+      await h.worker.queue.enqueue(
+        h.context,
+        "reconciliation",
+        { documentId, trigger: "manual" },
+        {},
+      );
+      const [outcome] = await h.worker.runOnce({ kinds: ["reconciliation"] });
+      expect(outcome?.state).toBe("succeeded");
+      expect(outcome?.produced).toEqual([]);
+      expect((await h.worker.repositories.matchCandidates.getById(WS_1, id))?.outcome).toBe(
+        "review",
+      );
+      expect(await h.worker.repositories.matchCandidates.listDecisions(WS_1, id)).toEqual([]);
+    } finally {
+      h.close();
+    }
+  });
+
   it("re-running reconciliation is idempotent and preserves human decisions", async () => {
     const h = await syncedHarness();
     try {
@@ -563,6 +616,100 @@ describe("reconciliation job", () => {
         candidateId(documentId, "bank_transaction:src_1:idhash_synth_1:txn_twin"),
       );
       expect(twin?.outcome).toBe("review");
+    } finally {
+      h.close();
+    }
+  });
+
+  it("judges a head with only asset legs against suspense, and still links evidence to that head", async () => {
+    const h = await syncedHarness();
+    try {
+      // A human reclassifies the draft as a transfer between two asset
+      // accounts: there is no expense leg for a receipt to substantiate.
+      const ledger = h.worker.repositories.ledger;
+      const draft =
+        (await ledger.listTransactions(WS_1)).find((t) =>
+          t.description.startsWith("Example Handwerk"),
+        ) ?? fail("no draft");
+      const bankLeg = draft.postings.find((p) => p.account.startsWith("Assets:")) ?? fail("leg");
+      const { replacement } = await ledger.supersedeTransaction(WS_1, {
+        supersedesTransactionId: draft.id,
+        replacement: {
+          id: "tx_transfer",
+          bookedOn: draft.bookedOn,
+          description: draft.description,
+          postings: [
+            { account: bankLeg.account, amount: bankLeg.amount },
+            { account: "Assets:Broker", amount: { amount: "84.23", commodity: "EUR" } },
+          ],
+          reviewState: "suggested",
+          createdAt: h.clock.now(),
+        },
+        actor: "user_1",
+        supersededAt: h.clock.now(),
+      });
+      expect(replacement.postings.every((p) => p.account.startsWith("Assets:"))).toBe(true);
+
+      h.provider.current = new FakeExtractionProvider(MATCHING_RECEIPT);
+      const documentId = await extractedReceipt(h);
+      const [outcome] = await h.worker.runOnce({ kinds: ["reconciliation"] });
+      expect(outcome?.state).toBe("succeeded");
+      const candidate = await h.worker.repositories.matchCandidates.getById(
+        WS_1,
+        candidateId(documentId, HANDWERK_TX),
+      );
+      // The suspense fallback carries no review-required pattern, so the
+      // otherwise exact match auto-applies rather than crashing or stalling.
+      expect(candidate?.outcome).toBe("auto_match");
+      expect(JSON.stringify(candidate?.reasons)).not.toMatch(/requires review/);
+      const links = await h.worker.repositories.evidenceLinks.listForDocument(WS_1, documentId);
+      expect(links.map((l) => [l.kind, l.toType, l.toId])).toEqual([
+        ["substantiates", "ledger_transaction", "tx_transfer"],
+      ]);
+      expect(links.some((l) => l.toId === draft.id)).toBe(false);
+    } finally {
+      h.close();
+    }
+  });
+
+  it("skips an extraction without a total amount and dead-letters an unknown document", async () => {
+    const h = await syncedHarness();
+    try {
+      h.provider.current = {
+        name: "no-total",
+        version: "1",
+        extract: async (input) => ({
+          ...(await new FakeExtractionProvider(MATCHING_RECEIPT).extract(input)),
+          totalAmount: undefined,
+        }),
+      };
+      const documentId = await extractedReceipt(h);
+      // Extraction does not chain reconciliation without a total; a sync
+      // re-queue or an agent still can, and that pass must skip cleanly.
+      expect(await h.worker.queue.list(h.context, { kinds: ["reconciliation"] })).toEqual([]);
+      await h.worker.queue.enqueue(h.context, "reconciliation", {
+        documentId,
+        trigger: "sync:synthetic",
+      });
+      const [outcome] = await h.worker.runOnce({ kinds: ["reconciliation"] });
+      expect(outcome).toMatchObject({ state: "succeeded", produced: [] });
+      const run = (await h.worker.queue.listRuns(h.context, outcome?.jobId ?? ""))[0];
+      expect(run?.result).toMatchObject({
+        skipped: "no_total_amount",
+        extractionId: expect.any(String),
+        scored: 0,
+      });
+      expect(await h.worker.repositories.matchCandidates.listForDocument(WS_1, documentId)).toEqual(
+        [],
+      );
+
+      // A document id from another workspace (or none at all) cannot be
+      // reconciled here; retrying would not change that.
+      await h.worker.queue.enqueue(h.otherContext, "reconciliation", { documentId });
+      const [foreign] = await h.worker.runOnce({ kinds: ["reconciliation"] });
+      expect(foreign).toMatchObject({ workspaceId: "ws_2", state: "dead", attempt: 1 });
+      expect(foreign?.error).toMatch(/not found in workspace/);
+      expect(countRows(h.db, "match_candidates", "ws_2")).toBe(0);
     } finally {
       h.close();
     }

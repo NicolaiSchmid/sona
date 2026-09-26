@@ -13,6 +13,7 @@
 /** Package version marker, used to verify wiring and test discovery. */
 export const sonaWorkerVersion = "0.0.0" as const;
 
+export { isWorkerActor, WORKER_ACTORS } from "./actors.js";
 export {
   createDocumentIngestHandler,
   DOCUMENT_STORAGE_SCHEME,
@@ -72,8 +73,11 @@ export {
 export {
   type EnqueueOptions,
   type EnqueueResult,
+  type JobListFilter,
   JobQueue,
   type JobQueueOptions,
+  type JobStatus,
+  type PersistedJobRun,
 } from "./jobs/queue.js";
 export {
   createReconciliationHandler,

@@ -45,6 +45,7 @@ import {
   reconcileMatchSet,
   scoreMatch,
 } from "@sona/receipts";
+import { WORKER_ACTORS } from "../actors.js";
 import { ledgerHead } from "./draft-postings.js";
 import { extractionReviewItemId } from "./extraction.js";
 import { type JobHandler, NonRetryableJobError } from "./runner.js";
@@ -75,7 +76,7 @@ const UNDATED_LOOKBACK_DAYS = 365;
 
 export const SCORER_VERSION = "receipts-scoring@1" as const;
 
-export const AUTO_APPLY_ACTOR = "policy:auto_apply@1" as const;
+export const AUTO_APPLY_ACTOR = WORKER_ACTORS.autoApply;
 
 export interface ReconcileDocumentInput {
   context: WorkspaceContext;
@@ -184,6 +185,11 @@ async function latestExtraction(
   return all[all.length - 1];
 }
 
+/**
+ * Scores one document against nearby bank transactions and persists the
+ * outcome under the auto-apply policy. Safe to call repeatedly: settled and
+ * human-decided pairs are left alone.
+ */
 export async function reconcileDocument(
   deps: ReconciliationDependencies,
   input: ReconcileDocumentInput,
@@ -295,6 +301,11 @@ export async function reconcileDocument(
         // Already auto-applied on an earlier run; the decision and link stand.
         continue;
       }
+      const openReview = await deps.reviewQueue.getById(workspaceId, matchReviewItemId(id));
+      if (openReview !== undefined && openReview.state !== "suggested") {
+        // A human closed the review item (with or without a decision row).
+        continue;
+      }
       // The in-memory one-to-one guard only sees this document's candidates. A
       // transaction that another document already substantiates is contested,
       // and contested matches are for humans.
@@ -302,14 +313,15 @@ export async function reconcileDocument(
         scored.outcome === "auto_match"
           ? await substantiatedByOtherDocument(deps.evidenceLinks, workspaceId, target, documentId)
           : undefined;
-      const outcome: PersistedMatchOutcome = contestedBy === undefined ? scored.outcome : "review";
-      const reasons =
-        contestedBy === undefined
-          ? scored.reasons
-          : [
-              ...scored.reasons,
-              `transaction already substantiated by document ${contestedBy}; needs review`,
-            ];
+      const holdReasons = [
+        ...(contestedBy === undefined
+          ? []
+          : [`transaction already substantiated by document ${contestedBy}; needs review`]),
+        // A pair a human is already looking at stays theirs, however it scores now.
+        ...(openReview === undefined ? [] : ["review item already open"]),
+      ];
+      const outcome: PersistedMatchOutcome = holdReasons.length === 0 ? scored.outcome : "review";
+      const reasons = [...scored.reasons, ...holdReasons];
       const candidate: MatchCandidate = {
         id,
         workspaceId,

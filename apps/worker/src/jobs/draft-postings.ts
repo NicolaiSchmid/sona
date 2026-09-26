@@ -32,6 +32,7 @@ import {
   type SqliteLedgerRepository,
   type SqliteReviewQueueRepository,
 } from "@sona/db";
+import { WORKER_ACTORS } from "../actors.js";
 
 /** The bank transaction fields the draft needs, plus the records it links back to. */
 export interface DraftPostingSource
@@ -77,20 +78,26 @@ export type DraftPostingState = (typeof DRAFT_POSTING_STATES)[number];
 
 export type DraftPostingResult =
   | {
-      state: Exclude<DraftPostingState, "skipped">;
+      state: "created" | "unchanged" | "superseded";
       /** The ledger transaction now representing the bank transaction. */
       transaction: PersistedLedgerTransaction;
-      /** Why the correction was held for review, when it was. */
-      reason: string | undefined;
+      reason?: undefined;
+    }
+  | {
+      state: "needs_review";
+      /** The human-reviewed transaction the correction was held against. */
+      transaction: PersistedLedgerTransaction;
+      /** Why the correction was held for review. */
+      reason: string;
     }
   | {
       state: "skipped";
-      transaction: undefined;
+      transaction?: undefined;
       /** Why no draft was generated. */
       reason: string;
     };
 
-export const BANK_CORRECTION_ACTOR = "system:bank_sync" as const;
+export const BANK_CORRECTION_ACTOR = WORKER_ACTORS.bankSync;
 
 const MAX_DESCRIPTION_LENGTH = 200;
 
@@ -184,6 +191,27 @@ function sameContent(
 }
 
 /**
+ * Whether the facts the bank reports — booking date and the bank leg — still
+ * match a transaction a human has classified. Counter-legs, memos, and the
+ * description are the human's and never count as a bank correction.
+ */
+function sameBankFacts(
+  existing: PersistedLedgerTransaction,
+  desired: CreateLedgerTransactionInput,
+  bankAccountPath: string,
+): boolean {
+  const reported = desired.postings.find((posting) => posting.account === bankAccountPath);
+  const booked = existing.postings.find((posting) => posting.account === bankAccountPath);
+  return (
+    existing.bookedOn === desired.bookedOn &&
+    reported !== undefined &&
+    booked !== undefined &&
+    booked.amount.amount === reported.amount.amount &&
+    booked.amount.commodity === reported.amount.commodity
+  );
+}
+
+/**
  * Creates or reconciles the draft ledger transaction for one bank transaction.
  * Call inside the job's database transaction so a failure rolls back every
  * draft of the run together.
@@ -196,14 +224,14 @@ export async function ensureDraftPosting(
   const workspaceId = context.workspaceId;
 
   if (transaction.status !== undefined && !BOOKED_STATUSES.has(transaction.status)) {
-    return { state: "skipped", transaction: undefined, reason: `status ${transaction.status}` };
+    return { state: "skipped", reason: `status ${transaction.status}` };
   }
   const bookedOn = transaction.bookedOn ?? transaction.valueDate;
   if (bookedOn === undefined) {
-    return { state: "skipped", transaction: undefined, reason: "no booking or value date" };
+    return { state: "skipped", reason: "no booking or value date" };
   }
   if (isZeroDecimal(transaction.amount)) {
-    return { state: "skipped", transaction: undefined, reason: "zero amount" };
+    return { state: "skipped", reason: "zero amount" };
   }
 
   await deps.ledger.ensureAccount(workspaceId, {
@@ -221,13 +249,12 @@ export async function ensureDraftPosting(
     outcome = {
       state: created.created ? "created" : "unchanged",
       transaction: created.transaction,
-      reason: undefined,
     };
   } else {
     outcome = await reconcileCorrection(deps, input, original, desired);
   }
 
-  if (outcome.transaction !== undefined) {
+  if (outcome.state !== "skipped") {
     for (const from of [
       { type: RECORD_TYPES.bankTransaction, id: transaction.bankTransactionId },
       { type: RECORD_TYPES.rawSourceRecord, id: transaction.rawRecordId },
@@ -257,13 +284,15 @@ async function reconcileCorrection(
   const workspaceId = input.context.workspaceId;
   const chain = await supersessionChain(deps.ledger, original);
   const head = chain[chain.length - 1] ?? original;
-  if (sameContent(head, desired)) {
-    return { state: "unchanged", transaction: head, reason: undefined };
-  }
 
   if (!WORKER_OWNED_STATES.has(head.reviewState)) {
-    // A human has taken this transaction past draft: the worker must not
-    // replace their work. Surface the discrepancy instead.
+    // A human has taken this transaction past draft: their counter-account
+    // and wording are theirs to keep, so only the facts the bank reports
+    // (date and the bank leg) can count as a correction. Never replace the
+    // transaction; surface the discrepancy instead.
+    if (sameBankFacts(head, desired, input.bankAccountPath)) {
+      return { state: "unchanged", transaction: head };
+    }
     const reviewItemId = bankCorrectionReviewItemId(head.id, desired);
     const reason: JsonValue = {
       kind: "bank_correction",
@@ -295,6 +324,9 @@ async function reconcileCorrection(
     };
   }
 
+  if (sameContent(head, desired)) {
+    return { state: "unchanged", transaction: head };
+  }
   // Replacement ids are sequenced along the chain, so a value that flips back
   // and forth still gets a fresh transaction each time.
   const revision = chain.length;
@@ -310,11 +342,7 @@ async function reconcileCorrection(
     notes: "bank transaction changed after import",
   });
   await carryOverEvidence(deps, workspaceId, head.id, replacement.id, input.now);
-  return {
-    state: created ? "superseded" : "unchanged",
-    transaction: replacement,
-    reason: undefined,
-  };
+  return { state: created ? "superseded" : "unchanged", transaction: replacement };
 }
 
 /** Receipts that substantiated the superseded draft substantiate its replacement too. */

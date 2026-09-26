@@ -1,12 +1,16 @@
 import type { DocumentExtraction, StoredDocument } from "@sona/receipts";
 import type { DbClient } from "../runner.js";
 import { optionalString, parseJson, requiredString, row, rows, stringifyJson } from "./helpers.js";
+import { RECORD_TYPES } from "./records.js";
 
 export interface StoredDocumentExtraction extends DocumentExtraction {
   id: string;
   workspaceId: string;
   createdAt: string;
 }
+
+/** Correlated subquery: an outgoing `substantiates` edge from document `d`. Constants only, never input. */
+const SUBSTANTIATES_FROM_DOCUMENT = `SELECT 1 FROM evidence_links e WHERE e.workspace_id = d.workspace_id AND e.from_type = '${RECORD_TYPES.document}' AND e.from_id = d.id AND e.kind = 'substantiates'`;
 
 export class SqliteDocumentRepository {
   readonly #db: DbClient;
@@ -60,7 +64,26 @@ export class SqliteDocumentRepository {
     return rows(
       this.#db
         .prepare(
-          "SELECT d.* FROM documents d WHERE d.workspace_id = ? AND d.retention_state = 'active' AND NOT EXISTS (SELECT 1 FROM evidence_links e WHERE e.workspace_id = d.workspace_id AND e.from_type = 'document' AND e.from_id = d.id AND e.kind = 'substantiates') ORDER BY d.created_at, d.id LIMIT ?",
+          `SELECT d.* FROM documents d WHERE d.workspace_id = ? AND d.retention_state = 'active' AND NOT EXISTS (${SUBSTANTIATES_FROM_DOCUMENT}) ORDER BY d.created_at, d.id LIMIT ?`,
+        )
+        .all(workspaceId, limit),
+    ).map(documentFromRow);
+  }
+
+  /**
+   * Unsubstantiated documents that reconciliation can act on: an extraction
+   * with a total exists. The worker re-queues these when new bank transactions
+   * arrive; documents still awaiting extraction or review of a missing total
+   * would only produce no-op jobs.
+   */
+  async listAwaitingReconciliation(workspaceId: string, limit = 500): Promise<StoredDocument[]> {
+    if (!Number.isInteger(limit) || limit < 1) {
+      throw new Error(`document list limit must be a positive integer, got ${String(limit)}`);
+    }
+    return rows(
+      this.#db
+        .prepare(
+          `SELECT d.* FROM documents d WHERE d.workspace_id = ? AND d.retention_state = 'active' AND EXISTS (SELECT 1 FROM document_extractions x WHERE x.workspace_id = d.workspace_id AND x.document_id = d.id AND x.total_amount IS NOT NULL) AND NOT EXISTS (${SUBSTANTIATES_FROM_DOCUMENT}) ORDER BY d.created_at, d.id LIMIT ?`,
         )
         .all(workspaceId, limit),
     ).map(documentFromRow);

@@ -75,6 +75,7 @@ export function createWorkerRepositories(db: DbClient): WorkerRepositories {
   };
 }
 
+/** Everything a worker needs from its host: the database, storage, credentials, and providers. */
 export interface WorkerRuntimeOptions {
   db: DbClient;
   storage: DocumentStorage;
@@ -115,6 +116,11 @@ export const WORKER_DEFAULTS = {
   defaultMaxAttempts: 5,
 } as const;
 
+/**
+ * Composes repositories, queue, handlers, and runner over one database
+ * connection. Hold the returned runtime for the process lifetime: the facade
+ * enqueues through `queue`, the scheduler and CLI call `runOnce`.
+ */
 export function createWorker(options: WorkerRuntimeOptions): WorkerRuntime {
   const ids = options.ids ?? (() => crypto.randomUUID());
   const now = options.now ?? (() => new Date().toISOString());

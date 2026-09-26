@@ -7,6 +7,7 @@ import type { JsonValue } from "@sona/core";
 import type { PersistedJob } from "@sona/db";
 import type { DocumentSourceKind } from "@sona/receipts";
 import { z } from "zod";
+import { redactJson } from "./redact.js";
 
 export const JOB_KINDS = [
   "source_sync",
@@ -73,7 +74,7 @@ export const JOB_PAYLOAD_SCHEMAS = {
       uploadId: nonEmpty,
       sourceKind: z.enum(DOCUMENT_SOURCE_KINDS).default("upload"),
       /** Provenance (portal/email/upload context); never credentials. */
-      sourceMetadata: jsonValueSchema.optional(),
+      sourceMetadata: jsonValueSchema.transform(redactJson).optional(),
     })
     .strict(),
   extraction: z.object({ documentId: nonEmpty }).strict(),

@@ -11,6 +11,7 @@ import type { JobRunOutcome } from "./jobs/runner.js";
 import { SYNCABLE_SOURCE_KINDS } from "./jobs/source-sync.js";
 import type { WorkerRuntime } from "./worker.js";
 
+/** Cadence for one scheduler pass; also accepted by {@link tick} for a manual pass. */
 export interface TickOptions {
   /** Time between ticks. */
   intervalMs: number;
@@ -31,6 +32,7 @@ export interface SchedulerOptions extends TickOptions {
   onError?: (error: unknown) => void;
 }
 
+/** What one pass did: which syncs it queued and which jobs it processed. */
 export interface TickResult {
   at: string;
   window: string;
@@ -41,6 +43,7 @@ export interface TickResult {
   outcomes: JobRunOutcome[];
 }
 
+/** The runtime to drive plus the one cross-workspace read the scheduler needs. */
 export interface SchedulerDependencies {
   worker: WorkerRuntime;
   sources: Pick<SqliteSourceRepository, "listActiveForScheduler">;

@@ -30,7 +30,8 @@ const nonceLength = 12;
 const authTagLength = 16;
 const secretKeyLength = 32;
 
-const secretRefSchema = z
+/** Boundary schema for a persisted `SecretRef`; the one place its JSON shape is defined. */
+export const secretRefSchema = z
   .object({
     id: z.string().min(1),
     workspaceId: z.string().min(1),

@@ -5,17 +5,15 @@
  * A credential row never holds a secret: `secretRef` is the serialized
  * `SecretRef` the secret store resolves at sync time.
  */
-import type { SecretRef, Source, SourceKind, SourceStatus } from "@sona/core";
-import type { DbClient } from "../runner.js";
 import {
-  placeholders,
-  type Row,
-  requiredLiteral,
-  requiredNumber,
-  requiredString,
-  row,
-  rows,
-} from "./helpers.js";
+  type SecretRef,
+  type Source,
+  type SourceKind,
+  type SourceStatus,
+  secretRefSchema,
+} from "@sona/core";
+import type { DbClient } from "../runner.js";
+import { placeholders, type Row, requiredLiteral, requiredString, row, rows } from "./helpers.js";
 
 const SOURCE_KINDS = [
   "enable_banking",
@@ -222,20 +220,16 @@ function credentialFromRow(source: Row): PersistedSourceCredential {
   };
 }
 
-function serializeSecretRef(ref: SecretRef): Record<string, string | number> {
-  return { id: ref.id, workspaceId: ref.workspaceId, label: ref.label, version: ref.version };
+/** Persists only the documented `SecretRef` fields, never extra properties of a store's object. */
+function serializeSecretRef(ref: SecretRef): SecretRef {
+  return secretRefSchema.parse({
+    id: ref.id,
+    workspaceId: ref.workspaceId,
+    label: ref.label,
+    version: ref.version,
+  });
 }
 
 function parseSecretRef(value: string): SecretRef {
-  const parsed: unknown = JSON.parse(value);
-  const source = row(parsed);
-  if (source === undefined) {
-    throw new Error("source credential secret_ref was not an object");
-  }
-  return {
-    id: requiredString(source, "id"),
-    workspaceId: requiredString(source, "workspaceId"),
-    label: requiredString(source, "label"),
-    version: requiredNumber(source, "version"),
-  };
+  return secretRefSchema.parse(JSON.parse(value));
 }

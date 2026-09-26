@@ -7,10 +7,13 @@ import {
 import { describe, expect, it } from "vitest";
 import { countRows, createTestHarness, SRC_1, type TestHarness, WS_1 } from "../test-support.js";
 import {
+  bankCorrectionReviewItemId,
   type DraftPostingSource,
   draftIdempotencyKey,
   draftTransactionId,
   ensureDraftPosting,
+  ledgerHead,
+  supersessionChain,
 } from "./draft-postings.js";
 
 const BANK_ACCOUNT = "Assets:Bank:Synthetic:acct_a";
@@ -303,14 +306,47 @@ describe("ensureDraftPosting", () => {
       ]);
       expect(countRows(h.db, "ledger_transactions", WS_1)).toBe(3);
 
-      // A human classifies the head: further corrections must not touch it.
-      const head = flipped.transaction ?? fail("expected a head");
+      // A human reclassifies the head (new counter-account and wording):
+      // further corrections must not touch it, and re-reporting the same bank
+      // facts is not a correction at all.
+      const flippedHead = flipped.transaction ?? fail("expected a head");
+      const bankLeg =
+        flippedHead.postings.find((p) => p.account === BANK_ACCOUNT) ?? fail("expected bank leg");
+      const { replacement: head } = await h.worker.repositories.ledger.supersedeTransaction(WS_1, {
+        supersedesTransactionId: flippedHead.id,
+        replacement: {
+          id: "tx_human",
+          bookedOn: flippedHead.bookedOn,
+          description: "Plumber, rental unit 2",
+          postings: [
+            { account: BANK_ACCOUNT, amount: bankLeg.amount },
+            {
+              account: "Expenses:RealEstate:Maintenance",
+              amount: { amount: "12.34", commodity: "EUR" },
+            },
+          ],
+          reviewState: "suggested",
+          createdAt: h.clock.now(),
+        },
+        actor: "user_1",
+        supersededAt: h.clock.now(),
+      });
       await h.worker.repositories.ledger.transitionReviewState(WS_1, {
         id: head.id,
         toState: "user_reviewed",
         actor: "user_1",
         at: h.clock.now(),
       });
+      h.clock.advance(60_000);
+      const resynced = await ensureDraftPosting(deps(h), {
+        context: h.context,
+        bankAccountPath: BANK_ACCOUNT,
+        transaction: await persisted(h, { amount: "-12.34" }),
+        now: h.clock.now(),
+      });
+      expect(resynced.state).toBe("unchanged");
+      expect(resynced.transaction?.id).toBe(head.id);
+      expect(await h.worker.repositories.reviewQueue.listByState(WS_1, "suggested")).toEqual([]);
       h.clock.advance(60_000);
       const held = await ensureDraftPosting(deps(h), {
         context: h.context,
@@ -321,7 +357,7 @@ describe("ensureDraftPosting", () => {
       expect(held.state).toBe("needs_review");
       expect(held.transaction?.id).toBe(head.id);
       expect(held.reason).toMatch(/user_reviewed/);
-      expect(countRows(h.db, "ledger_transactions", WS_1)).toBe(3);
+      expect(countRows(h.db, "ledger_transactions", WS_1)).toBe(4);
       expect((await h.worker.repositories.ledger.getTransaction(WS_1, head.id))?.reviewState).toBe(
         "user_reviewed",
       );
@@ -350,6 +386,169 @@ describe("ensureDraftPosting", () => {
     } finally {
       h.close();
     }
+  });
+
+  it("carries only the document's substantiates links along the chain, once per replacement", async () => {
+    const h = await harnessWithAccounts();
+    try {
+      const first = await ensureDraftPosting(deps(h), {
+        context: h.context,
+        bankAccountPath: BANK_ACCOUNT,
+        transaction: await persisted(h),
+        now: h.clock.now(),
+      });
+      const draft = first.transaction ?? fail("expected a draft");
+      await h.worker.repositories.documents.save({
+        id: "doc_r",
+        workspaceId: WS_1,
+        contentHash: "c".repeat(64),
+        mimeType: "application/pdf",
+        originalFilename: "r.pdf",
+        storageUri: "sona-document://ws_1/doc_r",
+        sourceKind: "upload",
+        sourceMetadata: undefined,
+        retentionState: "active",
+        createdAt: h.clock.now(),
+      });
+      const link = (kind: "substantiates" | "imported_as" | "reviewed_by", fromId = "doc_r") =>
+        h.worker.repositories.evidenceLinks.link({
+          id: h.ids(),
+          workspaceId: WS_1,
+          fromType: "document",
+          fromId,
+          toType: "ledger_transaction",
+          toId: draft.id,
+          kind,
+          createdAt: h.clock.now(),
+        });
+      await link("substantiates");
+      // Other edge kinds from the same document describe the old draft, not evidence for the new one.
+      await link("imported_as");
+      await link("reviewed_by");
+
+      h.clock.advance(60_000);
+      const r1 = await ensureDraftPosting(deps(h), {
+        context: h.context,
+        bankAccountPath: BANK_ACCOUNT,
+        transaction: await persisted(h, { amount: "-13.00" }),
+        now: h.clock.now(),
+      });
+      const replacement1 = r1.transaction ?? fail("expected r1");
+      const links = h.worker.repositories.evidenceLinks;
+      const documentLinks = async (transactionId: string) =>
+        (await links.listForTransaction(WS_1, transactionId))
+          .filter((l) => l.fromType === "document")
+          .map((l) => [l.fromId, l.kind, l.notes]);
+      expect(await documentLinks(replacement1.id)).toEqual([
+        ["doc_r", "substantiates", `carried over from superseded ${draft.id}`],
+      ]);
+
+      // Re-reporting the same correction is unchanged and adds no second carry-over.
+      const before = countRows(h.db, "evidence_links", WS_1);
+      const rerun = await ensureDraftPosting(deps(h), {
+        context: h.context,
+        bankAccountPath: BANK_ACCOUNT,
+        transaction: await persisted(h, { amount: "-13.00" }),
+        now: h.clock.now(),
+      });
+      expect(rerun.state).toBe("unchanged");
+      expect(countRows(h.db, "evidence_links", WS_1)).toBe(before);
+
+      // A second correction carries the receipt from r1 (the head) to r2, exactly once.
+      h.clock.advance(60_000);
+      const r2 = await ensureDraftPosting(deps(h), {
+        context: h.context,
+        bankAccountPath: BANK_ACCOUNT,
+        transaction: await persisted(h, { amount: "-14.00" }),
+        now: h.clock.now(),
+      });
+      const replacement2 = r2.transaction ?? fail("expected r2");
+      expect(await documentLinks(replacement2.id)).toEqual([
+        ["doc_r", "substantiates", `carried over from superseded ${replacement1.id}`],
+      ]);
+
+      // Head resolution follows the whole chain from any member.
+      expect((await ledgerHead(h.worker.repositories.ledger, WS_1, draft.id))?.id).toBe(
+        replacement2.id,
+      );
+      expect((await ledgerHead(h.worker.repositories.ledger, WS_1, replacement1.id))?.id).toBe(
+        replacement2.id,
+      );
+      // The chain is walked from the persisted row (the in-memory `draft` predates its supersession).
+      const original =
+        (await h.worker.repositories.ledger.getTransaction(WS_1, draft.id)) ?? fail("original");
+      const chain = await supersessionChain(h.worker.repositories.ledger, original);
+      expect(chain.map((t) => t.id)).toEqual([draft.id, replacement1.id, replacement2.id]);
+      expect(chain.map((t) => t.reviewState)).toEqual(["superseded", "superseded", "draft"]);
+    } finally {
+      h.close();
+    }
+  });
+
+  it("resolves no head for an unknown transaction or one in another workspace", async () => {
+    const h = await harnessWithAccounts();
+    try {
+      const created = await ensureDraftPosting(deps(h), {
+        context: h.context,
+        bankAccountPath: BANK_ACCOUNT,
+        transaction: await persisted(h),
+        now: h.clock.now(),
+      });
+      const ledger = h.worker.repositories.ledger;
+      const id = created.transaction?.id ?? fail("expected a draft");
+      expect((await ledgerHead(ledger, WS_1, id))?.id).toBe(id);
+      expect(await ledgerHead(ledger, WS_1, "ledger_tx:missing")).toBeUndefined();
+      expect(await ledgerHead(ledger, "ws_2", id)).toBeUndefined();
+      const [single] = await supersessionChain(ledger, created.transaction ?? fail("draft"));
+      expect(single?.id).toBe(id);
+    } finally {
+      h.close();
+    }
+  });
+
+  it("derives a stable review item id from the reported content only", () => {
+    const desired = {
+      id: "ledger_tx:x",
+      bookedOn: "2026-02-10",
+      description: "Synthetic Vendor — Invoice 1",
+      postings: [
+        { account: BANK_ACCOUNT, amount: { amount: "-99.00", commodity: "EUR" } },
+        {
+          account: SUSPENSE_ACCOUNTS.unclassified,
+          amount: { amount: "99.00", commodity: "EUR" },
+          memo: "awaiting classification",
+        },
+      ],
+      createdAt: "2026-02-01T00:00:00.000Z",
+    };
+    const id = bankCorrectionReviewItemId("ledger_tx:x", desired);
+    expect(id).toMatch(/^review:bank_correction:ledger_tx:x:[0-9a-f]{16}$/);
+    // Fields outside the summary (memo, creation time, id) do not change it.
+    expect(
+      bankCorrectionReviewItemId("ledger_tx:x", {
+        ...desired,
+        id: "other",
+        createdAt: "2027-01-01T00:00:00.000Z",
+        postings: desired.postings.map(({ memo: _memo, ...posting }) => posting),
+      }),
+    ).toBe(id);
+    // The content and the target transaction do.
+    expect(
+      bankCorrectionReviewItemId("ledger_tx:x", {
+        ...desired,
+        postings: [
+          { account: BANK_ACCOUNT, amount: { amount: "-98.00", commodity: "EUR" } },
+          {
+            account: SUSPENSE_ACCOUNTS.unclassified,
+            amount: { amount: "98.00", commodity: "EUR" },
+          },
+        ],
+      }),
+    ).not.toBe(id);
+    expect(
+      bankCorrectionReviewItemId("ledger_tx:x", { ...desired, bookedOn: "2026-02-11" }),
+    ).not.toBe(id);
+    expect(bankCorrectionReviewItemId("ledger_tx:y", desired)).not.toBe(id);
   });
 
   it("refuses to write a draft for another workspace's bank transaction", async () => {

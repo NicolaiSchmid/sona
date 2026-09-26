@@ -107,7 +107,7 @@ describe("JobRunner", () => {
       expect(audit.events).toHaveLength(1);
       expect(audit.events[0]).toMatchObject({
         action: "job.run.succeeded",
-        actor: "worker:worker-test",
+        actor: "system:worker:worker-test",
         targetType: "job",
         targetId: first.job.id,
         metadata: { kind: "extraction", attempt: 1, runId: runs[0]?.id },
@@ -417,6 +417,62 @@ describe("JobRunner", () => {
       const quickRun = (await queue.listRuns(context, quick.job.id))[0];
       expect(slowRun?.startedAt).toBe("2026-02-01T00:00:00.000Z");
       expect(quickRun?.startedAt).toBe("2026-02-01T00:01:30.000Z");
+    } finally {
+      harness.close();
+    }
+  });
+
+  it("stops exactly at the pass limit and leaves the rest queued and unleased", async () => {
+    const ran: string[] = [];
+    const { harness, queue, runner } = await createRunnerHarness({
+      extraction: async ({ job }) => {
+        ran.push(job.payload.documentId);
+        return undefined;
+      },
+    });
+    try {
+      for (const documentId of ["a", "b", "c", "d"]) {
+        await queue.enqueue(context, "extraction", { documentId });
+      }
+      const first = await runner.runOnce({ limit: 2 });
+      expect(first.map((o) => o.state)).toEqual(["succeeded", "succeeded"]);
+      expect(ran).toEqual(["a", "b"]);
+      const queued = await queue.list(context, { statuses: ["queued"] });
+      expect(queued.map((j) => j.payload)).toEqual([{ documentId: "c" }, { documentId: "d" }]);
+      expect(queued.every((j) => j.leaseOwner === undefined && j.attempts === 0)).toBe(true);
+      expect(await queue.list(context, { statuses: ["running"] })).toEqual([]);
+
+      expect((await runner.runOnce({ limit: 1 })).map((o) => o.state)).toEqual(["succeeded"]);
+      expect(ran).toEqual(["a", "b", "c"]);
+      expect(await runner.runOnce({ limit: 0 })).toEqual([]);
+      expect(ran).toEqual(["a", "b", "c"]);
+    } finally {
+      harness.close();
+    }
+  });
+
+  it("does not re-claim a job it just scheduled for retry within the same pass", async () => {
+    let attempts = 0;
+    const { harness, queue, runner } = await createRunnerHarness({
+      extraction: async () => {
+        attempts += 1;
+        throw new Error("flaky");
+      },
+      reconciliation: async () => undefined,
+    });
+    try {
+      await queue.enqueue(context, "extraction", { documentId: "flaky" });
+      await queue.enqueue(context, "reconciliation", { documentId: "fine" });
+      // With no limit the loop claims until nothing is runnable; the failed
+      // job's backoff pushes it past `now`, so the pass ends after both.
+      const outcomes = await runner.runOnce();
+      expect(outcomes.map((o) => [o.kind, o.state])).toEqual([
+        ["extraction", "retry_scheduled"],
+        ["reconciliation", "succeeded"],
+      ]);
+      expect(attempts).toBe(1);
+      const [job] = await queue.list(context, { kinds: ["extraction"] });
+      expect(job).toMatchObject({ status: "queued", attempts: 1, runAfter: outcomes[0]?.runAfter });
     } finally {
       harness.close();
     }

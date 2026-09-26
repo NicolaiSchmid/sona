@@ -42,6 +42,35 @@ describe("job payload schemas", () => {
     );
   });
 
+  it("keys portal fetches per connection and window, and reconciliation per trigger", () => {
+    const fetch = parseJobPayload("portal_fetch", { connectionId: "conn_1" });
+    expect(fetch).toEqual({ connectionId: "conn_1" });
+    expect(defaultIdempotencyKey("portal_fetch", fetch)).toBe("portal_fetch:conn_1");
+    const windowed = parseJobPayload("portal_fetch", {
+      connectionId: "conn_1",
+      window: "2026-02-01T00:00:00.000Z",
+      cooldownMs: 0,
+    });
+    expect(windowed.cooldownMs).toBe(0);
+    // The cooldown tunes the run; it does not identify the work.
+    expect(defaultIdempotencyKey("portal_fetch", windowed)).toBe(
+      "portal_fetch:conn_1:2026-02-01T00:00:00.000Z",
+    );
+    expect(() => parseJobPayload("portal_fetch", { connectionId: "c", cooldownMs: -1 })).toThrow(
+      /cooldownMs/,
+    );
+    expect(() => parseJobPayload("portal_fetch", { connectionId: "c", cooldownMs: 1.5 })).toThrow(
+      /cooldownMs/,
+    );
+    expect(() => parseJobPayload("portal_fetch", { connectionId: " " })).toThrow(/connectionId/);
+
+    const triggered = parseJobPayload("reconciliation", { documentId: "d", trigger: "sync:run_1" });
+    expect(defaultIdempotencyKey("reconciliation", triggered)).toBe("reconciliation:d:sync:run_1");
+    expect(() => parseJobPayload("reconciliation", { documentId: "d", trigger: "" })).toThrow(
+      /trigger/,
+    );
+  });
+
   it("rejects malformed payloads with the kind and issue paths", () => {
     expect(() => parseJobPayload("source_sync", { sourceId: "" })).toThrow(InvalidJobPayloadError);
     expect(() => parseJobPayload("source_sync", { sourceId: "s", extra: 1 })).toThrow(/extra/);

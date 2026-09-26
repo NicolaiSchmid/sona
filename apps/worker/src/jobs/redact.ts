@@ -8,15 +8,27 @@ import type { JsonValue } from "@sona/core";
 
 const MAX_ERROR_LENGTH = 500;
 
+/** Key names whose values are credentials, wherever they appear (text or JSON). */
+const SECRET_KEY_NAMES = [
+  "api[_-]?key",
+  "secret",
+  "token",
+  "password",
+  "passwd",
+  "authorization",
+  "session[_-]?id",
+  "cookie",
+  "private[_-]?key",
+] as const;
+
+const SECRET_KEY_PATTERN = SECRET_KEY_NAMES.join("|");
+
 const REDACTIONS: ReadonlyArray<[RegExp, string]> = [
   // Bearer / JWT-style tokens.
   [/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [redacted]"],
   [/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}(?:\.[A-Za-z0-9_-]{8,})?/g, "[jwt redacted]"],
   // key=value style secrets in query strings or config dumps.
-  [
-    /\b(api[_-]?key|secret|token|password|passwd|authorization|session[_-]?id)\s*[=:]\s*["']?[^\s"'&,;]+/gi,
-    "$1=[redacted]",
-  ],
+  [new RegExp(`\\b(${SECRET_KEY_PATTERN})\\s*[=:]\\s*["']?[^\\s"'&,;]+`, "gi"), "$1=[redacted]"],
   // IBANs (two letters, two check digits, 11-30 alphanumerics), optionally
   // space-grouped the way banks print them in error messages.
   [/\b[A-Z]{2}\d{2}(?: ?[A-Z0-9]){11,30}\b/g, "[iban redacted]"],
@@ -42,8 +54,7 @@ export function redactError(error: unknown): string {
 }
 
 /** Object keys whose values are never persisted from caller-supplied metadata. */
-const SENSITIVE_KEY =
-  /(password|passwd|secret|token|api[_-]?key|authorization|session[_-]?id|cookie|private[_-]?key)/i;
+const SENSITIVE_KEY = new RegExp(SECRET_KEY_PATTERN, "i");
 
 /**
  * Deep-copies JSON metadata, replacing the value of every key that looks like

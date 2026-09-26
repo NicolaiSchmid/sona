@@ -1,4 +1,4 @@
-import { FakePortalTaskRunner, type PortalTask } from "@sona/agents";
+import { FakePortalTaskRunner, type PortalTask, type PortalTaskRunner } from "@sona/agents";
 import { describe, expect, it } from "vitest";
 import { createTestHarness, WS_1, WS_2 } from "../test-support.js";
 import {
@@ -26,7 +26,7 @@ function portalFetch(
   connections: InMemoryPortalFetchConnectionRepository,
 ): PortalFetchDependencies & { runs: InMemoryPortalFetchRunRecorder } {
   return {
-    runner: new FakePortalTaskRunner(),
+    taskRunner: new FakePortalTaskRunner(),
     connections,
     state: new InMemoryPortalFetchJobStateStore(),
     runs: new InMemoryPortalFetchRunRecorder(),
@@ -88,6 +88,104 @@ describe("portal_fetch job kind", () => {
         runId: null,
       });
       expect(deps.runs.listRuns(h.context)).toHaveLength(1);
+    } finally {
+      h.close();
+    }
+  });
+
+  it("lets a payload lengthen the connection cooldown but never shorten it", async () => {
+    const deps = portalFetch(
+      new InMemoryPortalFetchConnectionRepository([{ id: "conn_1", workspaceId: WS_1, task }]),
+    );
+    const h = await createTestHarness({ seedSources: false, worker: { portalFetch: deps } });
+    try {
+      // A zero cooldown in the payload is floored to the worker's 60s guardrail.
+      await h.worker.queue.enqueue(h.context, "portal_fetch", {
+        connectionId: "conn_1",
+        window: "w1",
+        cooldownMs: 0,
+      });
+      const [first] = await h.worker.runOnce();
+      expect(first?.state).toBe("succeeded");
+      expect(
+        (await h.worker.queue.listRuns(h.context, first?.jobId ?? ""))[0]?.result,
+      ).toMatchObject({ status: "completed", cooldownUntil: "2026-02-01T00:01:00.000Z" });
+
+      // Past the guardrail, a longer payload cooldown is honoured.
+      h.clock.advance(61_000);
+      const second = await h.worker.queue.enqueue(h.context, "portal_fetch", {
+        connectionId: "conn_1",
+        window: "w2",
+        cooldownMs: 10 * 60_000,
+      });
+      await h.worker.runOnce();
+      expect((await h.worker.queue.listRuns(h.context, second.job.id))[0]?.result).toMatchObject({
+        status: "completed",
+        cooldownUntil: "2026-02-01T00:11:01.000Z",
+      });
+      expect(deps.runs.listRuns(h.context)).toHaveLength(2);
+    } finally {
+      h.close();
+    }
+  });
+
+  it("defers a retried job that lands in its own cooldown instead of settling it as done", async () => {
+    let calls = 0;
+    const flaky: PortalTaskRunner = {
+      runTask: async (input) => {
+        calls += 1;
+        if (calls === 1) {
+          throw new Error("browser crashed with session_id=leaky");
+        }
+        return new FakePortalTaskRunner().runTask(input);
+      },
+    };
+    const deps = {
+      ...portalFetch(
+        new InMemoryPortalFetchConnectionRepository([{ id: "conn_1", workspaceId: WS_1, task }]),
+      ),
+      taskRunner: flaky,
+    };
+    const h = await createTestHarness({ seedSources: false, worker: { portalFetch: deps } });
+    try {
+      const { job } = await h.worker.queue.enqueue(h.context, "portal_fetch", {
+        connectionId: "conn_1",
+      });
+      const [attempt1] = await h.worker.runOnce();
+      expect(attempt1).toMatchObject({ state: "retry_scheduled", attempt: 1 });
+      expect(attempt1?.error).not.toContain("leaky");
+
+      // The retry finds the connection cooling down from its own failed start.
+      h.clock.advance(1_000);
+      const [attempt2] = await h.worker.runOnce();
+      expect(attempt2).toMatchObject({ jobId: job.id, state: "succeeded", attempt: 2 });
+      const run = (await h.worker.queue.listRuns(h.context, job.id))[1];
+      expect(run?.result).toMatchObject({
+        status: "deferred",
+        runId: null,
+        cooldownUntil: "2026-02-01T00:01:00.000Z",
+      });
+      const followUpId = (run?.result as { followUpJobId: string }).followUpJobId;
+      const followUp = await h.worker.queue.get(h.context, followUpId);
+      expect(followUp).toMatchObject({
+        kind: "portal_fetch",
+        status: "queued",
+        runAfter: "2026-02-01T00:01:00.000Z",
+        payload: { connectionId: "conn_1", window: "2026-02-01T00:01:00.000Z" },
+      });
+      expect(deps.runs.listRuns(h.context)).toHaveLength(0);
+
+      // Not before the cooldown ends...
+      expect(await h.worker.runOnce()).toEqual([]);
+      // ...then the follow-up performs the fetch.
+      h.clock.advance(60_000);
+      const [deferred] = await h.worker.runOnce();
+      expect(deferred).toMatchObject({ jobId: followUpId, state: "succeeded" });
+      expect((await h.worker.queue.listRuns(h.context, followUpId))[0]?.result).toMatchObject({
+        status: "completed",
+      });
+      expect(deps.runs.listRuns(h.context)).toHaveLength(1);
+      expect(calls).toBe(2);
     } finally {
       h.close();
     }

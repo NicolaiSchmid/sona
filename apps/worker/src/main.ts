@@ -89,7 +89,7 @@ async function main(): Promise<void> {
     sourceSync: createSecretStoreSourceSyncGateway({
       sources: repositories.sources,
       secrets: backends.secrets,
-      enableBankingClient: client,
+      createEnableBankingClient: client,
     }),
     // Provider selection through runtime config is deferred to a later phase;
     // the local text-layer extractor needs no credentials.
@@ -107,6 +107,7 @@ async function main(): Promise<void> {
     { worker, sources: repositories.sources },
     {
       intervalMs,
+      batchSize: 200,
       signal: controller.signal,
       onTick: (result) => {
         console.log(

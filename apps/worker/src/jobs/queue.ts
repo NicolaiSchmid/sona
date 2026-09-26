@@ -16,6 +16,13 @@ import {
   parseJobPayload,
 } from "./types.js";
 
+export type { JobStatus, PersistedJobRun } from "@sona/db";
+
+/** Filter for {@link JobQueue.list}: the repository filter with kinds narrowed to {@link JobKind}. */
+export interface JobListFilter extends Omit<ListJobsFilter, "kinds"> {
+  kinds?: readonly JobKind[];
+}
+
 export interface EnqueueOptions {
   /** Overrides the payload-derived key (e.g. to force a fresh export revision). */
   idempotencyKey?: string;
@@ -37,6 +44,10 @@ export interface JobQueueOptions {
   defaultMaxAttempts: number;
 }
 
+/**
+ * The facade-facing side of the job table: enqueue typed jobs for a workspace
+ * and read them back. Never claims or runs jobs; that is {@link JobRunner}.
+ */
 export class JobQueue {
   readonly #jobs: SqliteJobRepository;
   readonly #options: JobQueueOptions;
@@ -74,7 +85,7 @@ export class JobQueue {
     return job === undefined ? undefined : narrowJobKind(job);
   }
 
-  async list(context: WorkspaceContext, filter: ListJobsFilter = {}): Promise<Job[]> {
+  async list(context: WorkspaceContext, filter: JobListFilter = {}): Promise<Job[]> {
     const { workspaceId } = requireWorkspaceContext(context);
     return (await this.#jobs.list(workspaceId, filter)).map(narrowJobKind);
   }

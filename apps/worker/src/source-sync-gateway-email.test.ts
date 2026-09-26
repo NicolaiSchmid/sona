@@ -46,7 +46,7 @@ describe("createSecretStoreSourceSyncGateway for email sources", () => {
       const gateway = createSecretStoreSourceSyncGateway({
         sources,
         secrets,
-        enableBankingClient: () => client,
+        createEnableBankingClient: () => client,
         createImapClient: (input) => {
           inputs.push(input);
           return fake;
@@ -101,7 +101,7 @@ describe("createSecretStoreSourceSyncGateway for email sources", () => {
       const gateway = createSecretStoreSourceSyncGateway({
         sources,
         secrets,
-        enableBankingClient: () => client,
+        createEnableBankingClient: () => client,
         createImapClient: () => new email.FakeImapClient({ workspaceId: WS_1, folders: {} }),
       });
       await expect(gateway.resolveEmail(context, "src_foreign")).rejects.toThrow(

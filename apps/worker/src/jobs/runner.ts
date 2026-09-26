@@ -14,7 +14,8 @@ import type {
   SqliteAuditEventRepository,
   SqliteJobRepository,
 } from "@sona/db";
-import { type DbClient, JobLeaseLostError, withTransactionAsync } from "@sona/db";
+import { type DbClient, JobLeaseLostError, RECORD_TYPES, withTransactionAsync } from "@sona/db";
+import { WORKER_ACTORS } from "../actors.js";
 import type { EnqueueOptions, EnqueueResult, JobQueue } from "./queue.js";
 import { redactError } from "./redact.js";
 import { isJobKind, type Job, type JobKind, type JobPayloadInput, narrowJob } from "./types.js";
@@ -190,6 +191,9 @@ export class JobRunner {
    */
   async runOnce(options: RunOnceOptions = {}): Promise<JobRunOutcome[]> {
     const limit = options.limit ?? DEFAULT_RUN_LIMIT;
+    if (!Number.isInteger(limit) || limit < 0) {
+      throw new Error(`runOnce limit must be a non-negative integer, got ${String(limit)}`);
+    }
     const outcomes: JobRunOutcome[] = [];
     while (outcomes.length < limit) {
       const [claimed] = await this.#deps.jobs.claim({
@@ -324,8 +328,8 @@ export class JobRunner {
       id: `audit:${run.id}:${action}`,
       workspaceId: job.workspaceId,
       action,
-      actor: `worker:${this.#options.workerId}`,
-      targetType: "job",
+      actor: WORKER_ACTORS.runner(this.#options.workerId),
+      targetType: RECORD_TYPES.job,
       targetId: job.id,
       metadata: { kind: job.kind, runId: run.id, attempt: run.attempt, ...metadata },
       createdAt: at,

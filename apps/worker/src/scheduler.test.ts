@@ -160,14 +160,26 @@ describe("scheduler", () => {
       expect(result.outcomes.map((o) => [o.workspaceId, o.state])).toEqual([[WS_1, "succeeded"]]);
 
       const controller = new AbortController();
+      const ticks: Array<{ window: string; failures: number; outcomes: number }> = [];
+      h.clock.advance(60_000);
       await runScheduler(deps, {
         intervalMs: 60_000,
         now: h.clock.now,
         sleep: async () => controller.abort(),
         signal: controller.signal,
+        onTick: (result) =>
+          ticks.push({
+            window: result.window,
+            failures: result.enqueueFailures.length,
+            outcomes: result.outcomes.length,
+          }),
         onError: (error) => errors.push(error instanceof Error ? error.message : String(error)),
       });
       expect(errors).toEqual([expect.stringMatching(/could not enqueue sync for source src_2/)]);
+      expect(errors[0]).not.toContain("leaky");
+      // An enqueue failure is reported, but the tick itself still completes
+      // and is observable, with the healthy source's sync processed in it.
+      expect(ticks).toEqual([{ window: "2026-02-01T00:01:00.000Z", failures: 1, outcomes: 1 }]);
     } finally {
       h.close();
     }

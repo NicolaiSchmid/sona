@@ -92,6 +92,8 @@ export interface SourceSyncDependencies {
   ids: () => string;
 }
 
+// A type alias, not an interface: aliases satisfy the `JsonValue` index signature
+// so the handler can persist the result as-is.
 export type SyncError = {
   /** Provider-side scope of the failure (account uid, mailbox folder, message uid). */
   scope: string;
@@ -99,29 +101,30 @@ export type SyncError = {
   message: string;
 };
 
-export interface BankSourceSyncResult {
-  kind: "enable_banking";
+type SyncStatus = enableBanking.SyncStatus;
+
+interface SourceSyncResultBase<K extends SyncableSourceKind> {
+  kind: K;
   syncRunId: string;
-  syncStatus: enableBanking.SyncStatus;
+  syncStatus: SyncStatus;
+  errors: SyncError[];
+}
+
+export interface BankSourceSyncResult extends SourceSyncResultBase<"enable_banking"> {
   accountsSynced: number;
   transactionsSynced: number;
   drafts: Record<DraftPostingState, number>;
   /** Ledger transaction ids the run created or superseded. */
   draftTransactionIds: string[];
-  errors: SyncError[];
 }
 
-export interface EmailSourceSyncResult {
-  kind: "email";
-  syncRunId: string;
-  syncStatus: email.EmailSyncStatus;
+export interface EmailSourceSyncResult extends SourceSyncResultBase<"email"> {
   messagesSeen: number;
   messagesIngested: number;
   attachmentsStored: number;
   attachmentsDeduplicated: number;
   /** Documents this run stored for the first time. */
   documentIds: string[];
-  errors: SyncError[];
 }
 
 export type SourceSyncResult = BankSourceSyncResult | EmailSourceSyncResult;
@@ -143,10 +146,15 @@ function rawRecordStore(rawRecords: SqliteRawRecordRepository): email.EmailRawRe
   };
 }
 
-function syncStatusFor(errors: readonly unknown[]): "succeeded" | "completed_with_errors" {
+function syncStatusFor(errors: readonly unknown[]): Exclude<SyncStatus, "failed"> {
   return errors.length > 0 ? "completed_with_errors" : "succeeded";
 }
 
+/**
+ * Syncs one source end to end (connector writes, then drafts or documents).
+ * Call directly for a synchronous sync; the `source_sync` job wraps it with
+ * follow-up enqueues and provenance.
+ */
 export async function runSourceSync(
   deps: SourceSyncDependencies,
   input: RunSourceSyncInput,
@@ -192,6 +200,7 @@ function redactingSyncRunStore(store: SyncRunStore): SyncRunStore {
 }
 
 interface CapturedTransaction {
+  bankTransactionId: string;
   transaction: NormalizedTransaction;
   rawRecordId: string;
 }
@@ -211,10 +220,8 @@ async function syncEnableBanking(
     ...bankStore,
     saveTransaction: async (transaction, link) => {
       await bankStore.saveTransaction(transaction, link);
-      captured.set(`${transaction.accountExternalId}:${transaction.externalId}`, {
-        transaction,
-        rawRecordId: link.rawRecordId,
-      });
+      const id = bankTransactionId(sourceId, transaction.accountExternalId, transaction.externalId);
+      captured.set(id, { bankTransactionId: id, transaction, rawRecordId: link.rawRecordId });
     },
   };
 
@@ -240,19 +247,12 @@ async function syncEnableBanking(
       createdAt: input.now,
       accountIdFor: () => deps.ids(),
     });
-    for (const { transaction, rawRecordId } of captured.values()) {
+    for (const entry of captured.values()) {
+      const { transaction, ...linkage } = entry;
       const result = await ensureDraftPosting(deps, {
         context,
         bankAccountPath: bankAccountPath(sourceId, transaction.accountExternalId),
-        transaction: {
-          ...transaction,
-          bankTransactionId: bankTransactionId(
-            sourceId,
-            transaction.accountExternalId,
-            transaction.externalId,
-          ),
-          rawRecordId,
-        },
+        transaction: { ...transaction, ...linkage },
         now: input.now,
       });
       drafts[result.state] += 1;
@@ -360,7 +360,7 @@ export function createSourceSyncHandler(deps: SourceSyncDependencies): JobHandle
     // been waiting for: give every unsubstantiated document another pass.
     let reconciliationsQueued = 0;
     if (result.draftTransactionIds.length > 0) {
-      const waiting = await deps.documents.listUnsubstantiated(
+      const waiting = await deps.documents.listAwaitingReconciliation(
         context.workspaceId,
         MAX_RECONCILIATION_REQUEUE,
       );
