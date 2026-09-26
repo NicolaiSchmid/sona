@@ -105,6 +105,59 @@ describe("createNetworkGuard", () => {
     });
   });
 
+  it("keeps the query string when matching non-idempotent exceptions", () => {
+    const searchTask: PortalTask = {
+      ...task,
+      httpMethodExceptions: [
+        {
+          method: "POST",
+          urlPattern: "https://portal.test/api?action=search",
+          reason: "search",
+          justification: "Invoice search form posts its filter before listing results.",
+        },
+      ],
+    };
+    const guard = createNetworkGuard({ task: searchTask });
+
+    const allowed = guard.evaluateRequest({
+      url: "https://portal.test/api?action=search#top",
+      method: "POST",
+      resourceType: "xhr",
+    });
+    const otherAction = guard.evaluateRequest({
+      url: "https://portal.test/api?action=delete",
+      method: "POST",
+      resourceType: "xhr",
+    });
+    const noQuery = guard.evaluateRequest({
+      url: "https://portal.test/api",
+      method: "POST",
+      resourceType: "xhr",
+    });
+
+    expect(allowed.action).toBe("allow");
+    expect(otherAction.action).toBe("abort");
+    expect(noQuery.action).toBe("abort");
+    expect(guard.snapshot().blockedRequests).toHaveLength(2);
+  });
+
+  it("refuses WebSocket handshakes even to allowlisted hosts", () => {
+    const guard = createNetworkGuard({ task });
+
+    const decision = guard.evaluateRequest({
+      url: "wss://portal.test/live",
+      method: "GET",
+      resourceType: "websocket",
+    });
+
+    expect(decision.action).toBe("abort");
+    expect(guard.snapshot().blockedRequests[0]).toMatchObject({
+      url: "wss://portal.test/live",
+      resourceType: "websocket",
+      reason: "websocket",
+    });
+  });
+
   it("matches non-idempotent exceptions only to the exact sanitized endpoint", () => {
     const guard = createNetworkGuard({ task });
 

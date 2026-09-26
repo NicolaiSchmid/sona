@@ -66,6 +66,53 @@ describe("portalTaskSchema", () => {
     expect(result.success).toBe(false);
   });
 
+  it("rejects credentials embedded in navigation and exception URLs", () => {
+    const raw = loadFixture() as Record<string, unknown>;
+
+    expect(
+      safeParsePortalTask({
+        ...raw,
+        steps: [{ kind: "navigate", url: "https://user:password@amazon.de/login" }],
+      }).success,
+    ).toBe(false);
+    expect(
+      safeParsePortalTask({
+        ...raw,
+        httpMethodExceptions: [
+          {
+            method: "POST",
+            urlPattern: "https://token@amazon.de/login",
+            reason: "login",
+            justification: "Portal login requires POST before read-only invoice access.",
+          },
+        ],
+      }).success,
+    ).toBe(false);
+  });
+
+  it("only allows POST exceptions to endpoints without destructive intent", () => {
+    const raw = loadFixture() as Record<string, unknown>;
+    const exception = (method: string, urlPattern: string) =>
+      safeParsePortalTask({
+        ...raw,
+        httpMethodExceptions: [
+          {
+            method,
+            urlPattern,
+            reason: "login",
+            justification: "Portal login requires POST before read-only invoice access.",
+          },
+        ],
+      }).success;
+
+    expect(exception("POST", "https://amazon.de/login")).toBe(true);
+    expect(exception("DELETE", "https://amazon.de/login")).toBe(false);
+    expect(exception("PUT", "https://amazon.de/login")).toBe(false);
+    expect(exception("PATCH", "https://amazon.de/login")).toBe(false);
+    expect(exception("POST", "https://amazon.de/delete-account")).toBe(false);
+    expect(exception("POST", "https://amazon.de/api?action=cancel")).toBe(false);
+  });
+
   it("rejects plaintext non-local navigation and exception URLs", () => {
     const raw = loadFixture() as Record<string, unknown>;
     const plaintextNavigate = safeParsePortalTask({

@@ -41,6 +41,12 @@ export class NetworkGuard {
       return this.block(request, "off_allowlist");
     }
 
+    // A WebSocket is a bidirectional channel whose messages the guard cannot
+    // classify as idempotent, so guarded sessions never open one.
+    if (request.resourceType === "websocket") {
+      return this.block(request, "websocket");
+    }
+
     if (IDEMPOTENT_METHODS.has(method)) {
       return { action: "allow" };
     }
@@ -77,7 +83,7 @@ export class NetworkGuard {
     }
 
     const hostname = url.hostname.toLowerCase();
-    if (url.protocol !== "https:" && !isLocalhost(hostname)) {
+    if (!isAllowedProtocol(url.protocol, hostname)) {
       return false;
     }
 
@@ -87,11 +93,16 @@ export class NetworkGuard {
     });
   }
 
+  /**
+   * Exceptions match the exact endpoint including its query string: a
+   * justified `?action=search` must not also admit `?action=delete`. Only the
+   * fragment is ignored because it never reaches the server.
+   */
   private matchException(method: string, rawUrl: string): PortalHttpMethodException | undefined {
-    const sanitizedUrl = sanitizeRequestUrl(rawUrl);
+    const requestKey = exceptionMatchKey(rawUrl);
     return this.#task.httpMethodExceptions.find(
       (exception) =>
-        exception.method === method && sanitizedUrl === sanitizeRequestUrl(exception.urlPattern),
+        exception.method === method && requestKey === exceptionMatchKey(exception.urlPattern),
     );
   }
 
@@ -119,6 +130,21 @@ function sanitizeRequestUrl(rawUrl: string): string {
   }
 }
 
-function isLocalhost(hostname: string): boolean {
-  return hostname === "localhost";
+function exceptionMatchKey(rawUrl: string): string {
+  try {
+    const url = new URL(rawUrl);
+    return `${url.protocol}//${url.host}${url.pathname}${url.search}`;
+  } catch {
+    return rawUrl;
+  }
+}
+
+const SECURE_PROTOCOLS = new Set(["https:", "wss:"]);
+const LOCALHOST_PROTOCOLS = new Set([...SECURE_PROTOCOLS, "http:", "ws:"]);
+
+/** Portal traffic must be encrypted; only localhost fixtures may use cleartext. */
+function isAllowedProtocol(protocol: string, hostname: string): boolean {
+  return hostname === "localhost"
+    ? LOCALHOST_PROTOCOLS.has(protocol)
+    : SECURE_PROTOCOLS.has(protocol);
 }

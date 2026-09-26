@@ -6,6 +6,11 @@ import {
 
 export interface BrowserbasePortalTaskRunnerOptions
   extends Omit<LocalPlaywrightPortalTaskRunnerOptions, "browserProvider"> {
+  /**
+   * Browserbase CDP endpoint. It typically carries the API key or session
+   * token in its query string, so the provider registers it with the run
+   * redactor and it never appears in run errors or provenance.
+   */
   connectOverCdpEndpoint: string;
 }
 

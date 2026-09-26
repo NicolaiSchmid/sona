@@ -19,14 +19,30 @@ export interface PortalFetchConnectionRepository {
   }): Promise<PortalFetchConnection>;
 }
 
+export interface PortalFetchJobLeaseKey {
+  jobId: string;
+  workspaceId: string;
+  connectionId: string;
+}
+
+export interface AcquirePortalFetchJobInput extends PortalFetchJobLeaseKey {
+  now: string;
+  cooldownUntil: string;
+}
+
+/**
+ * Idempotency and cooldown state for portal fetch jobs.
+ *
+ * `acquire` must atomically refuse a job id that is leased or completed and a
+ * connection that is still cooling down, then record both the lease and the
+ * cooldown before any browser launches. `complete` makes the job id permanently
+ * idempotent; `release` drops the lease after a failure so a queue retry with
+ * the same id can run again once the cooldown has passed.
+ */
 export interface PortalFetchJobStateStore {
-  acquire(input: {
-    jobId: string;
-    workspaceId: string;
-    connectionId: string;
-    now: string;
-    cooldownUntil: string;
-  }): Promise<PortalFetchJobReservation>;
+  acquire(input: AcquirePortalFetchJobInput): Promise<PortalFetchJobReservation>;
+  complete(input: PortalFetchJobLeaseKey): Promise<void>;
+  release(input: PortalFetchJobLeaseKey): Promise<void>;
 }
 
 export type PortalFetchJobReservation =
@@ -71,10 +87,13 @@ export async function runPortalFetchJob(
     };
   }
   const cooldownUntil = new Date(Date.parse(input.now) + input.cooldownMs).toISOString();
-  const reservation = await input.state.acquire({
+  const leaseKey: PortalFetchJobLeaseKey = {
     jobId: input.jobId,
     workspaceId: context.workspaceId,
     connectionId: input.connectionId,
+  };
+  const reservation = await input.state.acquire({
+    ...leaseKey,
     now: input.now,
     cooldownUntil,
   });
@@ -98,6 +117,7 @@ export async function runPortalFetchJob(
   try {
     runResult = await input.runner.runTask(runInput);
   } catch {
+    await input.state.release(leaseKey);
     return {
       status: "failed",
       connectionId: input.connectionId,
@@ -106,8 +126,21 @@ export async function runPortalFetchJob(
     };
   }
 
+  // Only a completed fetch consumes the job id; anything else keeps the
+  // cooldown (the portal was contacted) but stays retryable.
+  if (runResult.status !== "completed") {
+    await input.state.release(leaseKey);
+    return {
+      status: "failed",
+      connectionId: input.connectionId,
+      cooldownUntil,
+      runResult,
+    };
+  }
+
+  await input.state.complete(leaseKey);
   return {
-    status: runResult.status === "completed" ? "completed" : "failed",
+    status: "completed",
     connectionId: input.connectionId,
     cooldownUntil,
     runResult,
@@ -140,18 +173,14 @@ export class InMemoryPortalFetchConnectionRepository implements PortalFetchConne
   }
 }
 
+type PortalFetchJobLeaseState = "leased" | "completed";
+
 export class InMemoryPortalFetchJobStateStore implements PortalFetchJobStateStore {
-  readonly #reservedJobIds = new Set<string>();
+  readonly #jobs = new Map<string, PortalFetchJobLeaseState>();
   readonly #cooldowns = new Map<string, string>();
 
-  async acquire(input: {
-    jobId: string;
-    workspaceId: string;
-    connectionId: string;
-    now: string;
-    cooldownUntil: string;
-  }): Promise<PortalFetchJobReservation> {
-    if (this.#reservedJobIds.has(input.jobId)) {
+  async acquire(input: AcquirePortalFetchJobInput): Promise<PortalFetchJobReservation> {
+    if (this.#jobs.has(jobKey(input))) {
       return { status: "duplicate", cooldownUntil: undefined };
     }
     const key = connectionKey(input.workspaceId, input.connectionId);
@@ -159,10 +188,24 @@ export class InMemoryPortalFetchJobStateStore implements PortalFetchJobStateStor
     if (existingCooldown !== undefined && Date.parse(existingCooldown) > Date.parse(input.now)) {
       return { status: "cooldown", cooldownUntil: existingCooldown };
     }
-    this.#reservedJobIds.add(input.jobId);
+    this.#jobs.set(jobKey(input), "leased");
     this.#cooldowns.set(key, input.cooldownUntil);
     return { status: "acquired", cooldownUntil: input.cooldownUntil };
   }
+
+  async complete(input: PortalFetchJobLeaseKey): Promise<void> {
+    this.#jobs.set(jobKey(input), "completed");
+  }
+
+  async release(input: PortalFetchJobLeaseKey): Promise<void> {
+    if (this.#jobs.get(jobKey(input)) === "leased") {
+      this.#jobs.delete(jobKey(input));
+    }
+  }
+}
+
+function jobKey(input: PortalFetchJobLeaseKey): string {
+  return `${input.workspaceId}:${input.jobId}`;
 }
 
 function connectionKey(workspaceId: string, connectionId: string): string {
