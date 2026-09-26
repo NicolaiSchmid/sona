@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { DbClient } from "../runner.js";
 import { type AuditEvent, SqliteAuditEventRepository } from "./audit-events.js";
 import { EVIDENCE_RECORD_TYPES, SqliteEvidenceLinkRepository } from "./evidence-links.js";
-import { requiredNumber, row } from "./helpers.js";
+import { requiredNumber, row, withTransaction } from "./helpers.js";
 import {
   type CreateLedgerTransactionInput,
   type LedgerPostingInput,
@@ -138,6 +138,37 @@ describe("SqliteLedgerRepository accounts", () => {
           createdAt: AT,
         }),
       ).toMatchObject({ kind: "asset" });
+    } finally {
+      t.close();
+    }
+  });
+
+  it("keeps existing account ids when the default tree is re-installed with another id generator", async () => {
+    const t = createTestDatabase();
+    try {
+      const ledger = new SqliteLedgerRepository(t.db);
+      await seedAccounts(ledger, "ws_1");
+      await ledger.upsertAccount("ws_1", {
+        id: "acct_giro",
+        path: "Assets:Bank:DKB:Giro",
+        createdAt: AT,
+      });
+
+      const reinstalled = await ledger.ensureDefaultAccounts("ws_1", {
+        createdAt: "2026-03-01T00:00:00Z",
+        accountId: (path) => `other:${path}`,
+      });
+
+      expect(reinstalled.map((account) => account.id)).toEqual(
+        DEFAULT_ACCOUNTS.map((account) => `acct:ws_1:${account.path}`),
+      );
+      expect(count(t.db, "ledger_accounts", "ws_1")).toBe(DEFAULT_ACCOUNTS.length + 1);
+      expect(
+        t.db.prepare("SELECT COUNT(*) AS n FROM ledger_accounts WHERE id LIKE 'other:%'").get(),
+      ).toEqual({ n: 0 });
+      expect(await ledger.getAccountByPath("ws_1", "Assets:Bank:DKB:Giro")).toMatchObject({
+        id: "acct_giro",
+      });
     } finally {
       t.close();
     }
@@ -458,6 +489,333 @@ describe("SqliteLedgerRepository transactions", () => {
       t.close();
     }
   });
+
+  it("accepts a multi-commodity transaction when every commodity balances on its own", async () => {
+    const t = createTestDatabase();
+    try {
+      const ledger = new SqliteLedgerRepository(t.db);
+      await seedAccounts(ledger, "ws_1");
+
+      const result = await ledger.createTransaction(
+        "ws_1",
+        draft("tx_fx", {
+          postings: [
+            eur(BANK, "-100.00"),
+            usd("Assets:Broker", "108.50"),
+            usd(SUSPENSE, "-108.50"),
+            eur(SUSPENSE, "100.00"),
+          ],
+        }),
+      );
+
+      expect(result.created).toBe(true);
+      expect(result.transaction.postings.map((posting) => posting.amount)).toEqual([
+        { amount: "-100.00", commodity: "EUR" },
+        { amount: "108.50", commodity: "USD" },
+        { amount: "-108.50", commodity: "USD" },
+        { amount: "100.00", commodity: "EUR" },
+      ]);
+      expect(await ledger.getTransaction("ws_1", "tx_fx")).toEqual(result.transaction);
+      expect(count(t.db, "ledger_postings", "ws_1")).toBe(4);
+    } finally {
+      t.close();
+    }
+  });
+
+  it("rejects malformed amounts and creation in the superseded state without writing", async () => {
+    const t = createTestDatabase();
+    try {
+      const ledger = new SqliteLedgerRepository(t.db);
+      await seedAccounts(ledger, "ws_1");
+
+      const comma = draft("tx_comma", {
+        postings: [eur(BANK, "-12,50"), eur(SUSPENSE, "12.50")],
+      });
+      await expect(ledger.createTransaction("ws_1", comma)).rejects.toBeInstanceOf(
+        UnbalancedLedgerTransactionError,
+      );
+      await expect(ledger.createTransaction("ws_1", comma)).rejects.toThrow(
+        /invalid amount "-12,50"/,
+      );
+      await expect(
+        ledger.createTransaction(
+          "ws_1",
+          draft("tx_exp", { postings: [eur(BANK, "-1e2"), eur(SUSPENSE, "100")] }),
+        ),
+      ).rejects.toThrow(/invalid amount "-1e2"/);
+      // `superseded` is only reachable through supersession; bypass the type to prove the runtime gate.
+      await expect(
+        ledger.createTransaction(
+          "ws_1",
+          draft("tx_superseded", { reviewState: "superseded" as never }),
+        ),
+      ).rejects.toThrow(/cannot be created in the superseded state/);
+
+      expect(count(t.db, "ledger_transactions", "ws_1")).toBe(0);
+      expect(count(t.db, "ledger_postings", "ws_1")).toBe(0);
+    } finally {
+      t.close();
+    }
+  });
+
+  it("defaults to draft, stores an explicit review state, and round-trips memos", async () => {
+    const t = createTestDatabase();
+    try {
+      const ledger = new SqliteLedgerRepository(t.db);
+      await seedAccounts(ledger, "ws_1");
+
+      const created = await ledger.createTransaction("ws_1", draft("tx_draft"));
+      const suggested = await ledger.createTransaction(
+        "ws_1",
+        draft("tx_suggested", {
+          reviewState: "suggested",
+          postings: [
+            eur(BANK, "-5.00", "Kaffee & Kuchen — Beleg #12 / 'quoted' \"double\""),
+            eur(SUSPENSE, "5.00", ""),
+          ],
+        }),
+      );
+
+      expect(created.transaction.reviewState).toBe("draft");
+      expect(suggested.transaction.reviewState).toBe("suggested");
+      expect(
+        (await ledger.getTransaction("ws_1", "tx_suggested"))?.postings.map(
+          (posting) => posting.memo,
+        ),
+      ).toEqual(["Kaffee & Kuchen — Beleg #12 / 'quoted' \"double\"", ""]);
+    } finally {
+      t.close();
+    }
+  });
+
+  it("preserves posting order past nine postings via zero-padded ids", async () => {
+    const t = createTestDatabase();
+    try {
+      const ledger = new SqliteLedgerRepository(t.db);
+      await seedAccounts(ledger, "ws_1");
+
+      const legs = Array.from({ length: 11 }, (_, index) =>
+        eur(index % 2 === 0 ? SUSPENSE : MAINTENANCE, "1.00", `leg ${index + 1}`),
+      );
+      const result = await ledger.createTransaction(
+        "ws_1",
+        draft("tx_many", { postings: [...legs, eur(BANK, "-11.00", "leg 12")] }),
+      );
+
+      const readBack = await ledger.getTransaction("ws_1", "tx_many");
+      expect(readBack).toEqual(result.transaction);
+      expect(readBack?.postings.map((posting) => posting.id)).toEqual(
+        Array.from({ length: 12 }, (_, index) => `tx_many:${String(index + 1).padStart(3, "0")}`),
+      );
+      expect(readBack?.postings.map((posting) => posting.memo)).toEqual(
+        Array.from({ length: 12 }, (_, index) => `leg ${index + 1}`),
+      );
+      expect(readBack?.postings.at(-1)?.account).toBe(BANK);
+      expect((await ledger.listTransactions("ws_1"))[0]?.postings).toHaveLength(12);
+    } finally {
+      t.close();
+    }
+  });
+
+  it("supports open-ended date bounds, combined filters, and a stable sort order", async () => {
+    const t = createTestDatabase();
+    try {
+      const ledger = new SqliteLedgerRepository(t.db);
+      await seedAccounts(ledger, "ws_1");
+
+      // Inserted out of order on purpose: the list sorts by bookedOn, then createdAt, then id.
+      await ledger.createTransaction(
+        "ws_1",
+        draft("tx_d", { bookedOn: "2026-02-10", createdAt: "2026-02-10T09:00:00Z" }),
+      );
+      await ledger.createTransaction(
+        "ws_1",
+        draft("tx_c", { bookedOn: "2026-02-10", createdAt: "2026-02-10T08:00:00Z" }),
+      );
+      await ledger.createTransaction(
+        "ws_1",
+        draft("tx_b", { bookedOn: "2026-02-10", createdAt: "2026-02-10T08:00:00Z" }),
+      );
+      await ledger.createTransaction(
+        "ws_1",
+        draft("tx_a", {
+          bookedOn: "2026-01-31",
+          createdAt: "2026-02-10T10:00:00Z",
+          reviewState: "user_reviewed",
+          postings: [eur(BANK, "-20.00"), eur(MAINTENANCE, "20.00")],
+        }),
+      );
+      await ledger.createTransaction(
+        "ws_1",
+        draft("tx_e", { bookedOn: "2026-03-01", reviewState: "user_reviewed" }),
+      );
+
+      const ids = (list: Awaited<ReturnType<typeof ledger.listTransactions>>) =>
+        list.map((transaction) => transaction.id);
+
+      expect(ids(await ledger.listTransactions("ws_1"))).toEqual([
+        "tx_a",
+        "tx_b",
+        "tx_c",
+        "tx_d",
+        "tx_e",
+      ]);
+      expect(ids(await ledger.listTransactions("ws_1", { from: "2026-02-10" }))).toEqual([
+        "tx_b",
+        "tx_c",
+        "tx_d",
+        "tx_e",
+      ]);
+      expect(ids(await ledger.listTransactions("ws_1", { to: "2026-02-10" }))).toEqual([
+        "tx_a",
+        "tx_b",
+        "tx_c",
+        "tx_d",
+      ]);
+      expect(
+        ids(await ledger.listTransactions("ws_1", { from: "2026-02-11", to: "2026-02-10" })),
+      ).toEqual([]);
+      expect(
+        ids(
+          await ledger.listTransactions("ws_1", {
+            account: BANK,
+            reviewStates: ["user_reviewed", "exported"],
+          }),
+        ),
+      ).toEqual(["tx_a", "tx_e"]);
+      expect(
+        ids(
+          await ledger.listTransactions("ws_1", { account: MAINTENANCE, reviewStates: ["draft"] }),
+        ),
+      ).toEqual([]);
+      expect(
+        ids(
+          await ledger.listTransactions("ws_1", {
+            from: "2026-02-01",
+            account: BANK,
+            reviewStates: ["draft"],
+          }),
+        ),
+      ).toEqual(["tx_b", "tx_c", "tx_d"]);
+    } finally {
+      t.close();
+    }
+  });
+
+  it("rejects a replacement whose idempotency key belongs to another transaction and changes nothing", async () => {
+    const t = createTestDatabase();
+    try {
+      const ledger = new SqliteLedgerRepository(t.db);
+      await seedAccounts(ledger, "ws_1");
+      await ledger.createTransaction("ws_1", draft("tx_1", { idempotencyKey: "import:1" }));
+      await ledger.createTransaction("ws_1", draft("tx_other", { idempotencyKey: "import:other" }));
+      const before = await ledger.getTransaction("ws_1", "tx_1");
+
+      const supersede = (idempotencyKey: string) =>
+        ledger.supersedeTransaction("ws_1", {
+          supersedesTransactionId: "tx_1",
+          replacement: draft("tx_fix", {
+            idempotencyKey,
+            postings: [eur(BANK, "-84.23"), eur(MAINTENANCE, "84.23")],
+          }),
+          actor: "user:test",
+          supersededAt: "2026-02-02T00:00:00Z",
+        });
+
+      await expect(supersede("import:other")).rejects.toThrow(
+        /already belongs to ledger transaction tx_other/,
+      );
+      // Reusing the original's own key is rejected too: a correction cannot alias its predecessor.
+      await expect(supersede("import:1")).rejects.toThrow(
+        /already belongs to ledger transaction tx_1/,
+      );
+
+      expect(await ledger.getTransaction("ws_1", "tx_1")).toEqual(before);
+      expect(await ledger.getTransaction("ws_1", "tx_fix")).toBeUndefined();
+      expect(count(t.db, "ledger_transactions", "ws_1")).toBe(2);
+      expect(count(t.db, "ledger_postings", "ws_1")).toBe(4);
+      expect(count(t.db, "ledger_transaction_supersessions", "ws_1")).toBe(0);
+      expect(count(t.db, "review_events", "ws_1")).toBe(0);
+      // The original remains correctable with a fresh key afterwards.
+      expect((await supersede("fix:1")).created).toBe(true);
+      expect(count(t.db, "ledger_transaction_supersessions", "ws_1")).toBe(1);
+    } finally {
+      t.close();
+    }
+  });
+
+  it("supports a linear correction chain and keeps superseded transactions listable", async () => {
+    const t = createTestDatabase();
+    try {
+      const ledger = new SqliteLedgerRepository(t.db);
+      await seedAccounts(ledger, "ws_1");
+      await ledger.createTransaction("ws_1", draft("tx_1"));
+
+      const supersede = (
+        supersedesTransactionId: string,
+        replacement: CreateLedgerTransactionInput,
+      ) =>
+        ledger.supersedeTransaction("ws_1", {
+          supersedesTransactionId,
+          replacement,
+          actor: "user:test",
+          supersededAt: "2026-02-02T00:00:00Z",
+        });
+
+      await supersede(
+        "tx_1",
+        draft("tx_2", { postings: [eur(BANK, "-84.23"), eur(MAINTENANCE, "84.23")] }),
+      );
+      const second = await supersede(
+        "tx_2",
+        draft("tx_3", {
+          reviewState: "user_reviewed",
+          postings: [eur(BANK, "-84.23"), eur("Expenses:Insurance", "84.23")],
+        }),
+      );
+
+      expect(second.superseded).toMatchObject({
+        id: "tx_2",
+        reviewState: "superseded",
+        supersedesTransactionId: "tx_1",
+        supersededByTransactionId: "tx_3",
+      });
+      expect(second.replacement).toMatchObject({
+        id: "tx_3",
+        supersedesTransactionId: "tx_2",
+        supersededByTransactionId: undefined,
+      });
+
+      const ids = (list: Awaited<ReturnType<typeof ledger.listTransactions>>) =>
+        list.map((transaction) => transaction.id);
+      expect(ids(await ledger.listTransactions("ws_1"))).toEqual(["tx_1", "tx_2", "tx_3"]);
+      expect(ids(await ledger.listTransactions("ws_1", { account: SUSPENSE }))).toEqual(["tx_1"]);
+      expect(ids(await ledger.listTransactions("ws_1", { account: MAINTENANCE }))).toEqual([
+        "tx_2",
+      ]);
+      expect(ids(await ledger.listTransactions("ws_1", { account: "Expenses:Insurance" }))).toEqual(
+        ["tx_3"],
+      );
+      expect(
+        ids(
+          await ledger.listTransactions("ws_1", {
+            reviewStates: ["draft", "suggested", "user_reviewed", "advisor_reviewed", "exported"],
+          }),
+        ),
+      ).toEqual(["tx_3"]);
+      expect(ids(await ledger.listTransactions("ws_1", { reviewStates: ["superseded"] }))).toEqual([
+        "tx_1",
+        "tx_2",
+      ]);
+
+      await expect(supersede("tx_1", draft("tx_4"))).rejects.toThrow(/already superseded by tx_2/);
+      await expect(supersede("tx_2", draft("tx_4"))).rejects.toThrow(/already superseded by tx_3/);
+      expect(count(t.db, "ledger_transactions", "ws_1")).toBe(3);
+      expect(count(t.db, "review_events", "ws_1")).toBe(2);
+    } finally {
+      t.close();
+    }
+  });
 });
 
 describe("SqliteEvidenceLinkRepository", () => {
@@ -521,6 +879,63 @@ describe("SqliteEvidenceLinkRepository", () => {
       t.close();
     }
   });
+
+  it("treats direction and kind as part of the edge and lists any record type", async () => {
+    const t = createTestDatabase();
+    try {
+      const repo = new SqliteEvidenceLinkRepository(t.db);
+      const raw = EVIDENCE_RECORD_TYPES.rawSourceRecord;
+      const tx = EVIDENCE_RECORD_TYPES.ledgerTransaction;
+
+      const forward = await repo.link(
+        link({
+          id: "el_fwd",
+          fromType: raw,
+          fromId: "raw_1",
+          toType: tx,
+          toId: "tx_1",
+          kind: "imported_as",
+        }),
+      );
+      const reverse = await repo.link(
+        link({
+          id: "el_rev",
+          fromType: tx,
+          fromId: "tx_1",
+          toType: raw,
+          toId: "raw_1",
+          kind: "imported_as",
+        }),
+      );
+      const replay = await repo.link(
+        link({
+          id: "el_replay",
+          fromType: raw,
+          fromId: "raw_1",
+          toType: tx,
+          toId: "tx_1",
+          kind: "imported_as",
+          notes: "second pipeline run",
+          createdAt: "2026-02-03T00:00:00Z",
+        }),
+      );
+
+      expect(forward.created).toBe(true);
+      expect(reverse.created).toBe(true);
+      expect(replay).toEqual({ link: forward.link, created: false });
+      expect(count(t.db, "evidence_links", "ws_1")).toBe(2);
+
+      const idsFor = async (workspaceId: string, type: string, id: string) =>
+        (await repo.listForRecord(workspaceId, { type, id })).map((l) => l.id);
+      expect(await idsFor("ws_1", raw, "raw_1")).toEqual(["el_fwd", "el_rev"]);
+      expect(await idsFor("ws_1", tx, "tx_1")).toEqual(["el_fwd", "el_rev"]);
+      // The type is part of the endpoint: a matching id under another type is a different record.
+      expect(await idsFor("ws_1", raw, "tx_1")).toEqual([]);
+      expect(await idsFor("ws_2", raw, "raw_1")).toEqual([]);
+    } finally {
+      t.close();
+    }
+  });
 });
 
 describe("SqliteAuditEventRepository", () => {
@@ -577,6 +992,109 @@ describe("SqliteAuditEventRepository", () => {
       });
       expect(page3.events).toEqual([]);
       await expect(repo.list("ws_1", { limit: 0 })).rejects.toThrow(/positive integer/);
+    } finally {
+      t.close();
+    }
+  });
+
+  it("round-trips nested metadata and bounds the page size", async () => {
+    const t = createTestDatabase();
+    try {
+      const repo = new SqliteAuditEventRepository(t.db);
+      const metadata = {
+        postings: [
+          { account: "Assets:Bank", amount: "-1.00" },
+          { account: SUSPENSE, amount: "1.00" },
+        ],
+        suggestion: { confidence: 0.42, rule: null, tags: ["synthetic", "ümlaut"] },
+        flags: [true, false],
+      };
+      await repo.append(auditEvent("audit_meta", { metadata }));
+      expect((await repo.getById("ws_1", "audit_meta"))?.metadata).toEqual(metadata);
+
+      const page = await repo.list("ws_1", { limit: 5000 });
+      expect(page.events.map((event) => event.id)).toEqual(["audit_meta"]);
+      expect(page.nextCursor).toBeUndefined();
+      for (const limit of [1.5, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+        await expect(repo.list("ws_1", { limit })).rejects.toThrow(/positive integer/);
+      }
+    } finally {
+      t.close();
+    }
+  });
+
+  it("never returns another workspace's events, even through a foreign cursor", async () => {
+    const t = createTestDatabase();
+    try {
+      const repo = new SqliteAuditEventRepository(t.db);
+      await repo.append(auditEvent("audit_ws1_a", { createdAt: "2026-02-01T00:00:00Z" }));
+      await repo.append(auditEvent("audit_ws1_b", { createdAt: "2026-02-01T00:00:02Z" }));
+      await repo.append(
+        auditEvent("audit_ws2_a", { workspaceId: "ws_2", createdAt: "2026-02-01T00:00:01Z" }),
+      );
+      await repo.append(
+        auditEvent("audit_ws2_b", { workspaceId: "ws_2", createdAt: "2026-02-01T00:00:03Z" }),
+      );
+
+      const ws1 = await repo.list("ws_1", { limit: 1 });
+      expect(ws1.events.map((event) => event.id)).toEqual(["audit_ws1_a"]);
+      expect(ws1.nextCursor).toEqual({ createdAt: "2026-02-01T00:00:00Z", id: "audit_ws1_a" });
+
+      const ws2 = await repo.list("ws_2", { limit: 10, after: ws1.nextCursor });
+      expect(ws2.events.map((event) => event.id)).toEqual(["audit_ws2_a", "audit_ws2_b"]);
+      expect(ws2.events.every((event) => event.workspaceId === "ws_2")).toBe(true);
+      expect(await repo.getById("ws_2", "audit_ws1_a")).toBeUndefined();
+    } finally {
+      t.close();
+    }
+  });
+});
+
+describe("withTransaction", () => {
+  it("commits the callback result and rolls back every write when the callback throws", () => {
+    const t = createTestDatabase();
+    try {
+      const insert = (id: string) =>
+        t.db
+          .prepare(
+            "INSERT INTO audit_events (id, workspace_id, action, actor, created_at) VALUES (?, ?, ?, ?, ?)",
+          )
+          .run(id, "ws_1", "test.write", "system", AT);
+
+      expect(
+        withTransaction(t.db, () => {
+          insert("audit_committed");
+          return 42;
+        }),
+      ).toBe(42);
+
+      // Application error after a write: the write is gone and the same error surfaces.
+      const failure = new Error("synthetic failure after a write");
+      let caught: unknown;
+      try {
+        withTransaction(t.db, () => {
+          insert("audit_rolled_back");
+          throw failure;
+        });
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught).toBe(failure);
+
+      // Constraint error on a later statement: the earlier statement is rolled back too.
+      expect(() =>
+        withTransaction(t.db, () => {
+          insert("audit_first_of_pair");
+          insert("audit_first_of_pair");
+        }),
+      ).toThrow(/UNIQUE constraint failed/i);
+
+      expect(count(t.db, "audit_events", "ws_1")).toBe(1);
+      expect(
+        t.db.prepare("SELECT id FROM audit_events WHERE workspace_id = ? ORDER BY id").all("ws_1"),
+      ).toEqual([{ id: "audit_committed" }]);
+      // No transaction is left open, so the connection is immediately reusable.
+      expect(withTransaction(t.db, () => count(t.db, "audit_events", "ws_1"))).toBe(1);
     } finally {
       t.close();
     }
