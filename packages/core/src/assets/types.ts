@@ -27,6 +27,9 @@ export class DepreciationError extends Error {
 /** ISO calendar date, YYYY-MM-DD. */
 const isoDateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "expected YYYY-MM-DD");
 
+/** ISO timestamp with offset, as written to `createdAt` columns. */
+const isoTimestampSchema = z.string().datetime({ offset: true });
+
 const nonNegativeDecimalSchema = decimalStringSchema.refine((v) => !v.startsWith("-"), {
   message: "expected a non-negative decimal string",
 });
@@ -101,7 +104,7 @@ export const assetSchema = z
     acquisitionSideCosts: z.array(acquisitionSideCostSchema),
     /** Documents substantiating the acquisition (purchase contract, invoices). */
     evidenceDocumentIds: z.array(z.string().min(1)),
-    createdAt: z.string().datetime({ offset: true }),
+    createdAt: isoTimestampSchema,
   })
   .superRefine((asset, ctx) => {
     const ids = new Set<string>();
@@ -143,7 +146,7 @@ const assetEventBaseShape = {
   occurredOn: isoDateSchema,
   description: z.string().min(1),
   evidenceDocumentIds: z.array(z.string().min(1)),
-  createdAt: z.string().datetime({ offset: true }),
+  createdAt: isoTimestampSchema,
 } as const;
 
 /**
@@ -240,7 +243,7 @@ export const depreciationScheduleConfigSchema = z
     expenseAccount: z.string().min(1),
     /** Contra-asset account credited each year, e.g. "Assets:RealEstate:Musterstr 1:AccumulatedDepreciation". */
     accumulatedDepreciationAccount: z.string().min(1),
-    createdAt: z.string().datetime({ offset: true }),
+    createdAt: isoTimestampSchema,
   })
   .refine((config) => config.expenseAccount !== config.accumulatedDepreciationAccount, {
     message: "expense and accumulated depreciation accounts must differ",
@@ -267,7 +270,7 @@ export const recordedDepreciationEntrySchema = z.object({
   transactionId: z.string().min(1),
   /** Debit amount booked on the expense posting. */
   amount: nonNegativeMoneySchema,
-  createdAt: z.string().datetime({ offset: true }),
+  createdAt: isoTimestampSchema,
 });
 
 export type RecordedDepreciationEntry = z.infer<typeof recordedDepreciationEntrySchema>;

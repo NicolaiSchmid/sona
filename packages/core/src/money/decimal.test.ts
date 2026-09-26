@@ -10,6 +10,7 @@ import {
   sumDecimals,
   toScaledBigInt,
 } from "./decimal";
+import { moneyAmountsEqual } from "./types";
 
 describe("decimal helpers", () => {
   it("validates decimal strings", () => {
@@ -76,6 +77,13 @@ describe("scaled bigint helpers", () => {
     expect(decimalsEqual("0", "-0")).toBe(true);
     expect(decimalsEqual("6360.00", "6360.01")).toBe(false);
     expect(() => decimalsEqual("nope", "1")).toThrow(InvalidDecimalError);
+  });
+
+  it("compares money by value and commodity", () => {
+    const eur = { amount: "6360", commodity: "EUR" };
+    expect(moneyAmountsEqual(eur, { amount: "6360.00", commodity: "EUR" })).toBe(true);
+    expect(moneyAmountsEqual(eur, { amount: "6360", commodity: "USD" })).toBe(false);
+    expect(moneyAmountsEqual(eur, { amount: "6360.01", commodity: "EUR" })).toBe(false);
   });
 
   it("divides with deterministic half-away-from-zero rounding", () => {

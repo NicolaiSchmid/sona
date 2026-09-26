@@ -5,9 +5,9 @@ import {
   assetEventSchema,
   assetSchema,
   type DepreciationScheduleConfig,
-  decimalsEqual,
   depreciationScheduleConfigSchema,
   type MoneyAmount,
+  moneyAmountsEqual,
   type RecordedDepreciationEntry,
   recordedDepreciationEntrySchema,
 } from "@sona/core";
@@ -21,8 +21,6 @@ import {
   row,
   rows,
 } from "./helpers.js";
-
-export type { RecordedDepreciationEntry } from "@sona/core";
 
 /**
  * Workspace-scoped persistence for assets, their append-only history,
@@ -270,8 +268,7 @@ export class SqliteAssetRepository {
       stored.assetId !== entry.assetId ||
       stored.configId !== entry.configId ||
       stored.year !== entry.year ||
-      stored.amount.commodity !== entry.amount.commodity ||
-      !decimalsEqual(stored.amount.amount, entry.amount.amount)
+      !moneyAmountsEqual(stored.amount, entry.amount)
     ) {
       throw new Error(
         `transaction ${entry.transactionId} is already recorded with a different asset-year or amount`,
