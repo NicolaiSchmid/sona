@@ -34,6 +34,12 @@ const FORBIDDEN_TOKENS = new Set([
   "post",
   "upload",
   "confirm",
+  "close",
+  "deactivate",
+  "terminate",
+  "revoke",
+  "withdraw",
+  "disable",
 ]);
 
 /**

@@ -68,6 +68,7 @@ interface PlaywrightContext {
   ): Promise<void>;
   on(event: "request", handler: (request: PlaywrightRequest) => void): void;
   cookies(urls: readonly string[]): Promise<PlaywrightCookie[]>;
+  addCookies(cookies: readonly PlaywrightCookieToAdd[]): Promise<void>;
   newPage(): Promise<PlaywrightPage>;
   close(): Promise<void>;
 }
@@ -75,6 +76,12 @@ interface PlaywrightContext {
 interface PlaywrightCookie {
   name: string;
   value: string;
+}
+
+interface PlaywrightCookieToAdd extends PlaywrightCookie {
+  domain: string;
+  path: string;
+  secure: boolean;
 }
 
 interface PlaywrightRequest {
@@ -329,7 +336,9 @@ function hopHeaders(
     if (lower === "cookie" || lower === "host") {
       continue;
     }
-    if (lower === "authorization" && change.originChanged) {
+    // Another origin gets only content negotiation: no Referer, no portal
+    // tokens such as X-CSRF-Token, no Authorization.
+    if (change.originChanged && !CROSS_ORIGIN_SAFE_HEADERS.has(lower)) {
       continue;
     }
     if (BODY_HEADERS.has(lower) && change.methodChanged) {
@@ -339,6 +348,13 @@ function hopHeaders(
   }
   return headers;
 }
+
+const CROSS_ORIGIN_SAFE_HEADERS: ReadonlySet<string> = new Set([
+  "accept",
+  "accept-language",
+  "accept-encoding",
+  "user-agent",
+]);
 
 /**
  * Both a meta refresh and `location.replace` are emitted: the script keeps the
@@ -484,6 +500,9 @@ class PlaywrightPageAdapter implements PortalBrowserPage {
       });
       if (isRedirectStatus(response.status)) {
         await response.body?.cancel();
+        // A redirect may establish or refresh the session; the next hop reads
+        // cookies back from the context jar, so store them there first.
+        await this.#storeSetCookies(response.headers.getSetCookie(), currentUrl);
         const nextUrl = redirectTarget({
           status: response.status,
           location: response.headers.get("location"),
@@ -511,6 +530,36 @@ class PlaywrightPageAdapter implements PortalBrowserPage {
         finalUrl: currentUrl,
         status: response.status,
       };
+    }
+  }
+
+  /**
+   * Stores a redirect's cookies for the responding host. Only the `Path`
+   * attribute is honoured (default `/`); `Domain` is ignored so a hop cannot
+   * plant cookies for a wider scope than the host that sent them.
+   */
+  async #storeSetCookies(setCookies: readonly string[], url: string): Promise<void> {
+    const origin = new URL(url);
+    const cookies: PlaywrightCookieToAdd[] = [];
+    for (const header of setCookies) {
+      const [pair = "", ...attributes] = header.split(";");
+      const separator = pair.indexOf("=");
+      if (separator <= 0) {
+        continue;
+      }
+      const pathAttribute = attributes
+        .map((attribute) => attribute.trim())
+        .find((attribute) => /^path=/i.test(attribute));
+      cookies.push({
+        name: pair.slice(0, separator).trim(),
+        value: pair.slice(separator + 1).trim(),
+        domain: origin.hostname,
+        path: pathAttribute?.slice("path=".length) || "/",
+        secure: origin.protocol === "https:",
+      });
+    }
+    if (cookies.length > 0) {
+      await this.#context.addCookies(cookies);
     }
   }
 

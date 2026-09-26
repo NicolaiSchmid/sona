@@ -134,6 +134,9 @@ Implemented controls and their known limits:
   before it is sent. Requests are issued by the worker with redirects disabled
   so every hop is evaluated first; should the browser ever follow a redirect on
   its own, a refused hop is recorded and the session fails closed.
+- Domain allowlists admit every subdomain of an entry; a deny-list refuses the
+  common public and shared-hosting suffixes (`co.uk`, `github.io`, ...), but a
+  full public-suffix-list check is still a follow-up.
 - Domain allowlists are hostname-based. They do not protect against DNS
   rebinding or portals resolving to private addresses, so browsers and
   workers must run in an egress-isolated network with no route to internal
