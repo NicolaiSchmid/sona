@@ -89,6 +89,71 @@ describe("core migrations", () => {
     }
   });
 
+  it("enforces the ledger repository constraints at the schema level", () => {
+    const db = new DatabaseSync(":memory:");
+    try {
+      applyMigrations(db, CORE_MIGRATIONS);
+      db.exec("PRAGMA foreign_keys = ON");
+      for (const ws of ["ws_1", "ws_2"]) {
+        db.exec(
+          `INSERT INTO workspaces (id, name, created_at) VALUES ('${ws}', 'Test', '2026-01-01T00:00:00Z')`,
+        );
+      }
+      const insertTx = (id: string, ws: string) =>
+        db.exec(
+          "INSERT INTO ledger_transactions (id, workspace_id, booked_on, description, review_state, created_at)" +
+            ` VALUES ('${id}', '${ws}', '2026-01-01', 'synthetic', 'draft', '2026-01-01T00:00:00Z')`,
+        );
+      insertTx("tx_a", "ws_1");
+      insertTx("tx_b", "ws_1");
+      insertTx("tx_c", "ws_1");
+      insertTx("tx_z", "ws_2");
+
+      // Supersession chain is linear: an original is superseded at most once,
+      // a replacement replaces at most one, and both ends live in the workspace.
+      const supersede = (ws: string, tx: string, supersedes: string) =>
+        db.exec(
+          "INSERT INTO ledger_transaction_supersessions (workspace_id, transaction_id, supersedes_transaction_id, superseded_at)" +
+            ` VALUES ('${ws}', '${tx}', '${supersedes}', '2026-01-02T00:00:00Z')`,
+        );
+      supersede("ws_1", "tx_b", "tx_a");
+      expect(() => supersede("ws_1", "tx_c", "tx_a")).toThrow(/UNIQUE constraint failed/i);
+      expect(() => supersede("ws_1", "tx_b", "tx_c")).toThrow(/UNIQUE constraint failed/i);
+      expect(() => supersede("ws_1", "tx_c", "tx_z")).toThrow(/FOREIGN KEY constraint failed/i);
+      expect(() => supersede("ws_2", "tx_z", "tx_a")).toThrow(/FOREIGN KEY constraint failed/i);
+      expect(() => supersede("ws_1", "tx_c", "tx_missing")).toThrow(
+        /FOREIGN KEY constraint failed/i,
+      );
+
+      // Idempotency keys: unique per workspace, one per transaction, reusable elsewhere.
+      const insertKey = (ws: string, key: string, tx: string) =>
+        db.exec(
+          "INSERT INTO ledger_transaction_idempotency_keys (workspace_id, idempotency_key, transaction_id)" +
+            ` VALUES ('${ws}', '${key}', '${tx}')`,
+        );
+      insertKey("ws_1", "import:1", "tx_a");
+      expect(() => insertKey("ws_1", "import:1", "tx_c")).toThrow(/UNIQUE constraint failed/i);
+      expect(() => insertKey("ws_1", "import:2", "tx_a")).toThrow(/UNIQUE constraint failed/i);
+      expect(() => insertKey("ws_2", "import:2", "tx_a")).toThrow(/FOREIGN KEY constraint failed/i);
+      expect(() => insertKey("ws_2", "import:1", "tx_z")).not.toThrow();
+
+      // Evidence edges are unique on (workspace, from, to, kind).
+      const insertEdge = (id: string, ws: string, kind: string) =>
+        db.exec(
+          "INSERT INTO evidence_links (id, workspace_id, from_type, from_id, to_type, to_id, kind, created_at)" +
+            ` VALUES ('${id}', '${ws}', 'document', 'doc_1', 'ledger_transaction', 'tx_a', '${kind}', '2026-01-01T00:00:00Z')`,
+        );
+      insertEdge("el_1", "ws_1", "substantiates");
+      expect(() => insertEdge("el_2", "ws_1", "substantiates")).toThrow(
+        /UNIQUE constraint failed/i,
+      );
+      expect(() => insertEdge("el_3", "ws_1", "imported_as")).not.toThrow();
+      expect(() => insertEdge("el_4", "ws_2", "substantiates")).not.toThrow();
+    } finally {
+      db.close();
+    }
+  });
+
   it("rejects a child row that references a parent in another workspace", () => {
     const db = new DatabaseSync(":memory:");
     try {
