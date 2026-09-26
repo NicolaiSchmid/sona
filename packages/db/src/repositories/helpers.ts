@@ -1,5 +1,5 @@
-import type { JsonValue } from "@sona/core";
-import type { SqlExecutor } from "../runner.js";
+import type { JsonValue, ReviewEvent } from "@sona/core";
+import type { DbClient, SqlExecutor } from "../runner.js";
 
 export type Row = Record<string, unknown>;
 
@@ -88,4 +88,21 @@ export function withTransaction<T>(db: SqlExecutor, work: () => T): T {
 /** Builds a `(?, ?, ...)` placeholder list for a parameterized `IN` clause. */
 export function placeholders(count: number): string {
   return `(${Array.from({ length: count }, () => "?").join(", ")})`;
+}
+
+/** Appends one review-state transition to the shared `review_events` log. */
+export function insertReviewEvent(db: DbClient, event: ReviewEvent): void {
+  db.prepare(
+    "INSERT INTO review_events (id, workspace_id, target_type, target_id, from_state, to_state, actor, notes, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+  ).run(
+    event.id,
+    event.workspaceId,
+    event.targetType,
+    event.targetId,
+    event.fromState,
+    event.toState,
+    event.actor,
+    event.notes ?? null,
+    event.createdAt,
+  );
 }

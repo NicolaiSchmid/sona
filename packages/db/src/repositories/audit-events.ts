@@ -131,17 +131,15 @@ function pageSize(limit: number | undefined): number {
 }
 
 function eventFromRow(source: Row): AuditEvent {
-  const targetType = optionalString(source, "target_type");
-  const targetId = optionalString(source, "target_id");
   const metadata = optionalString(source, "metadata_json");
   return {
     id: requiredString(source, "id"),
     workspaceId: requiredString(source, "workspace_id"),
     action: requiredString(source, "action"),
     actor: requiredString(source, "actor"),
-    ...(targetType === undefined ? {} : { targetType }),
-    ...(targetId === undefined ? {} : { targetId }),
-    ...(metadata === undefined ? {} : { metadata: parseJson(metadata) }),
+    targetType: optionalString(source, "target_type"),
+    targetId: optionalString(source, "target_id"),
+    metadata: metadata === undefined ? undefined : parseJson(metadata),
     createdAt: requiredString(source, "created_at"),
   };
 }

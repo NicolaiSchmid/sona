@@ -26,6 +26,7 @@ import {
 } from "@sona/core";
 import type { DbClient, DbValue } from "../runner.js";
 import {
+  insertReviewEvent,
   optionalString,
   placeholders,
   type Row,
@@ -140,16 +141,13 @@ const REVIEW_TARGET_TYPE = "ledger_transaction" as const;
 const TRANSACTION_SELECT =
   "SELECT t.id, t.workspace_id, t.booked_on, t.description, t.review_state, t.created_at, k.idempotency_key, s.supersedes_transaction_id, sb.transaction_id AS superseded_by_transaction_id FROM ledger_transactions t LEFT JOIN ledger_transaction_idempotency_keys k ON k.workspace_id = t.workspace_id AND k.transaction_id = t.id LEFT JOIN ledger_transaction_supersessions s ON s.workspace_id = t.workspace_id AND s.transaction_id = t.id LEFT JOIN ledger_transaction_supersessions sb ON sb.workspace_id = t.workspace_id AND sb.supersedes_transaction_id = t.id";
 
-const POSTING_SELECT =
-  "SELECT p.id, p.transaction_id, a.path AS account, p.amount, p.commodity, p.memo FROM ledger_postings p JOIN ledger_accounts a ON a.workspace_id = p.workspace_id AND a.id = p.account_id";
+const POSTING_ACCOUNT_JOIN =
+  "ledger_postings p JOIN ledger_accounts a ON a.workspace_id = p.workspace_id AND a.id = p.account_id";
+
+const POSTING_SELECT = `SELECT p.id, p.transaction_id, a.path AS account, p.amount, p.commodity, p.memo FROM ${POSTING_ACCOUNT_JOIN}`;
 
 const ACCOUNT_SELECT =
   "SELECT id, workspace_id, path, kind, commodity, receipt_required FROM ledger_accounts";
-
-interface ResolvedAccount {
-  id: string;
-  commodity: string | undefined;
-}
 
 export class SqliteLedgerRepository {
   readonly #db: DbClient;
@@ -162,8 +160,7 @@ export class SqliteLedgerRepository {
 
   /** Creates the account or updates kind/commodity/receiptRequired of the existing path. */
   async upsertAccount(workspaceId: string, input: LedgerAccountInput): Promise<LedgerAccount> {
-    const account = this.#upsertAccount(workspaceId, input);
-    return account;
+    return this.#upsertAccount(workspaceId, input);
   }
 
   /** Idempotently installs the `@sona/core` default private-tax account tree. */
@@ -185,12 +182,7 @@ export class SqliteLedgerRepository {
   }
 
   async getAccountByPath(workspaceId: string, path: string): Promise<LedgerAccount | undefined> {
-    const result = row(
-      this.#db
-        .prepare(`${ACCOUNT_SELECT} WHERE workspace_id = ? AND path = ?`)
-        .get(workspaceId, path),
-    );
-    return result === undefined ? undefined : accountFromRow(result);
+    return this.#accountByPath(workspaceId, path);
   }
 
   async listAccounts(workspaceId: string): Promise<LedgerAccount[]> {
@@ -244,7 +236,7 @@ export class SqliteLedgerRepository {
     }
     if (filter.account !== undefined) {
       clauses.push(
-        "EXISTS (SELECT 1 FROM ledger_postings p JOIN ledger_accounts a ON a.workspace_id = p.workspace_id AND a.id = p.account_id WHERE p.workspace_id = t.workspace_id AND p.transaction_id = t.id AND a.path = ?)",
+        `EXISTS (SELECT 1 FROM ${POSTING_ACCOUNT_JOIN} WHERE p.workspace_id = t.workspace_id AND p.transaction_id = t.id AND a.path = ?)`,
       );
       params.push(filter.account);
     }
@@ -312,21 +304,17 @@ export class SqliteLedgerRepository {
           "UPDATE ledger_transactions SET review_state = ? WHERE workspace_id = ? AND id = ?",
         )
         .run("superseded" satisfies ReviewState, workspaceId, original.id);
-      this.#db
-        .prepare(
-          "INSERT INTO review_events (id, workspace_id, target_type, target_id, from_state, to_state, actor, notes, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        )
-        .run(
-          `review_event:${original.id}:${input.supersededAt}`,
-          workspaceId,
-          REVIEW_TARGET_TYPE,
-          original.id,
-          original.reviewState,
-          "superseded" satisfies ReviewState,
-          input.actor,
-          input.notes ?? null,
-          input.supersededAt,
-        );
+      insertReviewEvent(this.#db, {
+        id: `review_event:${original.id}:${input.supersededAt}`,
+        workspaceId,
+        targetType: REVIEW_TARGET_TYPE,
+        targetId: original.id,
+        fromState: original.reviewState,
+        toState: "superseded",
+        actor: input.actor,
+        notes: input.notes,
+        createdAt: input.supersededAt,
+      });
 
       return {
         superseded: this.#requireTransaction(workspaceId, original.id),
@@ -369,15 +357,20 @@ export class SqliteLedgerRepository {
         input.createdAt,
       );
 
+    const account = this.#accountByPath(workspaceId, input.path);
+    if (account === undefined) {
+      throw new Error("ledger account upsert did not persist");
+    }
+    return account;
+  }
+
+  #accountByPath(workspaceId: string, path: string): LedgerAccount | undefined {
     const result = row(
       this.#db
         .prepare(`${ACCOUNT_SELECT} WHERE workspace_id = ? AND path = ?`)
-        .get(workspaceId, input.path),
+        .get(workspaceId, path),
     );
-    if (result === undefined) {
-      throw new Error("ledger account upsert did not persist");
-    }
-    return accountFromRow(result);
+    return result === undefined ? undefined : accountFromRow(result);
   }
 
   #createTransaction(
@@ -441,21 +434,19 @@ export class SqliteLedgerRepository {
   #resolveAccounts(
     workspaceId: string,
     postings: readonly LedgerPostingInput[],
-  ): Map<string, ResolvedAccount> {
+  ): Map<string, LedgerAccount> {
     const paths = [...new Set(postings.map((posting) => posting.account))];
-    const resolved = new Map<string, ResolvedAccount>();
-    for (const source of rows(
-      this.#db
-        .prepare(
-          `SELECT id, path, commodity FROM ledger_accounts WHERE workspace_id = ? AND path IN ${placeholders(paths.length)}`,
-        )
-        .all(workspaceId, ...paths),
-    )) {
-      resolved.set(requiredString(source, "path"), {
-        id: requiredString(source, "id"),
-        commodity: optionalString(source, "commodity"),
-      });
-    }
+    const resolved = new Map(
+      rows(
+        this.#db
+          .prepare(
+            `${ACCOUNT_SELECT} WHERE workspace_id = ? AND path IN ${placeholders(paths.length)}`,
+          )
+          .all(workspaceId, ...paths),
+      )
+        .map(accountFromRow)
+        .map((account) => [account.path, account] as const),
+    );
 
     const missing = paths.filter((path) => !resolved.has(path));
     if (missing.length > 0) {
