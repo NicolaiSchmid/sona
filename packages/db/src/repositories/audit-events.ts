@@ -4,7 +4,7 @@
  * responsible for keeping `metadata` to a redacted summary — never raw
  * credentials, tokens, or full financial payloads.
  */
-import type { JsonValue } from "@sona/core";
+import type { AuditEvent } from "@sona/core";
 import type { DbClient, DbValue } from "../runner.js";
 import {
   optionalString,
@@ -16,19 +16,7 @@ import {
   stringifyJson,
 } from "./helpers.js";
 
-export interface AuditEvent {
-  id: string;
-  workspaceId: string;
-  /** Dotted action name, e.g. "ledger.transaction.superseded". */
-  action: string;
-  /** Who acted: a user id, "agent:<session>", "rule:<id>", or "system". */
-  actor: string;
-  targetType?: string;
-  targetId?: string;
-  /** Redacted, JSON-shaped summary of the action. */
-  metadata?: JsonValue;
-  createdAt: string;
-}
+export type { AuditEvent } from "@sona/core";
 
 /** Keyset cursor: events are ordered by `(createdAt, id)`. */
 export interface AuditEventCursor {
@@ -63,6 +51,9 @@ export class SqliteAuditEventRepository {
   }
 
   async append(event: AuditEvent): Promise<void> {
+    if (event.actor.trim() === "") {
+      throw new Error("audit event actor is required");
+    }
     const existing = await this.getById(event.workspaceId, event.id);
     if (existing !== undefined) {
       throw new Error("audit events are append-only");
@@ -131,15 +122,17 @@ function pageSize(limit: number | undefined): number {
 }
 
 function eventFromRow(source: Row): AuditEvent {
+  const targetType = optionalString(source, "target_type");
+  const targetId = optionalString(source, "target_id");
   const metadata = optionalString(source, "metadata_json");
   return {
     id: requiredString(source, "id"),
     workspaceId: requiredString(source, "workspace_id"),
     action: requiredString(source, "action"),
     actor: requiredString(source, "actor"),
-    targetType: optionalString(source, "target_type"),
-    targetId: optionalString(source, "target_id"),
-    metadata: metadata === undefined ? undefined : parseJson(metadata),
+    ...(targetType === undefined ? {} : { targetType }),
+    ...(targetId === undefined ? {} : { targetId }),
+    ...(metadata === undefined ? {} : { metadata: parseJson(metadata) }),
     createdAt: requiredString(source, "created_at"),
   };
 }

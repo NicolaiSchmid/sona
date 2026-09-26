@@ -5,7 +5,7 @@
  * strings for money, INTEGER 0/1 booleans). Workflow/domain columns are typed
  * with the literal unions from `@sona/core` so the persisted vocabulary stays
  * in sync with the domain model. Mapping to camelCase domain types happens in
- * the repository layer, added in a later phase.
+ * the repository layer (`./repositories/*`).
  */
 import type {
   AccountKind,

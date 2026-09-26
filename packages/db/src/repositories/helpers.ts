@@ -1,5 +1,5 @@
-import type { JsonValue, ReviewEvent } from "@sona/core";
-import type { DbClient, SqlExecutor } from "../runner.js";
+import type { JsonValue } from "@sona/core";
+import type { SqlExecutor } from "../runner.js";
 
 export type Row = Record<string, unknown>;
 
@@ -47,6 +47,31 @@ export function requiredNumber(source: Row, key: string): number {
   return value;
 }
 
+/** Reads an INTEGER 0/1 boolean column, rejecting anything else. */
+export function requiredBoolean(source: Row, key: string): boolean {
+  const value = source[key];
+  if (value !== 0 && value !== 1) {
+    throw new Error(`database column ${key} was not a 0/1 boolean`);
+  }
+  return value === 1;
+}
+
+/**
+ * Reads a closed-vocabulary TEXT column through a type guard, so a corrupted
+ * or out-of-date value surfaces as an error instead of being cast through.
+ */
+export function requiredLiteral<T extends string>(
+  source: Row,
+  key: string,
+  isMember: (value: string) => value is T,
+): T {
+  const value = requiredString(source, key);
+  if (!isMember(value)) {
+    throw new Error(`database column ${key} had unexpected value ${JSON.stringify(value)}`);
+  }
+  return value;
+}
+
 export function parseJson(value: string): JsonValue {
   return JSON.parse(value) as JsonValue;
 }
@@ -63,46 +88,91 @@ export function undefinedToNull(value: string | undefined): string | null {
   return value ?? null;
 }
 
-/**
- * Runs `work` inside one database transaction. The callback is synchronous on
- * purpose: `node:sqlite` statements are synchronous, and an awaited gap inside
- * BEGIN/COMMIT would let unrelated statements interleave with the write. On
- * failure the transaction is rolled back and the original error rethrown.
- */
-export function withTransaction<T>(db: SqlExecutor, work: () => T): T {
-  db.exec("BEGIN");
-  try {
-    const result = work();
-    db.exec("COMMIT");
-    return result;
-  } catch (error) {
-    try {
-      db.exec("ROLLBACK");
-    } catch {
-      // Surface the original write failure.
-    }
-    throw error;
-  }
-}
-
 /** Builds a `(?, ?, ...)` placeholder list for a parameterized `IN` clause. */
 export function placeholders(count: number): string {
   return `(${Array.from({ length: count }, () => "?").join(", ")})`;
 }
 
-/** Appends one review-state transition to the shared `review_events` log. */
-export function insertReviewEvent(db: DbClient, event: ReviewEvent): void {
-  db.prepare(
-    "INSERT INTO review_events (id, workspace_id, target_type, target_id, from_state, to_state, actor, notes, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-  ).run(
-    event.id,
-    event.workspaceId,
-    event.targetType,
-    event.targetId,
-    event.fromState,
-    event.toState,
-    event.actor,
-    event.notes ?? null,
-    event.createdAt,
-  );
+// --- Transactions -----------------------------------------------------------
+
+/** Nesting depth per executor: depth 0 opens a real transaction, deeper levels use savepoints. */
+const transactionDepth = new WeakMap<SqlExecutor, number>();
+
+interface TransactionScope {
+  commit(): void;
+  rollback(): void;
+  close(): void;
+}
+
+function beginScope(db: SqlExecutor): TransactionScope {
+  const depth = transactionDepth.get(db) ?? 0;
+  const savepoint = depth === 0 ? undefined : `sona_savepoint_${depth}`;
+  db.exec(savepoint === undefined ? "BEGIN" : `SAVEPOINT ${savepoint}`);
+  transactionDepth.set(db, depth + 1);
+  return {
+    commit: () => {
+      db.exec(savepoint === undefined ? "COMMIT" : `RELEASE SAVEPOINT ${savepoint}`);
+    },
+    rollback: () => {
+      try {
+        if (savepoint === undefined) {
+          db.exec("ROLLBACK");
+        } else {
+          db.exec(`ROLLBACK TO SAVEPOINT ${savepoint}`);
+          db.exec(`RELEASE SAVEPOINT ${savepoint}`);
+        }
+      } catch {
+        // Surface the original write failure, not the rollback's.
+      }
+    },
+    close: () => {
+      if (depth === 0) {
+        transactionDepth.delete(db);
+      } else {
+        transactionDepth.set(db, depth);
+      }
+    },
+  };
+}
+
+/**
+ * Runs `work` atomically. Nested calls on the same executor become savepoints
+ * (SQLite and PostgreSQL), so repository methods compose into one outer unit:
+ * an inner failure rolls back only its own writes, an outer failure rolls
+ * back everything. The callback is synchronous, which is the natural fit for
+ * `node:sqlite`'s synchronous statements.
+ */
+export function withTransaction<T>(db: SqlExecutor, work: () => T): T {
+  const scope = beginScope(db);
+  try {
+    const result = work();
+    scope.commit();
+    return result;
+  } catch (error) {
+    scope.rollback();
+    throw error;
+  } finally {
+    scope.close();
+  }
+}
+
+/**
+ * Async variant of {@link withTransaction} for composing `async` repository
+ * methods into one atomic unit (e.g. ledger transaction + evidence link +
+ * audit event). Only safe when nothing else issues statements on this
+ * connection while the callback is suspended — true for a worker that
+ * processes jobs sequentially on its own connection.
+ */
+export async function withTransactionAsync<T>(db: SqlExecutor, work: () => Promise<T>): Promise<T> {
+  const scope = beginScope(db);
+  try {
+    const result = await work();
+    scope.commit();
+    return result;
+  } catch (error) {
+    scope.rollback();
+    throw error;
+  } finally {
+    scope.close();
+  }
 }

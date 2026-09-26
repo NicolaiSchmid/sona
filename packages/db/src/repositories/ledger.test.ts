@@ -3,13 +3,15 @@ import { describe, expect, it } from "vitest";
 import type { DbClient } from "../runner.js";
 import { type AuditEvent, SqliteAuditEventRepository } from "./audit-events.js";
 import { EVIDENCE_RECORD_TYPES, SqliteEvidenceLinkRepository } from "./evidence-links.js";
-import { requiredNumber, row, withTransaction } from "./helpers.js";
+import { requiredNumber, row, withTransaction, withTransactionAsync } from "./helpers.js";
 import {
   type CreateLedgerTransactionInput,
+  LedgerError,
   type LedgerPostingInput,
   SqliteLedgerRepository,
   UnbalancedLedgerTransactionError,
 } from "./ledger.js";
+import { SqliteReviewEventRepository } from "./review-events.js";
 import { createTestDatabase } from "./test-support.js";
 
 const AT = "2026-02-01T00:00:00Z";
@@ -173,6 +175,86 @@ describe("SqliteLedgerRepository accounts", () => {
       t.close();
     }
   });
+
+  it("never overwrites a user-configured account when re-installing defaults", async () => {
+    const t = createTestDatabase();
+    try {
+      const ledger = new SqliteLedgerRepository(t.db);
+      await seedAccounts(ledger, "ws_1");
+      // The user tightens receipt policy and restricts a bank account's commodity.
+      await ledger.upsertAccount("ws_1", {
+        id: "ignored",
+        path: "Expenses:Insurance",
+        receiptRequired: true,
+        commodity: "EUR",
+        createdAt: AT,
+      });
+
+      await seedAccounts(ledger, "ws_1");
+      const ensured = await ledger.ensureAccount("ws_1", {
+        id: "ignored_too",
+        path: "Expenses:Insurance",
+        receiptRequired: false,
+        createdAt: AT,
+      });
+
+      expect(ensured).toMatchObject({
+        id: "acct:ws_1:Expenses:Insurance",
+        receiptRequired: true,
+        commodity: "EUR",
+      });
+      expect(await ledger.getAccountByPath("ws_1", "Expenses:Insurance")).toEqual(ensured);
+    } finally {
+      t.close();
+    }
+  });
+
+  it("refuses kind or commodity changes that contradict existing postings", async () => {
+    const t = createTestDatabase();
+    try {
+      const ledger = new SqliteLedgerRepository(t.db);
+      await seedAccounts(ledger, "ws_1");
+      await ledger.upsertAccount("ws_1", {
+        id: "acct_mystery",
+        path: "Mystery:Box",
+        kind: "asset",
+        createdAt: AT,
+      });
+      await ledger.createTransaction(
+        "ws_1",
+        draft("tx_1", { postings: [eur("Mystery:Box", "-1.00"), eur(SUSPENSE, "1.00")] }),
+      );
+
+      await expect(
+        ledger.upsertAccount("ws_1", {
+          id: "acct_mystery",
+          path: "Mystery:Box",
+          kind: "expense",
+          createdAt: AT,
+        }),
+      ).rejects.toThrow(/cannot change the kind/);
+      await expect(
+        ledger.upsertAccount("ws_1", {
+          id: "ignored",
+          path: SUSPENSE,
+          commodity: "USD",
+          createdAt: AT,
+        }),
+      ).rejects.toThrow(/postings in another commodity/);
+      // A restriction that matches every existing posting is fine.
+      expect(
+        await ledger.upsertAccount("ws_1", {
+          id: "ignored",
+          path: SUSPENSE,
+          commodity: "EUR",
+          createdAt: AT,
+        }),
+      ).toMatchObject({ commodity: "EUR" });
+      expect(await ledger.getAccountByPath("ws_1", "Mystery:Box")).toMatchObject({ kind: "asset" });
+    } finally {
+      t.close();
+    }
+  });
 });
 
 describe("SqliteLedgerRepository transactions", () => {
@@ -304,14 +386,10 @@ describe("SqliteLedgerRepository transactions", () => {
       await seedAccounts(ledger, "ws_1");
       await seedAccounts(ledger, "ws_2");
 
-      const first = await ledger.createTransaction(
-        "ws_1",
-        draft("tx_1", { idempotencyKey: "import:1" }),
-      );
-      const replay = await ledger.createTransaction(
-        "ws_1",
-        draft("tx_1_retry", { idempotencyKey: "import:1", description: "changed" }),
-      );
+      const imported = draft("tx_1", { idempotencyKey: "import:1" });
+      const first = await ledger.createTransaction("ws_1", imported);
+      // A retry carries the same content under a fresh id: the key wins, nothing is written.
+      const replay = await ledger.createTransaction("ws_1", { ...imported, id: "tx_1_retry" });
       // The same key in another workspace is a different transaction.
       const other = await ledger.createTransaction(
         "ws_2",
@@ -323,6 +401,19 @@ describe("SqliteLedgerRepository transactions", () => {
       expect(other.created).toBe(true);
       expect(count(t.db, "ledger_transactions", "ws_1")).toBe(1);
       expect(count(t.db, "ledger_postings", "ws_1")).toBe(2);
+      // The same key with different financial content is a conflict, never a silent merge.
+      for (const divergent of [
+        draft("tx_1_diverged", { idempotencyKey: "import:1", description: "changed" }),
+        draft("tx_1_diverged", {
+          idempotencyKey: "import:1",
+          postings: [eur(BANK, "-84.24"), eur(SUSPENSE, "84.24")],
+        }),
+      ]) {
+        const attempt = ledger.createTransaction("ws_1", divergent);
+        await expect(attempt).rejects.toBeInstanceOf(LedgerError);
+        await expect(attempt).rejects.toMatchObject({ code: "idempotency_conflict" });
+      }
+      expect(count(t.db, "ledger_transactions", "ws_1")).toBe(1);
       // Without a key, a duplicate id is a hard error rather than a silent merge.
       await expect(ledger.createTransaction("ws_1", draft("tx_1"))).rejects.toThrow(
         /UNIQUE|PRIMARY KEY/i,
@@ -344,10 +435,15 @@ describe("SqliteLedgerRepository transactions", () => {
         "ws_1",
         draft("tx_feb", {
           bookedOn: "2026-02-10",
-          reviewState: "user_reviewed",
           postings: [eur(BANK, "-20.00"), eur(MAINTENANCE, "20.00")],
         }),
       );
+      await ledger.transitionReviewState("ws_1", {
+        id: "tx_feb",
+        toState: "user_reviewed",
+        actor: "user:test",
+        at: AT,
+      });
       await ledger.createTransaction("ws_1", draft("tx_mar", { bookedOn: "2026-03-01" }));
       await ledger.createTransaction("ws_2", draft("tx_ws2", { bookedOn: "2026-02-10" }));
 
@@ -382,18 +478,14 @@ describe("SqliteLedgerRepository transactions", () => {
     try {
       const ledger = new SqliteLedgerRepository(t.db);
       await seedAccounts(ledger, "ws_1");
-      const original = (
-        await ledger.createTransaction(
-          "ws_1",
-          draft("tx_1", { reviewState: "suggested", idempotencyKey: "import:1" }),
-        )
-      ).transaction;
+      const imported = draft("tx_1", { reviewState: "suggested", idempotencyKey: "import:1" });
+      const original = (await ledger.createTransaction("ws_1", imported)).transaction;
 
       const result = await ledger.supersedeTransaction("ws_1", {
         supersedesTransactionId: "tx_1",
         replacement: draft("tx_2", {
           postings: [eur(BANK, "-84.23"), eur(MAINTENANCE, "84.23")],
-          reviewState: "user_reviewed",
+          reviewState: "suggested",
         }),
         actor: "user:test",
         supersededAt: "2026-02-02T00:00:00Z",
@@ -408,7 +500,7 @@ describe("SqliteLedgerRepository transactions", () => {
       });
       expect(result.replacement).toMatchObject({
         id: "tx_2",
-        reviewState: "user_reviewed",
+        reviewState: "suggested",
         supersedesTransactionId: "tx_1",
         supersededByTransactionId: undefined,
       });
@@ -419,23 +511,25 @@ describe("SqliteLedgerRepository transactions", () => {
       // Both transactions remain readable and the original's postings are untouched.
       expect(await ledger.getTransaction("ws_1", "tx_1")).toEqual(result.superseded);
       expect(count(t.db, "ledger_postings", "ws_1")).toBe(4);
-      expect(
-        t.db
-          .prepare(
-            "SELECT from_state, to_state, actor, notes FROM review_events WHERE workspace_id = ? AND target_type = 'ledger_transaction' AND target_id = ?",
-          )
-          .all("ws_1", "tx_1"),
-      ).toEqual([
+      const reviewEvents = new SqliteReviewEventRepository(t.db);
+      const target = { type: "ledger_transaction", id: "tx_1" };
+      expect(await reviewEvents.listForTarget("ws_1", target)).toEqual([
         {
-          from_state: "suggested",
-          to_state: "superseded",
+          id: "review_event:ledger_transaction:tx_1:2026-02-02T00:00:00Z",
+          workspaceId: "ws_1",
+          targetType: "ledger_transaction",
+          targetId: "tx_1",
+          fromState: "suggested",
+          toState: "superseded",
           actor: "user:test",
           notes: "classified after receipt arrived",
+          createdAt: "2026-02-02T00:00:00Z",
         },
       ]);
+      expect(await reviewEvents.listForTarget("ws_2", target)).toEqual([]);
       // The original idempotency key still resolves to the superseded transaction.
       expect(
-        await ledger.createTransaction("ws_1", draft("tx_replay", { idempotencyKey: "import:1" })),
+        await ledger.createTransaction("ws_1", { ...imported, id: "tx_replay" }),
       ).toMatchObject({ created: false, transaction: { id: "tx_1", reviewState: "superseded" } });
     } finally {
       t.close();
@@ -543,13 +637,15 @@ describe("SqliteLedgerRepository transactions", () => {
           draft("tx_exp", { postings: [eur(BANK, "-1e2"), eur(SUSPENSE, "100")] }),
         ),
       ).rejects.toThrow(/invalid amount "-1e2"/);
-      // `superseded` is only reachable through supersession; bypass the type to prove the runtime gate.
-      await expect(
-        ledger.createTransaction(
+      // Reviewed/exported/superseded states need a recorded transition; bypass the type to prove the runtime gate.
+      for (const reviewState of ["user_reviewed", "advisor_reviewed", "exported", "superseded"]) {
+        const attempt = ledger.createTransaction(
           "ws_1",
-          draft("tx_superseded", { reviewState: "superseded" as never }),
-        ),
-      ).rejects.toThrow(/cannot be created in the superseded state/);
+          draft("tx_gated", { reviewState: reviewState as never }),
+        );
+        await expect(attempt).rejects.toThrow(/cannot be assigned on creation/);
+        await expect(attempt).rejects.toMatchObject({ code: "invalid_review_state" });
+      }
 
       expect(count(t.db, "ledger_transactions", "ws_1")).toBe(0);
       expect(count(t.db, "ledger_postings", "ws_1")).toBe(0);
@@ -641,14 +737,18 @@ describe("SqliteLedgerRepository transactions", () => {
         draft("tx_a", {
           bookedOn: "2026-01-31",
           createdAt: "2026-02-10T10:00:00Z",
-          reviewState: "user_reviewed",
           postings: [eur(BANK, "-20.00"), eur(MAINTENANCE, "20.00")],
         }),
       );
-      await ledger.createTransaction(
-        "ws_1",
-        draft("tx_e", { bookedOn: "2026-03-01", reviewState: "user_reviewed" }),
-      );
+      await ledger.createTransaction("ws_1", draft("tx_e", { bookedOn: "2026-03-01" }));
+      for (const id of ["tx_a", "tx_e"]) {
+        await ledger.transitionReviewState("ws_1", {
+          id,
+          toState: "user_reviewed",
+          actor: "user:test",
+          at: AT,
+        });
+      }
 
       const ids = (list: Awaited<ReturnType<typeof ledger.listTransactions>>) =>
         list.map((transaction) => transaction.id);
@@ -697,6 +797,13 @@ describe("SqliteLedgerRepository transactions", () => {
           }),
         ),
       ).toEqual(["tx_b", "tx_c", "tx_d"]);
+      expect(ids(await ledger.listTransactions("ws_1", { limit: 2 }))).toEqual(["tx_a", "tx_b"]);
+      expect(ids(await ledger.listTransactions("ws_1", { from: "2026-03-01", limit: 5 }))).toEqual([
+        "tx_e",
+      ]);
+      await expect(ledger.listTransactions("ws_1", { limit: 0 })).rejects.toMatchObject({
+        code: "invalid_input",
+      });
     } finally {
       t.close();
     }
@@ -769,7 +876,7 @@ describe("SqliteLedgerRepository transactions", () => {
       const second = await supersede(
         "tx_2",
         draft("tx_3", {
-          reviewState: "user_reviewed",
+          reviewState: "suggested",
           postings: [eur(BANK, "-84.23"), eur("Expenses:Insurance", "84.23")],
         }),
       );
@@ -812,6 +919,76 @@ describe("SqliteLedgerRepository transactions", () => {
       await expect(supersede("tx_2", draft("tx_4"))).rejects.toThrow(/already superseded by tx_3/);
       expect(count(t.db, "ledger_transactions", "ws_1")).toBe(3);
       expect(count(t.db, "review_events", "ws_1")).toBe(2);
+    } finally {
+      t.close();
+    }
+  });
+
+  it("changes review state only through recorded, actor-attributed transitions", async () => {
+    const t = createTestDatabase();
+    try {
+      const ledger = new SqliteLedgerRepository(t.db);
+      const reviewEvents = new SqliteReviewEventRepository(t.db);
+      await seedAccounts(ledger, "ws_1");
+      await ledger.createTransaction("ws_1", draft("tx_1"));
+      const target = { type: "ledger_transaction", id: "tx_1" };
+      const transition = (
+        overrides: Partial<Parameters<typeof ledger.transitionReviewState>[1]> = {},
+        workspaceId = "ws_1",
+      ) =>
+        ledger.transitionReviewState(workspaceId, {
+          id: "tx_1",
+          toState: "user_reviewed",
+          actor: "user:test",
+          at: "2026-02-02T00:00:00Z",
+          notes: "checked against receipt",
+          ...overrides,
+        });
+
+      const reviewed = await transition();
+      expect(reviewed.reviewState).toBe("user_reviewed");
+      // Repeating the same transition is a no-op and records nothing new.
+      expect((await transition()).reviewState).toBe("user_reviewed");
+      expect(await reviewEvents.listForTarget("ws_1", target)).toEqual([
+        {
+          id: "review_event:ledger_transaction:tx_1:2026-02-02T00:00:00Z",
+          workspaceId: "ws_1",
+          targetType: "ledger_transaction",
+          targetId: "tx_1",
+          fromState: "draft",
+          toState: "user_reviewed",
+          actor: "user:test",
+          notes: "checked against receipt",
+          createdAt: "2026-02-02T00:00:00Z",
+        },
+      ]);
+
+      await expect(transition({}, "ws_2")).rejects.toMatchObject({ code: "not_found" });
+      await expect(
+        transition({ actor: "  ", toState: "advisor_reviewed", at: "2026-02-03T00:00:00Z" }),
+      ).rejects.toThrow(/actor is required/);
+      await expect(
+        transition({ toState: "superseded" as never, at: "2026-02-03T00:00:00Z" }),
+      ).rejects.toMatchObject({ code: "invalid_review_state" });
+      expect(await ledger.getTransaction("ws_1", "tx_1")).toMatchObject({
+        reviewState: "user_reviewed",
+      });
+      expect(count(t.db, "review_events", "ws_1")).toBe(1);
+
+      // Superseded transactions are terminal.
+      await ledger.supersedeTransaction("ws_1", {
+        supersedesTransactionId: "tx_1",
+        replacement: draft("tx_2", { postings: [eur(BANK, "-84.23"), eur(MAINTENANCE, "84.23")] }),
+        actor: "user:test",
+        supersededAt: "2026-02-04T00:00:00Z",
+      });
+      await expect(
+        transition({ toState: "advisor_reviewed", at: "2026-02-05T00:00:00Z" }),
+      ).rejects.toMatchObject({ code: "already_superseded" });
+      expect((await reviewEvents.listForTarget("ws_1", target)).map((e) => e.toState)).toEqual([
+        "user_reviewed",
+        "superseded",
+      ]);
     } finally {
       t.close();
     }
@@ -1095,6 +1272,79 @@ describe("withTransaction", () => {
       ).toEqual([{ id: "audit_committed" }]);
       // No transaction is left open, so the connection is immediately reusable.
       expect(withTransaction(t.db, () => count(t.db, "audit_events", "ws_1"))).toBe(1);
+    } finally {
+      t.close();
+    }
+  });
+
+  it("nests through savepoints and composes async repository writes atomically", async () => {
+    const t = createTestDatabase();
+    try {
+      const insert = (id: string) =>
+        t.db
+          .prepare(
+            "INSERT INTO audit_events (id, workspace_id, action, actor, created_at) VALUES (?, ?, ?, ?, ?)",
+          )
+          .run(id, "ws_1", "test.write", "system", AT);
+      const auditIds = () =>
+        t.db
+          .prepare("SELECT id FROM audit_events WHERE workspace_id = ? ORDER BY id")
+          .all("ws_1")
+          .map((r) => (r as { id: string }).id);
+
+      // An inner failure rolls back only the inner unit; the outer unit still commits.
+      withTransaction(t.db, () => {
+        insert("outer");
+        expect(() =>
+          withTransaction(t.db, () => {
+            insert("inner_failed");
+            throw new Error("inner");
+          }),
+        ).toThrow("inner");
+        withTransaction(t.db, () => insert("inner_ok"));
+      });
+      expect(auditIds()).toEqual(["inner_ok", "outer"]);
+
+      // An outer failure rolls back a nested unit that had already released its savepoint.
+      expect(() =>
+        withTransaction(t.db, () => {
+          withTransaction(t.db, () => insert("inner_then_outer_fails"));
+          throw new Error("outer");
+        }),
+      ).toThrow("outer");
+      expect(auditIds()).toEqual(["inner_ok", "outer"]);
+
+      // Async composition: ledger transaction + evidence link land together or not at all.
+      const ledger = new SqliteLedgerRepository(t.db);
+      const links = new SqliteEvidenceLinkRepository(t.db);
+      await seedAccounts(ledger, "ws_1");
+      const importedAs: EvidenceLink = {
+        id: "el_atomic",
+        workspaceId: "ws_1",
+        fromType: EVIDENCE_RECORD_TYPES.rawSourceRecord,
+        fromId: "raw_1",
+        toType: EVIDENCE_RECORD_TYPES.ledgerTransaction,
+        toId: "tx_atomic",
+        kind: "imported_as",
+        createdAt: AT,
+      };
+      await expect(
+        withTransactionAsync(t.db, async () => {
+          await ledger.createTransaction("ws_1", draft("tx_atomic"));
+          await links.link(importedAs);
+          throw new Error("job failed after both writes");
+        }),
+      ).rejects.toThrow("job failed after both writes");
+      expect(await ledger.getTransaction("ws_1", "tx_atomic")).toBeUndefined();
+      expect(await links.getById("ws_1", "el_atomic")).toBeUndefined();
+
+      const committed = await withTransactionAsync(t.db, async () => {
+        const created = await ledger.createTransaction("ws_1", draft("tx_atomic"));
+        await links.link(importedAs);
+        return created.transaction.id;
+      });
+      expect(committed).toBe("tx_atomic");
+      expect(await links.listForTransaction("ws_1", "tx_atomic")).toHaveLength(1);
     } finally {
       t.close();
     }

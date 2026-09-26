@@ -1,7 +1,7 @@
 /**
  * @sona/db
  *
- * Database schema, migrations, and (later) typed repositories. Hosted cloud
+ * Database schema, migrations, and typed SQLite repositories. Hosted cloud
  * targets PostgreSQL; local/self-hosted may use SQLite. Migrations are written
  * in the portable SQL subset shared by both.
  */
@@ -31,17 +31,24 @@ export {
 } from "./repositories/documents.js";
 export {
   EVIDENCE_RECORD_TYPES,
-  type EvidenceRecordRef,
   type EvidenceRecordType,
   type LinkEvidenceResult,
+  type RecordRef,
   SqliteEvidenceLinkRepository,
 } from "./repositories/evidence-links.js";
+export { withTransaction, withTransactionAsync } from "./repositories/helpers.js";
 export {
   type CreateLedgerTransactionInput,
   type CreateLedgerTransactionResult,
   type EnsureDefaultAccountsInput,
+  LEDGER_CREATION_REVIEW_STATES,
+  LEDGER_ERROR_CODES,
   type LedgerAccountInput,
+  type LedgerCreationReviewState,
+  LedgerError,
+  type LedgerErrorCode,
   type LedgerPostingInput,
+  type LedgerReviewTransitionInput,
   type LedgerTransactionFilter,
   type PersistedLedgerTransaction,
   SqliteLedgerRepository,
@@ -52,6 +59,7 @@ export {
 export { SqliteMatchCandidateRepository } from "./repositories/matches.js";
 export { SqlitePortalTaskRunRepository } from "./repositories/portal-task-runs.js";
 export { SqliteRawRecordRepository } from "./repositories/raw-records.js";
+export { reviewEventId, SqliteReviewEventRepository } from "./repositories/review-events.js";
 export {
   type ReviewTransitionInput,
   SqliteReviewQueueRepository,
