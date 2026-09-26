@@ -26,6 +26,9 @@ export interface PortalFetchDependencies {
 
 export const DEFAULT_PORTAL_FETCH_COOLDOWN_MS = 6 * 60 * 60_000;
 
+/** Follow-up jobs a failing fetch may spawn before it is dead-lettered for a human to look at. */
+export const MAX_PORTAL_FETCH_DEFERRALS = 2;
+
 /**
  * Builds the handler. Without dependencies (no browser runner configured) a
  * `portal_fetch` job is dead-lettered with a clear reason instead of retried.
@@ -78,10 +81,20 @@ export function createPortalFetchHandler(
         }
         // This job's earlier attempt failed after starting the cooldown; the
         // retry must not count as done. Hand the work to a job that runs once
-        // the cooldown has passed instead of burning attempts against it.
+        // the cooldown has passed instead of burning attempts against it —
+        // but only a few times, so a broken login stops hitting the portal.
+        if (job.payload.deferrals >= MAX_PORTAL_FETCH_DEFERRALS) {
+          throw new NonRetryableJobError(
+            `portal fetch for ${result.connectionId} failed and was deferred ${job.payload.deferrals} times; giving up`,
+          );
+        }
         const followUp = await enqueue(
           "portal_fetch",
-          { ...job.payload, window: result.cooldownUntil },
+          {
+            ...job.payload,
+            window: result.cooldownUntil,
+            deferrals: job.payload.deferrals + 1,
+          },
           { runAfter: result.cooldownUntil },
         );
         return { status: "deferred", ...summary, followUpJobId: followUp.job.id };

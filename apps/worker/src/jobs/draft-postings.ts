@@ -201,7 +201,12 @@ function sameBankFacts(
   bankAccountPath: string,
 ): boolean {
   const reported = desired.postings.find((posting) => posting.account === bankAccountPath);
-  const booked = existing.postings.find((posting) => posting.account === bankAccountPath);
+  // A human may have moved the asset leg (e.g. merged two bank accounts); when
+  // the expected path is absent and exactly one asset leg exists, that is it.
+  const assetLegs = existing.postings.filter((posting) => posting.account.startsWith("Assets:"));
+  const booked =
+    existing.postings.find((posting) => posting.account === bankAccountPath) ??
+    (assetLegs.length === 1 ? assetLegs[0] : undefined);
   return (
     existing.bookedOn === desired.bookedOn &&
     reported !== undefined &&

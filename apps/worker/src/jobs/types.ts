@@ -103,6 +103,12 @@ export const JOB_PAYLOAD_SCHEMAS = {
       window: nonEmpty.optional(),
       /** Overrides the worker's default per-connection cooldown. */
       cooldownMs: z.number().int().nonnegative().optional(),
+      /**
+       * How many times this fetch was handed to a follow-up job because a
+       * retry landed in its own cooldown. Set by the handler, not by callers;
+       * not part of the idempotency key.
+       */
+      deferrals: z.number().int().nonnegative().default(0),
     })
     .strict(),
 } as const satisfies Record<JobKind, z.ZodTypeAny>;

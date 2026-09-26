@@ -7,6 +7,7 @@ import {
   InMemoryPortalFetchRunRecorder,
 } from "./portal-fetch.js";
 import type { PortalFetchDependencies } from "./portal-fetch-handler.js";
+import { narrowJob } from "./types.js";
 
 const task: PortalTask = {
   id: "synthetic-reference-portal",
@@ -129,6 +130,45 @@ describe("portal_fetch job kind", () => {
     }
   });
 
+  it("stops deferring a connection that keeps failing and dead-letters it for a human", async () => {
+    let launches = 0;
+    const broken: PortalTaskRunner = {
+      runTask: async () => {
+        launches += 1;
+        throw new Error("login rejected");
+      },
+    };
+    const deps = {
+      ...portalFetch(
+        new InMemoryPortalFetchConnectionRepository([{ id: "conn_1", workspaceId: WS_1, task }]),
+      ),
+      taskRunner: broken,
+    };
+    const h = await createTestHarness({ seedSources: false, worker: { portalFetch: deps } });
+    try {
+      await h.worker.queue.enqueue(h.context, "portal_fetch", { connectionId: "conn_1" });
+      // Each generation: attempt 1 launches and fails, attempt 2 defers.
+      const states: string[] = [];
+      for (let pass = 0; pass < 40; pass += 1) {
+        for (const outcome of await h.worker.runOnce()) {
+          states.push(outcome.state);
+        }
+        h.clock.advance(5_000);
+      }
+      const jobs = await h.worker.queue.list(h.context, { kinds: ["portal_fetch"] });
+      // Original + MAX_PORTAL_FETCH_DEFERRALS follow-ups, nothing left queued.
+      expect(jobs.map((j) => narrowJob(j, "portal_fetch").payload.deferrals)).toEqual([0, 1, 2]);
+      expect(jobs.map((j) => j.status)).toEqual(["succeeded", "succeeded", "dead"]);
+      expect(states.filter((s) => s === "dead")).toHaveLength(1);
+      expect(launches).toBe(3);
+      const dead = jobs[2];
+      expect(dead?.lastError).toMatch(/deferred 2 times; giving up/);
+      expect(await h.worker.runOnce()).toEqual([]);
+    } finally {
+      h.close();
+    }
+  });
+
   it("defers a retried job that lands in its own cooldown instead of settling it as done", async () => {
     let calls = 0;
     const flaky: PortalTaskRunner = {
@@ -171,7 +211,7 @@ describe("portal_fetch job kind", () => {
         kind: "portal_fetch",
         status: "queued",
         runAfter: "2026-02-01T00:01:00.000Z",
-        payload: { connectionId: "conn_1", window: "2026-02-01T00:01:00.000Z" },
+        payload: { connectionId: "conn_1", window: "2026-02-01T00:01:00.000Z", deferrals: 1 },
       });
       expect(deps.runs.listRuns(h.context)).toHaveLength(0);
 

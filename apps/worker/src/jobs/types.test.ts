@@ -44,7 +44,7 @@ describe("job payload schemas", () => {
 
   it("keys portal fetches per connection and window, and reconciliation per trigger", () => {
     const fetch = parseJobPayload("portal_fetch", { connectionId: "conn_1" });
-    expect(fetch).toEqual({ connectionId: "conn_1" });
+    expect(fetch).toEqual({ connectionId: "conn_1", deferrals: 0 });
     expect(defaultIdempotencyKey("portal_fetch", fetch)).toBe("portal_fetch:conn_1");
     const windowed = parseJobPayload("portal_fetch", {
       connectionId: "conn_1",
