@@ -195,6 +195,9 @@ const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 /** Posting ids are zero-padded to three digits so `ORDER BY id` preserves input order. */
 const MAX_POSTINGS_PER_TRANSACTION = 999;
 
+/** Keeps `IN (...)` lists well below SQLite's default bind-parameter limit. */
+const MAX_IN_LIST_PARAMETERS = 500;
+
 const TRANSACTION_SELECT =
   "SELECT t.id, t.workspace_id, t.booked_on, t.description, t.review_state, t.created_at, k.idempotency_key, s.supersedes_transaction_id, sb.transaction_id AS superseded_by_transaction_id FROM ledger_transactions t LEFT JOIN ledger_transaction_idempotency_keys k ON k.workspace_id = t.workspace_id AND k.transaction_id = t.id LEFT JOIN ledger_transaction_supersessions s ON s.workspace_id = t.workspace_id AND s.transaction_id = t.id LEFT JOIN ledger_transaction_supersessions sb ON sb.workspace_id = t.workspace_id AND sb.supersedes_transaction_id = t.id";
 
@@ -552,6 +555,12 @@ export class SqliteLedgerRepository {
     input: CreateLedgerTransactionInput,
   ): CreateLedgerTransactionResult {
     if (input.idempotencyKey !== undefined) {
+      if (input.idempotencyKey.trim() === "") {
+        throw new LedgerError(
+          "invalid_input",
+          "ledger transaction idempotencyKey must not be blank; omit it instead",
+        );
+      }
       const existingId = this.#transactionIdForKey(workspaceId, input.idempotencyKey);
       if (existingId !== undefined) {
         const existing = this.#requireTransaction(workspaceId, existingId);
@@ -722,15 +731,19 @@ export class SqliteLedgerRepository {
       return transactions;
     }
     const byId = new Map(transactions.map((transaction) => [transaction.id, transaction]));
-    const postings = rows(
-      this.#db
-        .prepare(
-          `${POSTING_SELECT} WHERE p.workspace_id = ? AND p.transaction_id IN ${placeholders(byId.size)} ORDER BY p.id`,
-        )
-        .all(workspaceId, ...byId.keys()),
-    ).map(postingFromRow);
-    for (const posting of postings) {
-      byId.get(posting.transactionId)?.postings.push(posting);
+    const ids = [...byId.keys()];
+    for (let offset = 0; offset < ids.length; offset += MAX_IN_LIST_PARAMETERS) {
+      const chunk = ids.slice(offset, offset + MAX_IN_LIST_PARAMETERS);
+      const postings = rows(
+        this.#db
+          .prepare(
+            `${POSTING_SELECT} WHERE p.workspace_id = ? AND p.transaction_id IN ${placeholders(chunk.length)} ORDER BY p.id`,
+          )
+          .all(workspaceId, ...chunk),
+      ).map(postingFromRow);
+      for (const posting of postings) {
+        byId.get(posting.transactionId)?.postings.push(posting);
+      }
     }
     return transactions;
   }
@@ -767,10 +780,10 @@ function normalizeAccountInput(input: LedgerAccountInput): {
 }
 
 function validateTransactionInput(input: CreateLedgerTransactionInput): void {
-  if (!ISO_DATE_RE.test(input.bookedOn)) {
+  if (!isCalendarDate(input.bookedOn)) {
     throw new LedgerError(
       "invalid_input",
-      `ledger transaction bookedOn must be YYYY-MM-DD, got ${JSON.stringify(input.bookedOn)}`,
+      `ledger transaction bookedOn must be a real YYYY-MM-DD calendar date, got ${JSON.stringify(input.bookedOn)}`,
     );
   }
   // The type already narrows this; the runtime check guards callers arriving via JSON/MCP.
@@ -791,6 +804,15 @@ function validateTransactionInput(input: CreateLedgerTransactionInput): void {
   if (!balance.balanced) {
     throw new UnbalancedLedgerTransactionError(input.id, balance.errors);
   }
+}
+
+/** True for `YYYY-MM-DD` strings that name a real calendar day (no 2026-02-31). */
+function isCalendarDate(value: string): boolean {
+  if (!ISO_DATE_RE.test(value)) {
+    return false;
+  }
+  const time = Date.parse(`${value}T00:00:00Z`);
+  return !Number.isNaN(time) && new Date(time).toISOString().slice(0, 10) === value;
 }
 
 /** Deterministic, order-preserving posting id (zero-padded so `ORDER BY id` keeps input order). */

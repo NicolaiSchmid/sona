@@ -4,9 +4,9 @@
  * edge `(from, to, kind)` within a workspace, so re-running a pipeline never
  * produces a second identical link.
  *
- * Endpoints are polymorphic ids and are not checked for existence here; the
- * service that knows the record types is responsible for linking real,
- * same-workspace records.
+ * Endpoints are polymorphic. For record types backed by a table, the endpoint
+ * must exist in the link's workspace, so an edge can never point at another
+ * tenant's record or at nothing. Types without a table yet are accepted as-is.
  */
 import { type EvidenceLink, evidenceLinkSchema, isEvidenceLinkKind } from "@sona/core";
 import type { DbClient } from "../runner.js";
@@ -26,6 +26,22 @@ export const EVIDENCE_RECORD_TYPES = {
 } as const;
 
 export type EvidenceRecordType = (typeof EVIDENCE_RECORD_TYPES)[keyof typeof EVIDENCE_RECORD_TYPES];
+
+/** Tables backing the endpoint types that can be verified; the rest are trusted as-is. */
+const ENDPOINT_TABLES = {
+  ledger_transaction: "ledger_transactions",
+  ledger_posting: "ledger_postings",
+  document: "documents",
+  raw_source_record: "raw_source_records",
+  bank_transaction: "bank_transactions",
+  match_decision: "match_decisions",
+  review_event: "review_events",
+  review_item: "review_items",
+} as const satisfies Partial<Record<EvidenceRecordType, string>>;
+
+function endpointTable(type: string): string | undefined {
+  return (ENDPOINT_TABLES as Readonly<Record<string, string | undefined>>)[type];
+}
 
 /** A polymorphic reference to any domain record. */
 export interface RecordRef {
@@ -55,6 +71,8 @@ export class SqliteEvidenceLinkRepository {
   /** Records a typed edge; an identical edge in the workspace is returned unchanged. */
   async link(input: EvidenceLink): Promise<LinkEvidenceResult> {
     const link = evidenceLinkSchema.parse(input);
+    this.#assertEndpointExists(link.workspaceId, { type: link.fromType, id: link.fromId });
+    this.#assertEndpointExists(link.workspaceId, { type: link.toType, id: link.toId });
     const existing = this.#findEdge(link);
     if (existing !== undefined) {
       return { link: existing, created: false };
@@ -112,6 +130,20 @@ export class SqliteEvidenceLinkRepository {
       type: EVIDENCE_RECORD_TYPES.document,
       id: documentId,
     });
+  }
+
+  #assertEndpointExists(workspaceId: string, endpoint: RecordRef): void {
+    const table = endpointTable(endpoint.type);
+    if (table === undefined) {
+      return;
+    }
+    // `table` comes from the constant map above, never from input.
+    const found = this.#db
+      .prepare(`SELECT 1 FROM ${table} WHERE workspace_id = ? AND id = ?`)
+      .get(workspaceId, endpoint.id);
+    if (found === undefined) {
+      throw new Error(`evidence endpoint ${endpoint.type}:${endpoint.id} not found in workspace`);
+    }
   }
 
   #findEdge(link: EvidenceLink): EvidenceLink | undefined {

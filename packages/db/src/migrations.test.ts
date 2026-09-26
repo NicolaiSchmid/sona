@@ -154,6 +154,43 @@ describe("core migrations", () => {
     }
   });
 
+  it("deduplicates pre-existing evidence edges before adding the unique index", () => {
+    const db = new DatabaseSync(":memory:");
+    try {
+      applyMigrations(
+        db,
+        CORE_MIGRATIONS.filter((migration) => migration.id < "0004"),
+      );
+      db.exec(
+        "INSERT INTO workspaces (id, name, created_at) VALUES ('ws_1', 'A', '2026-01-01T00:00:00Z')",
+      );
+      const insertEdge = (id: string, kind: string, createdAt: string) =>
+        db.exec(
+          "INSERT INTO evidence_links (id, workspace_id, from_type, from_id, to_type, to_id, kind, created_at)" +
+            ` VALUES ('${id}', 'ws_1', 'document', 'doc_1', 'ledger_transaction', 'tx_1', '${kind}', '${createdAt}')`,
+        );
+      insertEdge("el_late", "substantiates", "2026-01-02T00:00:00Z");
+      insertEdge("el_early", "substantiates", "2026-01-01T00:00:00Z");
+      insertEdge("el_tie_b", "imported_as", "2026-01-03T00:00:00Z");
+      insertEdge("el_tie_a", "imported_as", "2026-01-03T00:00:00Z");
+
+      applyMigrations(
+        db,
+        CORE_MIGRATIONS.filter((migration) => migration.id >= "0004"),
+      );
+
+      const remaining = db.prepare("SELECT id FROM evidence_links ORDER BY id").all() as Array<{
+        id: string;
+      }>;
+      expect(remaining.map((r) => r.id)).toEqual(["el_early", "el_tie_a"]);
+      expect(() => insertEdge("el_dup", "substantiates", "2026-01-04T00:00:00Z")).toThrow(
+        /UNIQUE constraint failed/i,
+      );
+    } finally {
+      db.close();
+    }
+  });
+
   it("rejects a child row that references a parent in another workspace", () => {
     const db = new DatabaseSync(":memory:");
     try {

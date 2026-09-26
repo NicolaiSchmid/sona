@@ -61,6 +61,9 @@ function count(db: DbClient, table: string, workspaceId: string): number {
   return requiredNumber(result, "n");
 }
 
+/** Audit timestamps are stored canonically (`toISOString()`), so expectations use that form. */
+const AUDIT_AT = "2026-02-01T00:00:00.000Z";
+
 function auditEvent(id: string, overrides: Partial<AuditEvent> = {}): AuditEvent {
   return {
     id,
@@ -70,9 +73,22 @@ function auditEvent(id: string, overrides: Partial<AuditEvent> = {}): AuditEvent
     targetType: "ledger_transaction",
     targetId: "tx_1",
     metadata: { postings: 2 },
-    createdAt: AT,
+    createdAt: AUDIT_AT,
     ...overrides,
   };
+}
+
+/** Inserts `doc_<n>`, `tx_<n>`, and `raw_<n>` rows so evidence links have real endpoints. */
+function seedEvidenceEndpoints(db: DbClient, workspaceId: string, sourceId: string, n: string) {
+  db.prepare(
+    "INSERT INTO documents (id, workspace_id, content_hash, mime_type, original_filename, storage_uri, source_kind, retention_state, created_at) VALUES (?, ?, ?, 'application/pdf', 'synthetic.pdf', 'object://synthetic', 'upload', 'active', ?)",
+  ).run(`doc_${n}`, workspaceId, `hash_${n}`, AT);
+  db.prepare(
+    "INSERT INTO ledger_transactions (id, workspace_id, booked_on, description, review_state, created_at) VALUES (?, ?, '2026-02-01', 'synthetic', 'draft', ?)",
+  ).run(`tx_${n}`, workspaceId, AT);
+  db.prepare(
+    "INSERT INTO raw_source_records (id, workspace_id, source_id, record_type, payload_json, payload_hash, observed_at, created_at) VALUES (?, ?, ?, 'bank_transaction', '{}', ?, ?, ?)",
+  ).run(`raw_${n}`, workspaceId, sourceId, `payload_${n}`, AT, AT);
 }
 
 describe("SqliteLedgerRepository accounts", () => {
@@ -363,9 +379,14 @@ describe("SqliteLedgerRepository transactions", () => {
           }),
         ),
       ).rejects.toThrow(/only accepts USD/);
+      for (const bookedOn of ["01.02.2026", "2026-02-31", "2026-13-01"]) {
+        await expect(
+          ledger.createTransaction("ws_1", draft("tx_date", { bookedOn })),
+        ).rejects.toThrow(/calendar date/);
+      }
       await expect(
-        ledger.createTransaction("ws_1", draft("tx_date", { bookedOn: "01.02.2026" })),
-      ).rejects.toThrow(/YYYY-MM-DD/);
+        ledger.createTransaction("ws_1", draft("tx_blank_key", { idempotencyKey: "  " })),
+      ).rejects.toMatchObject({ code: "invalid_input" });
       // Accounts belong to ws_1 only; ws_2 must not be able to book against them.
       await expect(ledger.createTransaction("ws_2", draft("tx_other_ws"))).rejects.toThrow(
         /unknown ledger accounts/i,
@@ -1012,11 +1033,14 @@ describe("SqliteEvidenceLinkRepository", () => {
     const t = createTestDatabase();
     try {
       const repo = new SqliteEvidenceLinkRepository(t.db);
+      seedEvidenceEndpoints(t.db, "ws_1", "src_1", "1");
+      seedEvidenceEndpoints(t.db, "ws_2", "src_2", "2");
+      const ws2Link = link({ id: "el_ws2", workspaceId: "ws_2", fromId: "doc_2", toId: "tx_2" });
 
       const first = await repo.link(link({ notes: "receipt total matches" }));
       const duplicate = await repo.link(link({ id: "el_dup", notes: "different notes" }));
       const otherKind = await repo.link(link({ id: "el_2", kind: "imported_as" }));
-      const otherWorkspace = await repo.link(link({ id: "el_ws2", workspaceId: "ws_2" }));
+      const otherWorkspace = await repo.link(ws2Link);
 
       expect(first.created).toBe(true);
       expect(duplicate).toEqual({ link: first.link, created: false });
@@ -1036,9 +1060,8 @@ describe("SqliteEvidenceLinkRepository", () => {
         "el_1",
         "el_2",
       ]);
-      expect(await repo.listForTransaction("ws_2", "tx_1")).toEqual([
-        link({ id: "el_ws2", workspaceId: "ws_2" }),
-      ]);
+      expect(await repo.listForTransaction("ws_2", "tx_1")).toEqual([]);
+      expect(await repo.listForTransaction("ws_2", "tx_2")).toEqual([ws2Link]);
       expect(await repo.listForDocument("ws_1", "doc_missing")).toEqual([]);
     } finally {
       t.close();
@@ -1057,10 +1080,47 @@ describe("SqliteEvidenceLinkRepository", () => {
     }
   });
 
+  it("only links endpoints that exist in the link's own workspace", async () => {
+    const t = createTestDatabase();
+    try {
+      const repo = new SqliteEvidenceLinkRepository(t.db);
+      seedEvidenceEndpoints(t.db, "ws_1", "src_1", "1");
+
+      await expect(repo.link(link({ toId: "tx_missing" }))).rejects.toThrow(
+        /ledger_transaction:tx_missing not found in workspace/,
+      );
+      await expect(repo.link(link({ fromId: "doc_missing" }))).rejects.toThrow(
+        /document:doc_missing not found in workspace/,
+      );
+      // ws_2 cannot attach evidence to ws_1's records, even with the right ids.
+      await expect(repo.link(link({ id: "el_leak", workspaceId: "ws_2" }))).rejects.toThrow(
+        /not found in workspace/,
+      );
+      expect(count(t.db, "evidence_links", "ws_1")).toBe(0);
+      expect(count(t.db, "evidence_links", "ws_2")).toBe(0);
+
+      // Types without a backing table yet are accepted as opaque references.
+      const exported = await repo.link(
+        link({
+          id: "el_export",
+          fromType: EVIDENCE_RECORD_TYPES.ledgerTransaction,
+          fromId: "tx_1",
+          toType: EVIDENCE_RECORD_TYPES.taxExportLine,
+          toId: "line_1",
+          kind: "exported_as",
+        }),
+      );
+      expect(exported.created).toBe(true);
+    } finally {
+      t.close();
+    }
+  });
+
   it("treats direction and kind as part of the edge and lists any record type", async () => {
     const t = createTestDatabase();
     try {
       const repo = new SqliteEvidenceLinkRepository(t.db);
+      seedEvidenceEndpoints(t.db, "ws_1", "src_1", "1");
       const raw = EVIDENCE_RECORD_TYPES.rawSourceRecord;
       const tx = EVIDENCE_RECORD_TYPES.ledgerTransaction;
 
@@ -1135,7 +1195,7 @@ describe("SqliteAuditEventRepository", () => {
         actor: "user:test",
         targetType: "ledger_transaction",
         targetId: "tx_1",
-        createdAt: AT,
+        createdAt: AUDIT_AT,
       });
       expect((await repo.list("ws_1")).events.map((event) => event.id)).toEqual(["audit_1"]);
       expect("update" in repo).toBe(false);
@@ -1157,7 +1217,7 @@ describe("SqliteAuditEventRepository", () => {
 
       const page1 = await repo.list("ws_1", { limit: 2 });
       expect(page1.events.map((event) => event.id)).toEqual(["audit_0", "audit_a"]);
-      expect(page1.nextCursor).toEqual({ createdAt: "2026-02-01T00:00:01Z", id: "audit_a" });
+      expect(page1.nextCursor).toEqual({ createdAt: "2026-02-01T00:00:01.000Z", id: "audit_a" });
 
       const page2 = await repo.list("ws_1", { limit: 2, after: page1.nextCursor });
       expect(page2.events.map((event) => event.id)).toEqual(["audit_b", "audit_c"]);
@@ -1169,6 +1229,28 @@ describe("SqliteAuditEventRepository", () => {
       });
       expect(page3.events).toEqual([]);
       await expect(repo.list("ws_1", { limit: 0 })).rejects.toThrow(/positive integer/);
+    } finally {
+      t.close();
+    }
+  });
+
+  it("stores canonical timestamps so mixed offsets and precisions still order chronologically", async () => {
+    const t = createTestDatabase();
+    try {
+      const repo = new SqliteAuditEventRepository(t.db);
+      await repo.append(auditEvent("audit_z", { createdAt: "2026-02-01T00:00:01Z" }));
+      await repo.append(auditEvent("audit_a", { createdAt: "2026-02-01T00:00:00.500Z" }));
+      await repo.append(auditEvent("audit_m", { createdAt: "2026-02-01T01:00:00+01:00" }));
+      await expect(
+        repo.append(auditEvent("audit_bad", { createdAt: "yesterday" })),
+      ).rejects.toThrow(/ISO-8601/);
+
+      const page = await repo.list("ws_1");
+      expect(page.events.map((event) => [event.id, event.createdAt])).toEqual([
+        ["audit_m", "2026-02-01T00:00:00.000Z"],
+        ["audit_a", "2026-02-01T00:00:00.500Z"],
+        ["audit_z", "2026-02-01T00:00:01.000Z"],
+      ]);
     } finally {
       t.close();
     }
@@ -1215,7 +1297,7 @@ describe("SqliteAuditEventRepository", () => {
 
       const ws1 = await repo.list("ws_1", { limit: 1 });
       expect(ws1.events.map((event) => event.id)).toEqual(["audit_ws1_a"]);
-      expect(ws1.nextCursor).toEqual({ createdAt: "2026-02-01T00:00:00Z", id: "audit_ws1_a" });
+      expect(ws1.nextCursor).toEqual({ createdAt: "2026-02-01T00:00:00.000Z", id: "audit_ws1_a" });
 
       const ws2 = await repo.list("ws_2", { limit: 10, after: ws1.nextCursor });
       expect(ws2.events.map((event) => event.id)).toEqual(["audit_ws2_a", "audit_ws2_b"]);
@@ -1318,6 +1400,7 @@ describe("withTransaction", () => {
       const ledger = new SqliteLedgerRepository(t.db);
       const links = new SqliteEvidenceLinkRepository(t.db);
       await seedAccounts(ledger, "ws_1");
+      seedEvidenceEndpoints(t.db, "ws_1", "src_1", "1");
       const importedAs: EvidenceLink = {
         id: "el_atomic",
         workspaceId: "ws_1",
