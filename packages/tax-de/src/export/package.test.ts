@@ -231,6 +231,20 @@ describe("generateExportPackage", () => {
     );
   });
 
+  it("lists scheduled years left out of a final package in the summary", () => {
+    const p = generateExportPackage({
+      year: 2025,
+      postings: SAMPLE_POSTINGS,
+      template: PRIVATE_DE_TEMPLATE,
+      mode: "final",
+      depreciation: [SAMPLE_DEPRECIATION],
+    });
+    const summary = p.files.find((f) => f.path === "summary.md")?.content ?? "";
+    expect(summary).toContain("### Scheduled years left out of this final package: 1");
+    expect(summary).toContain('- asset_flat 2025: review state "draft" below required');
+    expect(summary).toContain("(depr:asset_flat:v1:2025)");
+  });
+
   it("lists schedule evidence in the receipt manifest and evidence links", () => {
     const p = generateExportPackage({
       year: 2026,

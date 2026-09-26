@@ -9,6 +9,7 @@ import {
 } from "./fixtures";
 import {
   buildDepreciationDraft,
+  depreciationBookedOn,
   depreciationTransactionId,
   planDepreciationDrafts,
   type RecordedDepreciation,
@@ -535,5 +536,19 @@ describe("planDepreciationDrafts — supersession history", () => {
       { year: 2024, transactionId: "depr:asset_flat:v1:2024:r1", reason: "already_recorded" },
     ]);
     expect(plan.discrepancies).toEqual([]);
+  });
+});
+
+describe("depreciationBookedOn", () => {
+  it("books every year on 31 December while the asset is held", () => {
+    expect(depreciationBookedOn({ disposedOn: undefined }, 2025)).toBe("2025-12-31");
+    expect(depreciationBookedOn(schedule, 2030)).toBe("2030-12-31");
+  });
+
+  it("books the disposal year on the disposal date and every other year on 31 December", () => {
+    const disposed = { disposedOn: "2027-04-20" };
+    expect(depreciationBookedOn(disposed, 2027)).toBe("2027-04-20");
+    expect(depreciationBookedOn(disposed, 2026)).toBe("2026-12-31");
+    expect(depreciationBookedOn(disposed, 2028)).toBe("2028-12-31");
   });
 });

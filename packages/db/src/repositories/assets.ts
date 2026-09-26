@@ -6,6 +6,7 @@ import {
   assetSchema,
   type DepreciationScheduleConfig,
   depreciationScheduleConfigSchema,
+  isAssetComponentRole,
   type MoneyAmount,
   moneyAmountsEqual,
   type RecordedDepreciationEntry,
@@ -16,6 +17,9 @@ import {
   optionalNumber,
   optionalString,
   parseJson,
+  type Row,
+  requiredBoolean,
+  requiredLiteral,
   requiredNumber,
   requiredString,
   row,
@@ -231,9 +235,10 @@ export class SqliteAssetRepository {
   /**
    * Records the transaction generated for an asset-year. Insert-only and
    * idempotent by transaction id: recording the same transaction again
-   * returns the stored entry unchanged; nothing is ever updated. Several
-   * entries may exist for one year over time (superseded draft + replacement);
-   * the ledger's review state says which is live.
+   * returns the stored entry unchanged; nothing is ever updated. A retry that
+   * describes a different asset-year or amount under a known transaction id is
+   * rejected. Several entries may exist for one year over time (superseded
+   * draft + replacement); the ledger's review state says which is live.
    */
   async recordDepreciationEntry(
     input: RecordedDepreciationEntry,
@@ -313,7 +318,7 @@ export class SqliteAssetRepository {
     return asset;
   }
 
-  #assetFromRow(source: Record<string, unknown>): Asset {
+  #assetFromRow(source: Row): Asset {
     const workspaceId = requiredString(source, "workspace_id");
     const id = requiredString(source, "id");
     const commodity = requiredString(source, "commodity");
@@ -354,17 +359,17 @@ function eventMoney(event: AssetEvent): MoneyAmount | undefined {
 }
 
 /** Components store only the amount; the commodity is asset-level. */
-function componentFromRow(source: Record<string, unknown>, commodity: string): AssetComponent {
+function componentFromRow(source: Row, commodity: string): AssetComponent {
   return {
     id: requiredString(source, "id"),
-    role: requiredString(source, "role") as AssetComponent["role"],
+    role: requiredLiteral(source, "role", isAssetComponentRole),
     label: requiredString(source, "label"),
     cost: { amount: requiredString(source, "cost"), commodity },
-    depreciable: requiredNumber(source, "depreciable") === 1,
+    depreciable: requiredBoolean(source, "depreciable"),
   };
 }
 
-function eventFromRow(source: Record<string, unknown>): AssetEvent {
+function eventFromRow(source: Row): AssetEvent {
   const base = {
     id: requiredString(source, "id"),
     workspaceId: requiredString(source, "workspace_id"),
@@ -399,7 +404,7 @@ function eventFromRow(source: Record<string, unknown>): AssetEvent {
   }
 }
 
-function configFromRow(source: Record<string, unknown>): DepreciationScheduleConfig {
+function configFromRow(source: Row): DepreciationScheduleConfig {
   const residualValue = optionalString(source, "residual_value");
   const residualCommodity = optionalString(source, "residual_commodity");
   return depreciationScheduleConfigSchema.parse({
@@ -408,7 +413,7 @@ function configFromRow(source: Record<string, unknown>): DepreciationScheduleCon
     assetId: requiredString(source, "asset_id"),
     version: requiredNumber(source, "version"),
     method: parseJson(requiredString(source, "method_json")),
-    proRataTemporis: requiredNumber(source, "pro_rata_temporis") === 1,
+    proRataTemporis: requiredBoolean(source, "pro_rata_temporis"),
     residualValue:
       residualValue === undefined || residualCommodity === undefined
         ? undefined
@@ -420,7 +425,7 @@ function configFromRow(source: Record<string, unknown>): DepreciationScheduleCon
   });
 }
 
-function entryFromRow(source: Record<string, unknown>): RecordedDepreciationEntry {
+function entryFromRow(source: Row): RecordedDepreciationEntry {
   return {
     id: requiredString(source, "id"),
     workspaceId: requiredString(source, "workspace_id"),

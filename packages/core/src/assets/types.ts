@@ -61,6 +61,10 @@ export const ASSET_COMPONENT_ROLES = [
 
 export type AssetComponentRole = (typeof ASSET_COMPONENT_ROLES)[number];
 
+export function isAssetComponentRole(value: string): value is AssetComponentRole {
+  return (ASSET_COMPONENT_ROLES as readonly string[]).includes(value);
+}
+
 export const assetComponentSchema = z.object({
   id: z.string().min(1),
   role: z.enum(ASSET_COMPONENT_ROLES),
