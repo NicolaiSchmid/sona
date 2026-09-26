@@ -43,6 +43,47 @@ Node inspection coercion. Plaintext is available only through an explicit
 `reveal()` call at the boundary that needs to authenticate to an external
 service.
 
+## Authentication and workspace access
+
+`@sona/auth` implements invite-only authentication as a small hand-rolled core
+over Node built-ins rather than an auth framework, so password hashing,
+session semantics, and token scoping are testable in isolation, carry no
+native dependencies, and stay portable across SQLite and PostgreSQL.
+OIDC/passkeys are a follow-up.
+
+- Signup is invite-only: an `owner` creates an invite bound to an email and
+  role; the invite token is single-use (claimed by a conditional update),
+  expires (7 days by default), and only its SHA-256 digest is stored.
+- Passwords are hashed with scrypt (`N=2^16, r=8, p=2`, per-user salt, PHC
+  string) and re-hashed transparently on login when parameters are raised.
+  The policy is length- and denylist-based (12–128 code points, no
+  repetitive strings, not the user's own email).
+- Optional TOTP (RFC 6238, SHA-1, 30 s, 6 digits, ±1 step) with replay
+  protection via a persisted last-used step. TOTP secrets are AES-256-GCM
+  encrypted at rest with a deployment key; recovery codes are stored hashed
+  and are single-use.
+- Sessions are opaque 256-bit tokens stored hashed, with a sliding idle
+  expiry (7 days) capped by an absolute lifetime (30 days), listing and
+  revocation. Cookie helpers always emit `HttpOnly` and `SameSite`, and
+  `Secure` unless explicitly disabled for plain-http localhost development.
+- Workspace roles are `owner | member | advisor_readonly`. A session is bound
+  to one workspace at a time by looking up the membership; non-members are
+  denied without learning whether the workspace exists. `advisor_readonly`
+  can read everything but never approve, mutate, export, or administer.
+- API tokens for agents/MCP are workspace-bound, hashed at rest, expiring
+  (90 days default, one year maximum), revocable, and scoped
+  (`read | suggest | execute`). No scope grants `review_approve` or `admin`,
+  effective rights are capped by the creator's current role, and the token
+  dies when its creator leaves the workspace. Agent tokens cannot mint or
+  revoke tokens or invites.
+- Login success/failure, logout, session revocation, invite lifecycle, TOTP
+  changes, token lifecycle, and permission denials are recorded through the
+  append-only audit log with identifiers and literal reason codes only —
+  never emails, passwords, tokens, codes, or secrets. Login and invite
+  acceptance are throttled per email and per client key.
+- All secret comparisons are constant-time; unknown emails still run the KDF
+  so response time does not reveal account existence.
+
 ## GDPR
 
 Likely required areas:

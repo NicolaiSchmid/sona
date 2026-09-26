@@ -4,6 +4,7 @@ import { CORE_MIGRATIONS } from "./migrations/index";
 import { applyMigrations } from "./runner";
 import {
   ASSET_TABLES,
+  AUTH_TABLES,
   CORE_TABLES,
   EMAIL_TABLES,
   LEDGER_REPOSITORY_TABLES,
@@ -40,6 +41,7 @@ describe("core migrations", () => {
         ...ASSET_TABLES,
         ...PORTFOLIO_TABLES,
         ...EMAIL_TABLES,
+        ...AUTH_TABLES,
       ]) {
         expect(names.has(table), `missing table ${table}`).toBe(true);
       }

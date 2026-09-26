@@ -8,6 +8,7 @@
     { "path": "./packages/agents" },
     { "path": "./packages/tax-de" },
     { "path": "./packages/mcp" },
+    { "path": "./packages/auth" },
     { "path": "./apps/worker" },
     { "path": "./apps/web" }
   ]
