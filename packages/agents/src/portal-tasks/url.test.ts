@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { resolveUrl, sanitizeUrl } from "./url.js";
+import { redactSensitiveUrlPath, resolveUrl, sanitizeUrl, sanitizeUrlsInText } from "./url.js";
 
 describe("sanitizeUrl", () => {
   it("strips the query string and fragment but keeps a non-default port", () => {
@@ -55,5 +55,41 @@ describe("resolveUrl", () => {
 
   it("throws on an unparseable base URL", () => {
     expect(() => resolveUrl("x.pdf", "not a url")).toThrow();
+  });
+});
+
+describe("sanitizeUrlsInText", () => {
+  it("strips query strings and fragments from every URL in a message", () => {
+    expect(
+      sanitizeUrlsInText(
+        "page.goto: net::ERR_FAILED at https://portal.test/login?session=abc#top (ws://localhost:3000/live?t=1)",
+      ),
+    ).toBe("page.goto: net::ERR_FAILED at https://portal.test/login (ws://localhost:3000/live)");
+  });
+
+  it("leaves text without URLs untouched", () => {
+    expect(sanitizeUrlsInText("Timeout 15000ms exceeded")).toBe("Timeout 15000ms exceeded");
+  });
+});
+
+describe("redactSensitiveUrlPath", () => {
+  it("replaces e-mail-like, long token, and long numeric segments", () => {
+    expect(
+      redactSensitiveUrlPath(
+        "https://portal.test/u/user%40example.test/acct/12345678/dl/AbCdEfGhIjKlMnOpQrStUvWxYz0123/inv.pdf?sig=x",
+      ),
+    ).toBe(
+      "https://portal.test/u/[REDACTED_SEGMENT]/acct/[REDACTED_SEGMENT]/dl/[REDACTED_SEGMENT]/inv.pdf",
+    );
+  });
+
+  it("keeps short human-readable segments and file names", () => {
+    expect(redactSensitiveUrlPath("https://portal.test/invoices/2026/INV-2026-000123.pdf")).toBe(
+      "https://portal.test/invoices/2026/INV-2026-000123.pdf",
+    );
+  });
+
+  it("returns undefined for input that is not a URL", () => {
+    expect(redactSensitiveUrlPath("not a url")).toBeUndefined();
   });
 });

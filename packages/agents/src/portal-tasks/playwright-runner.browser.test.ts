@@ -7,7 +7,7 @@ import {
   LocalPlaywrightPortalTaskRunner,
 } from "./playwright-runner.js";
 import type { RunPortalTaskResult } from "./runner.js";
-import type { PortalTask, PortalTaskStep } from "./schema.js";
+import { type PortalTask, type PortalTaskStep, portalTaskDigest } from "./schema.js";
 
 /**
  * Drives the real Playwright adapter against a local fixture portal. Opt-in via
@@ -54,6 +54,44 @@ describe.skipIf(!runBrowserTests)("LocalPlaywrightPortalTaskRunner browser fixtu
         }),
       ]),
     );
+  });
+
+  it("records a navigation redirect that leaves the allowlist and stops the run as blocked", async () => {
+    const result = await runFixture((origin) =>
+      makeTask(origin, [
+        { kind: "navigate", url: `${origin}/login` },
+        { kind: "navigate", url: `${origin}/redirect-out` },
+        { kind: "waitForSelector", selector: "[data-testid='invoice-list']", timeoutMs: 2_000 },
+      ]),
+    );
+
+    expect(result.status).toBe("blocked");
+    expect(result.provenance.blockedRequests).toEqual([
+      expect.objectContaining({ url: "https://evil.example/x", reason: "off_allowlist" }),
+    ]);
+  });
+
+  it("records a method-preserving redirect onto an unreviewed endpoint and fails closed", async () => {
+    const result = await runFixture((origin) =>
+      makeTask(origin, [
+        { kind: "navigate", url: `${origin}/login` },
+        { kind: "click", selector: "button.login-redirect" },
+        { kind: "waitForSelector", selector: "[data-testid='invoice-list']", timeoutMs: 2_000 },
+      ]),
+    );
+
+    expect(result.status).toBe("blocked");
+    expect(result.provenance.blockedRequests).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          url: expect.stringMatching(/\/account\/close$/),
+          method: "POST",
+          reason: "non_idempotent_method",
+        }),
+      ]),
+    );
+    // Once a hop escaped, even allowlisted follow-up requests are aborted.
+    expect(result.provenance.allowedNonIdempotentRequests).toHaveLength(1);
   });
 
   it("stops reading an oversized chunked download at the byte cap", async () => {
@@ -111,6 +149,7 @@ async function runFixture(
           id: "conn_browser",
           workspaceId: context.workspaceId,
           taskId: task.id,
+          taskDigest: portalTaskDigest(task),
           credentialRefs: { username: usernameRef, password: passwordRef },
         },
       ]),
@@ -171,7 +210,28 @@ function handleFixtureRequest(request: IncomingMessage, response: ServerResponse
         <input id="email" name="email">
         <input id="password" name="password" type="password">
         <button class="login" type="submit">Sign in</button>
+      </form>
+      <form method="post" action="/login-redirect">
+        <input name="email" value="fixture-user@example.test">
+        <input name="password" value="fixture-password">
+        <button class="login-redirect" type="submit">Sign in (redirecting)</button>
       </form>`);
+    return;
+  }
+  if (url.pathname === "/redirect-out" && request.method === "GET") {
+    response.writeHead(302, { location: "https://evil.example/x" });
+    response.end();
+    return;
+  }
+  if (url.pathname === "/login-redirect" && request.method === "POST") {
+    // A method-preserving redirect the guard can only observe, not abort.
+    response.writeHead(307, { location: "/account/close" });
+    response.end();
+    return;
+  }
+  if (url.pathname === "/account/close") {
+    response.writeHead(200, { "content-type": "text/html" });
+    response.end(`<!doctype html><main data-testid="closed">closed via ${request.method}</main>`);
     return;
   }
   if (url.pathname === "/login" && request.method === "POST") {
@@ -255,6 +315,14 @@ function makeTask(origin: string, steps?: readonly PortalTaskStep[]): PortalTask
         urlPattern: `${origin}/login`,
         reason: "login",
         justification: "Fixture login form requires POST before read-only invoice access.",
+        allowedBodyFields: ["email", "password"],
+      },
+      {
+        method: "POST",
+        urlPattern: `${origin}/login-redirect`,
+        reason: "login",
+        justification: "Fixture variant whose login endpoint redirects with the method preserved.",
+        allowedBodyFields: ["email", "password"],
       },
     ],
     steps: [

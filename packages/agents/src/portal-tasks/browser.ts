@@ -17,19 +17,25 @@ export interface PortalBrowserProvider {
   createSession(input: PortalBrowserSessionInput): Promise<PortalBrowserSession>;
 }
 
+/** Passed to providers so managed browsers can tag their remote session with the run. */
 export interface PortalBrowserSessionInput {
   task: PortalTask;
   runId: string;
 }
 
+/** Throws to abort the request; resolving lets it through. */
+export type PortalRequestGuard = (request: PortalRequest) => void | Promise<void>;
+
 /**
- * A guarded browser session. `route` must see every request the session can
- * make, including popups and WebSocket handshakes, before it leaves the
- * browser; a handler that throws aborts the request.
+ * A guarded browser session. `guardRequests` must present every request the
+ * session can make, including popups and WebSocket handshakes, to the guard
+ * before it leaves the browser. Redirect hops a browser follows on its own must
+ * still be reported to the guard even when they can no longer be aborted, so
+ * the run records the escape and fails.
  */
 export interface PortalBrowserSession {
   page: PortalBrowserPage;
-  route(pattern: string, handler: (request: PortalRequest) => void | Promise<void>): Promise<void>;
+  guardRequests(guard: PortalRequestGuard): Promise<void>;
   close(): Promise<void>;
 }
 
@@ -38,16 +44,24 @@ export interface PortalElementHandle {
   textContent(): Promise<string | null>;
 }
 
+export interface PortalSelectorOptions {
+  timeoutMs?: number;
+}
+
 export interface PortalBrowserPage {
   goto(url: string): Promise<void>;
-  fill(selector: string, value: string): Promise<void>;
-  click(selector: string): Promise<void>;
-  /**
-   * Resolves false when the selector does not appear in time. Pages may also
-   * surface the timeout as an error; see {@link isSelectorTimeoutError}.
-   */
-  waitForSelector(selector: string, options?: { timeoutMs?: number }): Promise<boolean>;
+  /** Selector actions reject with a timeout error (see {@link isSelectorTimeoutError}) when the element does not appear. */
+  fill(selector: string, value: string, options?: PortalSelectorOptions): Promise<void>;
+  click(selector: string, options?: PortalSelectorOptions): Promise<void>;
+  /** Resolves false when the selector does not appear in time; may also reject with a timeout error. */
+  waitForSelector(selector: string, options?: PortalSelectorOptions): Promise<boolean>;
   queryAll(selector: string): Promise<PortalElementHandle[]>;
+  /**
+   * Downloads from inside the authenticated page so the portal sees the
+   * browser's cookies, IP, and TLS fingerprint. Implementations must stop
+   * reading once `maxBytes` is exceeded and throw `DownloadTooLargeError`; they
+   * report status, media type, and final URL and leave policy to the runner.
+   */
   requestBytes(url: string, options: PortalDownloadRequestOptions): Promise<PortalDownloadResponse>;
   screenshot?(): Promise<Uint8Array>;
   url(): string;
@@ -56,8 +70,6 @@ export interface PortalBrowserPage {
 export interface PortalDownloadRequestOptions {
   expectedMimeType: string;
   maxBytes: number;
-  maxRedirects: number;
-  onRedirect(url: string): boolean;
 }
 
 export interface PortalDownloadResponse {

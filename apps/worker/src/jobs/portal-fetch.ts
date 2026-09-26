@@ -1,22 +1,25 @@
 import type {
   PortalTask,
   PortalTaskRunner,
+  PortalTaskRunStatus,
   RunPortalTaskInput,
   RunPortalTaskResult,
 } from "@sona/agents";
 import { requireWorkspaceContext, type WorkspaceContext } from "@sona/core";
 
 export interface PortalFetchConnection {
-  connectionId: string;
+  id: string;
   workspaceId: string;
   task: PortalTask;
 }
 
+export interface GetPortalFetchConnectionInput {
+  context: WorkspaceContext;
+  connectionId: string;
+}
+
 export interface PortalFetchConnectionRepository {
-  getConnection(input: {
-    context: WorkspaceContext;
-    connectionId: string;
-  }): Promise<PortalFetchConnection>;
+  getConnection(input: GetPortalFetchConnectionInput): Promise<PortalFetchConnection>;
 }
 
 export interface PortalFetchJobLeaseKey {
@@ -36,8 +39,10 @@ export interface AcquirePortalFetchJobInput extends PortalFetchJobLeaseKey {
  * `acquire` must atomically refuse a job id that is leased or completed and a
  * connection that is still cooling down, then record both the lease and the
  * cooldown before any browser launches. `complete` makes the job id permanently
- * idempotent; `release` drops the lease after a failure so a queue retry with
- * the same id can run again once the cooldown has passed.
+ * idempotent; `release` drops the lease after a retryable failure so a queue
+ * retry with the same id can run again once the cooldown has passed. A durable
+ * implementation should expire stale leases so a crashed worker cannot pin a
+ * job id forever.
  */
 export interface PortalFetchJobStateStore {
   acquire(input: AcquirePortalFetchJobInput): Promise<PortalFetchJobReservation>;
@@ -50,8 +55,24 @@ export type PortalFetchJobReservation =
   | { status: "duplicate"; cooldownUntil: undefined }
   | { status: "cooldown"; cooldownUntil: string };
 
+export interface RecordPortalFetchRunInput {
+  context: WorkspaceContext;
+  result: RunPortalTaskResult;
+}
+
+/**
+ * Durable run history. Every run that produced a result is recorded before the
+ * lease is settled, so blocked requests, allowed exceptions, and outcomes stay
+ * auditable after the queue has forgotten the job.
+ */
+export interface PortalFetchRunRecorder {
+  recordRun(input: RecordPortalFetchRunInput): Promise<void>;
+}
+
 export interface RunPortalFetchJobInput {
   jobId: string;
+  /** Delivery attempt of this job id, starting at 1; each attempt gets its own run id. */
+  attempt?: number;
   context: WorkspaceContext;
   connectionId: string;
   now: string;
@@ -59,86 +80,122 @@ export interface RunPortalFetchJobInput {
   runner: PortalTaskRunner;
   connections: PortalFetchConnectionRepository;
   state: PortalFetchJobStateStore;
+  runs: PortalFetchRunRecorder;
 }
 
-export type PortalFetchJobStatus = "completed" | "duplicate" | "cooldown" | "failed";
+/**
+ * `failed` is retryable (the lease was released); `rejected` is terminal: the
+ * task definition or portal layout must change before this connection can run
+ * again, so the job id is consumed and a queue must not retry it.
+ */
+export type PortalFetchJobStatus = "completed" | "duplicate" | "cooldown" | "failed" | "rejected";
 
 export interface RunPortalFetchJobResult {
   status: PortalFetchJobStatus;
   connectionId: string;
+  runId: string | undefined;
   cooldownUntil: string | undefined;
   runResult: RunPortalTaskResult | undefined;
+  error: string | undefined;
 }
+
+const TERMINAL_RUN_STATUSES: ReadonlySet<PortalTaskRunStatus> = new Set<PortalTaskRunStatus>([
+  "policy_refused",
+  "selector_missing",
+  "blocked",
+]);
 
 export async function runPortalFetchJob(
   input: RunPortalFetchJobInput,
 ): Promise<RunPortalFetchJobResult> {
   const context = requireWorkspaceContext(input.context);
+  const base = {
+    connectionId: input.connectionId,
+    runId: undefined,
+    cooldownUntil: undefined,
+    runResult: undefined,
+    error: undefined,
+  } satisfies Partial<RunPortalFetchJobResult>;
+
   const connection = await input.connections.getConnection({
     context,
     connectionId: input.connectionId,
   });
   if (connection.workspaceId !== context.workspaceId) {
-    return {
-      status: "failed",
-      connectionId: input.connectionId,
-      cooldownUntil: undefined,
-      runResult: undefined,
-    };
+    return { ...base, status: "failed", error: "portal connection belongs to another workspace" };
   }
+
   const cooldownUntil = new Date(Date.parse(input.now) + input.cooldownMs).toISOString();
   const leaseKey: PortalFetchJobLeaseKey = {
     jobId: input.jobId,
     workspaceId: context.workspaceId,
     connectionId: input.connectionId,
   };
-  const reservation = await input.state.acquire({
-    ...leaseKey,
-    now: input.now,
-    cooldownUntil,
-  });
+  const reservation = await input.state.acquire({ ...leaseKey, now: input.now, cooldownUntil });
   if (reservation.status !== "acquired") {
-    return {
-      status: reservation.status,
-      connectionId: input.connectionId,
-      cooldownUntil: reservation.cooldownUntil,
-      runResult: undefined,
-    };
+    return { ...base, status: reservation.status, cooldownUntil: reservation.cooldownUntil };
   }
 
+  const runId = runIdFor(input.jobId, input.attempt ?? 1);
   const runInput: RunPortalTaskInput = {
     task: connection.task,
     connectionId: input.connectionId,
-    runId: input.jobId,
+    runId,
     workspaceId: context.workspaceId,
     now: input.now,
   };
   let runResult: RunPortalTaskResult | undefined;
+  let error: string | undefined;
   try {
     runResult = await input.runner.runTask(runInput);
-  } catch {
-    // A throwing runner is reported like any other non-completed run below.
+  } catch (thrown) {
+    error = thrown instanceof Error ? thrown.message : String(thrown);
   }
 
-  // Only a completed fetch consumes the job id; anything else keeps the
-  // cooldown (the portal was contacted) but stays retryable.
-  if (runResult?.status !== "completed") {
-    await input.state.release(leaseKey);
-    return {
-      status: "failed",
-      connectionId: input.connectionId,
-      cooldownUntil,
-      runResult,
-    };
+  if (runResult !== undefined) {
+    try {
+      await input.runs.recordRun({ context, result: runResult });
+    } catch (thrown) {
+      // Without a durable record the run is not auditable; hand the job back
+      // to the queue (dedup by content hash makes the rerun safe).
+      await releaseQuietly(input.state, leaseKey);
+      throw thrown;
+    }
   }
 
-  await input.state.complete(leaseKey);
+  if (runResult?.status === "completed") {
+    await input.state.complete(leaseKey);
+    return { ...base, status: "completed", runId, cooldownUntil, runResult };
+  }
+  if (runResult !== undefined && TERMINAL_RUN_STATUSES.has(runResult.status)) {
+    await input.state.complete(leaseKey);
+    return { ...base, status: "rejected", runId, cooldownUntil, runResult };
+  }
+  const releaseError = await releaseQuietly(input.state, leaseKey);
   return {
-    status: "completed",
-    connectionId: input.connectionId,
+    ...base,
+    status: "failed",
+    runId,
     cooldownUntil,
     runResult,
+    error: [error, releaseError].filter((part) => part !== undefined).join("; ") || undefined,
   };
+}
+
+function runIdFor(jobId: string, attempt: number): string {
+  return attempt <= 1 ? jobId : `${jobId}:${attempt}`;
+}
+
+async function releaseQuietly(
+  state: PortalFetchJobStateStore,
+  leaseKey: PortalFetchJobLeaseKey,
+): Promise<string | undefined> {
+  try {
+    await state.release(leaseKey);
+    return undefined;
+  } catch (thrown) {
+    return `lease release failed: ${thrown instanceof Error ? thrown.message : String(thrown)}`;
+  }
 }
 
 export class InMemoryPortalFetchConnectionRepository implements PortalFetchConnectionRepository {
@@ -147,16 +204,13 @@ export class InMemoryPortalFetchConnectionRepository implements PortalFetchConne
   constructor(connections: readonly PortalFetchConnection[] = []) {
     for (const connection of connections) {
       this.#connections.set(
-        connectionKey(connection.workspaceId, connection.connectionId),
+        connectionKey(connection.workspaceId, connection.id),
         freezeConnection(connection),
       );
     }
   }
 
-  async getConnection(input: {
-    context: WorkspaceContext;
-    connectionId: string;
-  }): Promise<PortalFetchConnection> {
+  async getConnection(input: GetPortalFetchConnectionInput): Promise<PortalFetchConnection> {
     const connection = this.#connections.get(
       connectionKey(input.context.workspaceId, input.connectionId),
     );
@@ -198,6 +252,18 @@ export class InMemoryPortalFetchJobStateStore implements PortalFetchJobStateStor
   }
 }
 
+export class InMemoryPortalFetchRunRecorder implements PortalFetchRunRecorder {
+  readonly #runs: RunPortalTaskResult[] = [];
+
+  async recordRun(input: RecordPortalFetchRunInput): Promise<void> {
+    this.#runs.push(input.result);
+  }
+
+  listRuns(context: WorkspaceContext): RunPortalTaskResult[] {
+    return this.#runs.filter((run) => run.provenance.workspaceId === context.workspaceId);
+  }
+}
+
 function jobKey(input: PortalFetchJobLeaseKey): string {
   return `${input.workspaceId}:${input.jobId}`;
 }
@@ -207,17 +273,18 @@ function connectionKey(workspaceId: string, connectionId: string): string {
 }
 
 function freezeConnection(connection: PortalFetchConnection): PortalFetchConnection {
+  const task = connection.task;
   return Object.freeze({
     ...connection,
-    task: {
-      ...connection.task,
-      domains: [...connection.task.domains],
-      requires: [...connection.task.requires],
-      allowedActions: [...connection.task.allowedActions],
-      forbiddenActions: [...connection.task.forbiddenActions],
-      outputs: [...connection.task.outputs],
-      httpMethodExceptions: [...connection.task.httpMethodExceptions],
-      steps: [...connection.task.steps],
-    },
-  });
+    task: Object.freeze({
+      ...task,
+      domains: Object.freeze([...task.domains]),
+      requires: Object.freeze([...task.requires]),
+      allowedActions: Object.freeze([...task.allowedActions]),
+      forbiddenActions: Object.freeze([...task.forbiddenActions]),
+      outputs: Object.freeze([...task.outputs]),
+      httpMethodExceptions: Object.freeze([...task.httpMethodExceptions]),
+      steps: Object.freeze([...task.steps]),
+    }),
+  }) as PortalFetchConnection;
 }

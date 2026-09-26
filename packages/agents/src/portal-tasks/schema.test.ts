@@ -6,6 +6,7 @@ import { syntheticReferencePortalTask } from "./definitions/synthetic-reference-
 import {
   PORTAL_EXCEPTION_HTTP_METHODS,
   parsePortalTask,
+  portalTaskDigest,
   portalTaskStepSchema,
   safeParsePortalTask,
 } from "./schema.js";
@@ -89,6 +90,7 @@ describe("portalTaskSchema", () => {
             urlPattern: "https://token@amazon.de/login",
             reason: "login",
             justification: "Portal login requires POST before read-only invoice access.",
+            allowedBodyFields: ["email", "password"],
           },
         ],
       }).success,
@@ -106,6 +108,7 @@ describe("portalTaskSchema", () => {
             urlPattern,
             reason: "login",
             justification: "Portal login requires POST before read-only invoice access.",
+            allowedBodyFields: ["email", "password"],
           },
         ],
       }).success;
@@ -116,6 +119,42 @@ describe("portalTaskSchema", () => {
     expect(exception("PATCH", "https://amazon.de/login")).toBe(false);
     expect(exception("POST", "https://amazon.de/delete-account")).toBe(false);
     expect(exception("POST", "https://amazon.de/api?action=cancel")).toBe(false);
+  });
+
+  it("requires every POST exception to declare its reviewed body fields", () => {
+    const raw = loadFixture() as Record<string, unknown>;
+    const exception = (allowedBodyFields: unknown) =>
+      safeParsePortalTask({
+        ...raw,
+        httpMethodExceptions: [
+          {
+            method: "POST",
+            urlPattern: "https://amazon.de/login",
+            reason: "login",
+            justification: "Portal login requires POST before read-only invoice access.",
+            ...(allowedBodyFields === undefined ? {} : { allowedBodyFields }),
+          },
+        ],
+      }).success;
+
+    expect(exception(["email", "password"])).toBe(true);
+    expect(exception(undefined)).toBe(false);
+    expect(exception([])).toBe(false);
+    expect(exception([""])).toBe(false);
+  });
+
+  it("digests a task independently of key order and changes when the definition changes", () => {
+    const task = parsePortalTask(syntheticReferencePortalTask);
+    const reordered = parsePortalTask(
+      Object.fromEntries(Object.entries(syntheticReferencePortalTask).reverse()),
+    );
+
+    expect(portalTaskDigest(task)).toMatch(/^[0-9a-f]{64}$/);
+    expect(portalTaskDigest(reordered)).toBe(portalTaskDigest(task));
+    expect(portalTaskDigest({ ...task, domains: ["attacker.test"] })).not.toBe(
+      portalTaskDigest(task),
+    );
+    expect(portalTaskDigest({ ...task, version: 2 })).not.toBe(portalTaskDigest(task));
   });
 
   it("rejects plaintext non-local navigation and exception URLs", () => {
@@ -132,6 +171,7 @@ describe("portalTaskSchema", () => {
           urlPattern: "http://amazon.de/login",
           reason: "login",
           justification: "Portal login requires POST before read-only invoice access.",
+          allowedBodyFields: ["email", "password"],
         },
       ],
     });
@@ -173,6 +213,7 @@ describe("portalTaskSchema", () => {
             urlPattern,
             reason: "search",
             justification: "Invoice search form posts its filter before listing results.",
+            allowedBodyFields: ["email", "password"],
           },
         ],
       });
@@ -204,6 +245,7 @@ describe("portalTaskSchema", () => {
             urlPattern: "https://amazon.de/login",
             reason: "login",
             justification: "Portal login requires POST before read-only invoice access.",
+            allowedBodyFields: ["email", "password"],
             ...overrides,
           },
         ],

@@ -5,6 +5,7 @@
  */
 import type { JsonValue } from "@sona/core";
 import type { StoredDocument } from "@sona/receipts";
+import type { ALLOWED_NON_IDEMPOTENT_REASONS, PortalHttpMethodException } from "./schema.js";
 import { sanitizeUrl } from "./url.js";
 
 /** Per-run provenance for an executed portal task. */
@@ -19,24 +20,48 @@ export interface TaskRunProvenance {
   workspaceId: string;
   /** ISO timestamp of the run. */
   fetchedAt: string;
-  blockedRequests?: BlockedPortalRequest[];
-  allowedNonIdempotentRequests?: AllowedNonIdempotentPortalRequest[];
+  /** Requests the network guard refused during the run. */
+  blockedRequests: BlockedPortalRequest[];
+  /** Non-idempotent requests let through under a reviewed task exception. */
+  allowedNonIdempotentRequests: AllowedNonIdempotentPortalRequest[];
 }
 
-export type BlockedPortalRequestReason = "off_allowlist" | "non_idempotent_method" | "websocket";
+export type BlockedPortalRequestReason =
+  | "off_allowlist"
+  | "non_idempotent_method"
+  | "unreviewed_body"
+  | "websocket";
+
+/** Playwright's resource classification; unknown kinds map to `other`. */
+export type PortalResourceType =
+  | "document"
+  | "stylesheet"
+  | "image"
+  | "media"
+  | "font"
+  | "script"
+  | "texttrack"
+  | "xhr"
+  | "fetch"
+  | "eventsource"
+  | "websocket"
+  | "manifest"
+  | "other";
 
 export interface BlockedPortalRequest {
+  /** Sanitized: no query, fragment, or userinfo. */
   url: string;
   method: string;
-  resourceType: string;
+  resourceType: PortalResourceType;
   reason: BlockedPortalRequestReason;
 }
 
-export type AllowedNonIdempotentRequestReason = "login" | "search";
+export type AllowedNonIdempotentRequestReason = (typeof ALLOWED_NON_IDEMPOTENT_REASONS)[number];
 
 export interface AllowedNonIdempotentPortalRequest {
+  /** Sanitized: no query, fragment, or userinfo. */
   url: string;
-  method: string;
+  method: PortalHttpMethodException["method"];
   reason: AllowedNonIdempotentRequestReason;
   justification: string;
 }
@@ -59,10 +84,14 @@ export interface FetchedDocumentProvenance {
   extractionStatus: ExtractionStatus;
 }
 
+/** URI scheme for `objectRef` content that points at a stored document by id. */
+export const STORED_DOCUMENT_URI_SCHEME = "stored-document:";
+
 /**
  * The fetched bytes, carried so a real runner can hand them to document storage.
  * `bytes` inlines small payloads; `path` points at a temp file; `objectRef`
- * references an already-uploaded object.
+ * references an already-uploaded object (`stored-document:<id>` once the
+ * runner has persisted it, so run results never carry document bytes).
  */
 export type FetchedContent =
   | { kind: "bytes"; bytes: Uint8Array }

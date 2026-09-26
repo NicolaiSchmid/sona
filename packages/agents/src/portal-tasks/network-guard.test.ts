@@ -18,6 +18,7 @@ const task: PortalTask = {
       urlPattern: "https://portal.test/login",
       reason: "login",
       justification: "Portal login form requires a POST before read-only invoice access.",
+      allowedBodyFields: ["email", "password", "action", "q"],
     },
   ],
   steps: [],
@@ -114,6 +115,7 @@ describe("createNetworkGuard", () => {
           urlPattern: "https://portal.test/api?action=search",
           reason: "search",
           justification: "Invoice search form posts its filter before listing results.",
+          allowedBodyFields: ["email", "password", "action", "q"],
         },
       ],
     };
@@ -139,6 +141,61 @@ describe("createNetworkGuard", () => {
     expect(otherAction.action).toBe("abort");
     expect(noQuery.action).toBe("abort");
     expect(guard.snapshot().blockedRequests).toHaveLength(2);
+  });
+
+  it("constrains an allowed POST to the reviewed body fields and values", () => {
+    const searchTask: PortalTask = {
+      ...task,
+      httpMethodExceptions: [
+        {
+          method: "POST",
+          urlPattern: "https://portal.test/api",
+          reason: "search",
+          justification: "Invoice search form posts its filter before listing results.",
+          allowedBodyFields: ["action", "q"],
+        },
+      ],
+    };
+    const post = (postData: string | null | undefined) =>
+      createNetworkGuard({ task: searchTask }).evaluateRequest({
+        url: "https://portal.test/api",
+        method: "POST",
+        resourceType: "xhr",
+        postData,
+      });
+
+    expect(post("action=search&q=2026")).toEqual({ action: "allow" });
+    expect(post('{"action":"search","q":"2026"}')).toEqual({ action: "allow" });
+    expect(post(undefined)).toEqual({ action: "allow" });
+    expect(post("action=delete")).toEqual({ action: "abort", reason: "unreviewed_body" });
+    expect(post("q=x&other=1")).toEqual({ action: "abort", reason: "unreviewed_body" });
+    expect(post('{"action":["search"]}')).toEqual({ action: "allow" });
+    expect(post('["action"]')).toEqual({ action: "abort", reason: "unreviewed_body" });
+    expect(post("--boundary\r\nContent-Disposition: form-data; name=action")).toEqual({
+      action: "abort",
+      reason: "unreviewed_body",
+    });
+  });
+
+  it("does not screen login credential values but still restricts login fields", () => {
+    const guard = createNetworkGuard({ task });
+
+    const login = guard.evaluateRequest({
+      url: "https://portal.test/login",
+      method: "POST",
+      resourceType: "document",
+      postData: "email=a%40b.test&password=Buy2024!delete",
+    });
+    const extraField = guard.evaluateRequest({
+      url: "https://portal.test/login",
+      method: "POST",
+      resourceType: "document",
+      postData: "email=a%40b.test&password=x&remember=1",
+    });
+
+    expect(login).toEqual({ action: "allow" });
+    expect(extraField).toEqual({ action: "abort", reason: "unreviewed_body" });
+    expect(guard.snapshot().blockedRequests).toHaveLength(1);
   });
 
   it("refuses WebSocket handshakes even to allowlisted hosts", () => {
@@ -374,6 +431,7 @@ describe("NetworkGuard methods and exceptions", () => {
           urlPattern: "https://portal.test/invoices/search",
           reason: "search",
           justification: "Invoice search form posts its filter before listing results.",
+          allowedBodyFields: ["email", "password", "action", "q"],
         },
       ],
     };
@@ -405,6 +463,7 @@ describe("NetworkGuard methods and exceptions", () => {
           urlPattern: "https://sso.other.test/login",
           reason: "login",
           justification: "Third-party SSO login is not on the task allowlist.",
+          allowedBodyFields: ["email", "password", "action", "q"],
         },
       ],
     };

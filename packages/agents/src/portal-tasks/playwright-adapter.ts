@@ -11,31 +11,26 @@ import type {
   PortalDownloadRequestOptions,
   PortalDownloadResponse,
   PortalElementHandle,
+  PortalRequestGuard,
+  PortalSelectorOptions,
 } from "./browser.js";
 import { isSelectorTimeoutError } from "./browser.js";
-import {
-  isExpectedMimeType,
-  isRedirectStatus,
-  isSuccessfulStatus,
-  parseContentLength,
-  readBodyWithLimit,
-} from "./download.js";
+import { DownloadTooLargeError } from "./download.js";
 import type { PortalRequest } from "./network-guard.js";
-import { resolveUrl } from "./url.js";
+import type { PortalResourceType } from "./provenance.js";
 
 const PLAYWRIGHT_SPECIFIER = "playwright";
-const DOWNLOAD_TIMEOUT_MS = 60_000;
 const MIN_TOKEN_LENGTH = 8;
 
 export function createLocalPlaywrightBrowserProvider(): PortalBrowserProvider {
-  return new DynamicPlaywrightBrowserProvider("local-playwright", undefined);
+  return new PlaywrightBrowserProvider("local-playwright", undefined);
 }
 
 export function createCdpPlaywrightBrowserProvider(
   providerName: string,
   cdpEndpoint: string,
 ): PortalBrowserProvider {
-  return new DynamicPlaywrightBrowserProvider(providerName, cdpEndpoint);
+  return new PlaywrightBrowserProvider(providerName, cdpEndpoint);
 }
 
 interface PlaywrightModule {
@@ -59,14 +54,17 @@ interface PlaywrightContext {
     matcher: (url: URL) => boolean,
     handler: (route: PlaywrightWebSocketRoute) => void | Promise<void>,
   ): Promise<void>;
-  cookies(urls: readonly string[]): Promise<PlaywrightCookie[]>;
+  on(event: "request", handler: (request: PlaywrightRequest) => void): void;
   newPage(): Promise<PlaywrightPage>;
   close(): Promise<void>;
 }
 
-interface PlaywrightCookie {
-  name: string;
-  value: string;
+interface PlaywrightRequest {
+  url(): string;
+  method(): string;
+  resourceType(): string;
+  postData(): string | null;
+  redirectedFrom(): object | null;
 }
 
 interface PlaywrightWebSocketRoute {
@@ -77,20 +75,17 @@ interface PlaywrightWebSocketRoute {
 
 interface PlaywrightPage {
   goto(url: string): Promise<unknown>;
-  fill(selector: string, value: string): Promise<void>;
-  click(selector: string): Promise<void>;
-  waitForSelector(selector: string, options: { timeout?: number }): Promise<unknown | null>;
+  fill(selector: string, value: string, options: { timeout?: number }): Promise<void>;
+  click(selector: string, options: { timeout?: number }): Promise<void>;
+  waitForSelector(selector: string, options: { timeout?: number }): Promise<unknown>;
   $$(selector: string): Promise<PlaywrightElement[]>;
+  evaluate<Result, Arg>(pageFunction: (arg: Arg) => Promise<Result>, arg: Arg): Promise<Result>;
   screenshot(): Promise<Buffer>;
   url(): string;
 }
 
 interface PlaywrightRoute {
-  request(): {
-    url(): string;
-    method(): string;
-    resourceType(): string;
-  };
+  request(): PlaywrightRequest;
   continue(): Promise<void>;
   abort(): Promise<void>;
 }
@@ -100,7 +95,7 @@ interface PlaywrightElement {
   textContent(): Promise<string | null>;
 }
 
-class DynamicPlaywrightBrowserProvider implements PortalBrowserProvider {
+class PlaywrightBrowserProvider implements PortalBrowserProvider {
   readonly providerName: string;
   readonly sensitiveValues: readonly string[];
   readonly #cdpEndpoint: string | undefined;
@@ -108,7 +103,7 @@ class DynamicPlaywrightBrowserProvider implements PortalBrowserProvider {
   constructor(providerName: string, cdpEndpoint: string | undefined) {
     this.providerName = providerName;
     this.#cdpEndpoint = cdpEndpoint;
-    this.sensitiveValues = cdpEndpoint === undefined ? [] : cdpEndpointSecrets(cdpEndpoint);
+    this.sensitiveValues = cdpEndpoint === undefined ? [] : cdpEndpointSensitiveValues(cdpEndpoint);
   }
 
   async createSession(): Promise<PortalBrowserSession> {
@@ -117,45 +112,132 @@ class DynamicPlaywrightBrowserProvider implements PortalBrowserProvider {
       this.#cdpEndpoint === undefined
         ? await module.chromium.launch({ headless: true })
         : await module.chromium.connectOverCDP(this.#cdpEndpoint);
-    const context = await browser.newContext({
-      acceptDownloads: false,
-      serviceWorkers: "block",
-    });
-    const page = await context.newPage();
-    const adaptedPage = new PlaywrightPageAdapter(page, context);
-    return {
-      page: adaptedPage,
-      route: async (pattern, handler) => {
-        await adaptedPage.route(pattern, handler);
-      },
-      close: async () => {
-        await context.close();
-        await browser.close();
-      },
-    };
+    let context: PlaywrightContext | undefined;
+    try {
+      context = await browser.newContext({
+        acceptDownloads: false,
+        serviceWorkers: "block",
+      });
+      const guardedContext = context;
+      const page = await context.newPage();
+      return {
+        page: new PlaywrightPageAdapter(page),
+        guardRequests: (guard) => installRequestGuard(guardedContext, guard),
+        close: async () => {
+          await guardedContext.close();
+          await browser.close();
+        },
+      };
+    } catch (error) {
+      // A failed setup must not leak a Chromium process or a managed session.
+      await context?.close().catch(() => undefined);
+      await browser.close().catch(() => undefined);
+      throw error;
+    }
   }
+}
+
+/**
+ * Installs the guard at the browser-context level so popups are covered from
+ * their first request, on WebSocket handshakes (which `route` never sees), and
+ * on redirect hops. Playwright presents only the first URL of a redirect chain
+ * to a route handler and the browser follows later hops on its own; those hops
+ * still surface as request events, so they are reported to the guard for
+ * provenance and, once any hop is disallowed, every further request in the
+ * session is aborted (fail closed).
+ */
+async function installRequestGuard(
+  context: PlaywrightContext,
+  guard: PortalRequestGuard,
+): Promise<void> {
+  let escaped = false;
+  await context.route("**/*", async (route) => {
+    if (escaped) {
+      await route.abort();
+      return;
+    }
+    try {
+      await guard(toPortalRequest(route.request()));
+      await route.continue();
+    } catch {
+      await route.abort();
+    }
+  });
+  // A glob such as `**/*` does not match `ws://` URLs in Playwright, so the
+  // WebSocket route uses a predicate that intercepts every handshake.
+  await context.routeWebSocket(matchEveryUrl, async (route) => {
+    try {
+      await guard({ url: route.url(), method: "GET", resourceType: "websocket" });
+      route.connectToServer();
+    } catch {
+      await route.close();
+    }
+  });
+  context.on("request", (request) => {
+    if (request.redirectedFrom() === null) {
+      return;
+    }
+    void Promise.resolve()
+      .then(() => guard(toPortalRequest(request)))
+      .catch(() => {
+        escaped = true;
+      });
+  });
+}
+
+function toPortalRequest(request: PlaywrightRequest): PortalRequest {
+  return {
+    url: request.url(),
+    method: request.method(),
+    resourceType: toResourceType(request.resourceType()),
+    postData: request.postData(),
+  };
+}
+
+const RESOURCE_TYPES: ReadonlySet<PortalResourceType> = new Set<PortalResourceType>([
+  "document",
+  "stylesheet",
+  "image",
+  "media",
+  "font",
+  "script",
+  "texttrack",
+  "xhr",
+  "fetch",
+  "eventsource",
+  "websocket",
+  "manifest",
+  "other",
+]);
+
+function toResourceType(value: string): PortalResourceType {
+  return isPortalResourceType(value) ? value : "other";
+}
+
+function isPortalResourceType(value: string): value is PortalResourceType {
+  return RESOURCE_TYPES.has(value as PortalResourceType);
 }
 
 /**
  * A CDP endpoint is a secret in its own right, and so are the token-shaped
  * parts it is built from, in case an error echoes only one of them.
  */
-function cdpEndpointSecrets(endpoint: string): string[] {
-  const secrets = new Set<string>([endpoint]);
+function cdpEndpointSensitiveValues(endpoint: string): string[] {
+  const values = new Set<string>([endpoint]);
   try {
     const url = new URL(endpoint);
     if (url.password.length > 0) {
-      secrets.add(url.password);
+      values.add(url.password);
     }
     for (const value of url.searchParams.values()) {
       if (value.length >= MIN_TOKEN_LENGTH) {
-        secrets.add(value);
+        values.add(value);
       }
     }
   } catch {
     // Not a URL; the full string is still redacted.
   }
-  return [...secrets];
+  return [...values];
 }
 
 async function loadPlaywrightModule(): Promise<PlaywrightModule> {
@@ -193,59 +275,24 @@ function isPlaywrightModule(value: unknown): value is PlaywrightModule {
 
 class PlaywrightPageAdapter implements PortalBrowserPage {
   readonly #page: PlaywrightPage;
-  readonly #context: PlaywrightContext;
 
-  constructor(page: PlaywrightPage, context: PlaywrightContext) {
+  constructor(page: PlaywrightPage) {
     this.#page = page;
-    this.#context = context;
-  }
-
-  /**
-   * Installs the guard on the browser context so popups are covered from their
-   * first request, and on WebSocket handshakes, which `route` does not see.
-   */
-  async route(
-    pattern: string,
-    handler: (request: PortalRequest) => void | Promise<void>,
-  ): Promise<void> {
-    await this.#context.route(pattern, async (route) => {
-      const request = route.request();
-      try {
-        await handler({
-          url: request.url(),
-          method: request.method(),
-          resourceType: request.resourceType(),
-        });
-        await route.continue();
-      } catch {
-        await route.abort();
-      }
-    });
-    // A glob such as `**/*` does not match `ws://` URLs in Playwright, so the
-    // WebSocket route uses a predicate that intercepts every handshake.
-    await this.#context.routeWebSocket(matchEveryUrl, async (route) => {
-      try {
-        await handler({ url: route.url(), method: "GET", resourceType: "websocket" });
-        route.connectToServer();
-      } catch {
-        await route.close();
-      }
-    });
   }
 
   async goto(url: string): Promise<void> {
     await this.#page.goto(url);
   }
 
-  async fill(selector: string, value: string): Promise<void> {
-    await this.#page.fill(selector, value);
+  async fill(selector: string, value: string, options: PortalSelectorOptions = {}): Promise<void> {
+    await this.#page.fill(selector, value, { timeout: options.timeoutMs });
   }
 
-  async click(selector: string): Promise<void> {
-    await this.#page.click(selector);
+  async click(selector: string, options: PortalSelectorOptions = {}): Promise<void> {
+    await this.#page.click(selector, { timeout: options.timeoutMs });
   }
 
-  async waitForSelector(selector: string, options: { timeoutMs?: number } = {}): Promise<boolean> {
+  async waitForSelector(selector: string, options: PortalSelectorOptions = {}): Promise<boolean> {
     try {
       const found = await this.#page.waitForSelector(selector, { timeout: options.timeoutMs });
       return found !== null;
@@ -262,75 +309,30 @@ class PlaywrightPageAdapter implements PortalBrowserPage {
   }
 
   /**
-   * Downloads with Node's streaming `fetch` rather than Playwright's request
-   * API, which buffers the whole body before exposing it. Each hop carries the
-   * browser session's cookies for that URL, follows redirects one at a time so
-   * every target is re-evaluated by the guard, and stops reading the body the
-   * moment it crosses the byte cap.
+   * Fetches inside the page so the portal sees the browser's own cookies, IP,
+   * and TLS fingerprint (with Browserbase the browser is remote), and streams
+   * the body in the browser so no more than `maxBytes` is ever buffered. The
+   * first hop passes through the route guard; later redirect hops are
+   * reported to it as request events and the runner re-checks the final URL.
    */
   async requestBytes(
     url: string,
     options: PortalDownloadRequestOptions,
   ): Promise<PortalDownloadResponse> {
-    let currentUrl = url;
-    let redirectsFollowed = 0;
-    while (true) {
-      const response = await fetch(currentUrl, {
-        method: "GET",
-        headers: await this.downloadHeaders(currentUrl, options.expectedMimeType),
-        redirect: "manual",
-        signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS),
-      });
-      const status = response.status;
-      if (isRedirectStatus(status)) {
-        await response.body?.cancel();
-        if (redirectsFollowed >= options.maxRedirects) {
-          throw new Error(`download exceeded ${options.maxRedirects} redirects`);
-        }
-        const location = response.headers.get("location");
-        if (location === null) {
-          throw new Error(`download redirect ${status} missing Location header`);
-        }
-        const nextUrl = resolveUrl(location, currentUrl);
-        if (!options.onRedirect(nextUrl)) {
-          throw new Error("download redirect blocked by portal network policy");
-        }
-        currentUrl = nextUrl;
-        redirectsFollowed += 1;
-        continue;
-      }
-
-      const mimeType = response.headers.get("content-type") ?? "application/octet-stream";
-      if (!isSuccessfulStatus(status)) {
-        await response.body?.cancel();
-        throw new Error(`download failed with status ${status}`);
-      }
-      if (!isExpectedMimeType(mimeType, options.expectedMimeType)) {
-        await response.body?.cancel();
-        throw new Error(
-          `download returned unexpected content type ${mimeType}; expected ${options.expectedMimeType}`,
-        );
-      }
-      const contentLength = parseContentLength(response.headers.get("content-length"));
-      if (contentLength !== undefined && contentLength > options.maxBytes) {
-        await response.body?.cancel();
-        throw new Error(`download exceeds ${options.maxBytes} byte limit`);
-      }
-      const bytes = await readBodyWithLimit(response.body, options.maxBytes);
-      return { bytes, mimeType, finalUrl: currentUrl, status };
+    const result = await this.#page.evaluate(fetchBoundedInPage, {
+      url,
+      accept: `${options.expectedMimeType}, */*;q=0.1`,
+      maxBytes: options.maxBytes,
+    });
+    if (result.truncated) {
+      throw new DownloadTooLargeError(options.maxBytes);
     }
-  }
-
-  private async downloadHeaders(
-    url: string,
-    expectedMimeType: string,
-  ): Promise<Record<string, string>> {
-    const headers: Record<string, string> = { accept: `${expectedMimeType}, */*;q=0.1` };
-    const cookies = await this.#context.cookies([url]);
-    if (cookies.length > 0) {
-      headers["cookie"] = cookies.map((cookie) => `${cookie.name}=${cookie.value}`).join("; ");
-    }
-    return headers;
+    return {
+      bytes: new Uint8Array(Buffer.from(result.base64, "base64")),
+      mimeType: result.mimeType,
+      finalUrl: result.finalUrl,
+      status: result.status,
+    };
   }
 
   async screenshot(): Promise<Uint8Array> {
@@ -340,6 +342,73 @@ class PlaywrightPageAdapter implements PortalBrowserPage {
   url(): string {
     return this.#page.url();
   }
+}
+
+interface InPageDownloadInput {
+  url: string;
+  accept: string;
+  maxBytes: number;
+}
+
+interface InPageDownloadResult {
+  status: number;
+  mimeType: string;
+  finalUrl: string;
+  base64: string;
+  truncated: boolean;
+}
+
+/**
+ * Runs inside the browser page (serialized by Playwright), so it must stay
+ * self-contained: no references to module scope.
+ */
+async function fetchBoundedInPage(input: InPageDownloadInput): Promise<InPageDownloadResult> {
+  const response = await fetch(input.url, {
+    credentials: "include",
+    headers: { accept: input.accept },
+    redirect: "follow",
+  });
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  const reader = response.body?.getReader();
+  if (reader !== undefined) {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) {
+        break;
+      }
+      total += value.byteLength;
+      if (total > input.maxBytes) {
+        await reader.cancel();
+        return {
+          status: response.status,
+          mimeType: response.headers.get("content-type") ?? "",
+          finalUrl: response.url,
+          base64: "",
+          truncated: true,
+        };
+      }
+      chunks.push(value);
+    }
+  }
+  const merged = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    merged.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  let binary = "";
+  const sliceSize = 0x8000;
+  for (let index = 0; index < merged.length; index += sliceSize) {
+    binary += String.fromCharCode(...merged.subarray(index, index + sliceSize));
+  }
+  return {
+    status: response.status,
+    mimeType: response.headers.get("content-type") ?? "",
+    finalUrl: response.url,
+    base64: btoa(binary),
+    truncated: false,
+  };
 }
 
 function matchEveryUrl(): boolean {

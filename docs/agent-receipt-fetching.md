@@ -27,20 +27,42 @@ Allow a user to provide credentials or an authenticated browser session so Sona 
 - Never let the agent buy, cancel, transfer, or change account settings.
 - Keep automation read-only by policy.
 
-## Browserbase / remote browser plan
-
-Initial cloud path:
+## Runner architecture
 
 ```text
-Sona worker
-  → browser task runner
-  → Browserbase/Playwright session
-  → portal login or saved session
-  → receipt discovery
-  → PDF/download capture
-  → document vault
+Sona worker (portal_fetch job: lease, cooldown, run history)
+  → PortalTaskRunner
+      LocalPlaywrightPortalTaskRunner   self-hosted Chromium via Playwright
+      BrowserbasePortalTaskRunner       managed remote browser over CDP
+  → versioned task definition (schema-validated, read-only policy)
+  → network guard on the browser context
+  → portal login → discovery → in-page PDF download
+  → DocumentStorage (hash dedup) + run provenance
   → extraction + reconciliation
 ```
+
+`@sona/agents` ships both runners behind one `PortalTaskRunner` interface;
+`playwright` is an optional peer dependency and only loaded when a runner is
+instantiated without an injected browser provider. Each run:
+
+- re-validates the task and re-checks the read-only action policy before any
+  browser launches, and refuses tasks without executable steps;
+- only fills credentials when the connection is bound to the digest of the
+  exact reviewed task revision (domains and steps included);
+- installs a network guard on the browser context that aborts off-allowlist
+  and cleartext requests, every WebSocket handshake, and any non-idempotent
+  request that is not an exact-URL, reviewed-body-field POST exception;
+- reports redirect hops the browser follows on its own to the guard, records
+  an escape as blocked, and aborts every further request in that session;
+- downloads inside the authenticated page with a hard byte cap, then checks
+  final URL, status, media type, and a document signature before storing;
+- redacts credentials, provider secrets, and query strings from errors,
+  provenance, and stored metadata, and never returns document bytes.
+
+The worker job leases a job id before launching, records every run result in
+the run history before settling the lease, retries only transient failures,
+and treats `policy_refused`, `selector_missing`, and `blocked` as terminal.
+The real-browser fixture suite runs in CI (`pnpm test:portal-browser`).
 
 ## Codex subscription preference
 

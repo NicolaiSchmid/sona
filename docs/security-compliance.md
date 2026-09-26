@@ -123,6 +123,23 @@ Browser tasks may expose account pages and credentials. Controls:
 - explicit user consent per portal connection,
 - run history visible to the user.
 
+Implemented controls and their known limits:
+
+- Credentials are only filled into the task revision the connection was
+  approved for (bound by content digest), never into a same-id rewrite.
+- The network guard runs on the browser context and refuses off-allowlist,
+  cleartext, WebSocket, and unreviewed non-idempotent traffic before it leaves
+  the browser. Redirect hops the browser follows on its own can be observed
+  but not aborted; an escaping hop marks the run `blocked` and aborts every
+  further request in that session.
+- Domain allowlists are hostname-based. They do not protect against DNS
+  rebinding or portals resolving to private addresses, so browsers and
+  workers must run in an egress-isolated network with no route to internal
+  services, in hosted and self-hosted deployments alike.
+- Downloads are bounded in size and validated (status, media type, document
+  signature) before they become evidence; run results carry references, not
+  document bytes.
+
 ## Early launch posture
 
 For early friend users:
