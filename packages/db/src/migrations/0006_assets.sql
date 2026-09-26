@@ -44,8 +44,9 @@ CREATE TABLE IF NOT EXISTS asset_components (
   FOREIGN KEY (workspace_id, asset_id) REFERENCES assets(workspace_id, id)
 );
 
--- Append-only history: improvements (nachträgliche Herstellungskosten) and
--- disposals. Rows are never updated; corrections append new events. An
+-- Append-only history: improvements (nachträgliche Herstellungskosten),
+-- disposals, and retractions. Rows are never updated; a wrong event is
+-- retracted by a later `retraction` row and a corrected event appended. An
 -- improvement's component must belong to the same asset.
 CREATE TABLE IF NOT EXISTS asset_events (
   id                          TEXT PRIMARY KEY,
@@ -53,6 +54,7 @@ CREATE TABLE IF NOT EXISTS asset_events (
   asset_id                    TEXT NOT NULL,
   kind                        TEXT NOT NULL,
   component_id                TEXT,
+  retracts_event_id           TEXT,
   occurred_on                 TEXT NOT NULL,
   description                 TEXT NOT NULL,
   amount                      TEXT,
@@ -62,7 +64,8 @@ CREATE TABLE IF NOT EXISTS asset_events (
   UNIQUE (workspace_id, id),
   FOREIGN KEY (workspace_id, asset_id) REFERENCES assets(workspace_id, id),
   FOREIGN KEY (workspace_id, asset_id, component_id)
-    REFERENCES asset_components(workspace_id, asset_id, id)
+    REFERENCES asset_components(workspace_id, asset_id, id),
+  FOREIGN KEY (workspace_id, retracts_event_id) REFERENCES asset_events(workspace_id, id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_asset_events_asset
@@ -84,6 +87,7 @@ CREATE TABLE IF NOT EXISTS asset_depreciation_schedules (
   accumulated_depreciation_account  TEXT NOT NULL,
   created_at                        TEXT NOT NULL,
   UNIQUE (workspace_id, id),
+  UNIQUE (workspace_id, asset_id, id),
   UNIQUE (workspace_id, asset_id, version),
   FOREIGN KEY (workspace_id, asset_id) REFERENCES assets(workspace_id, id)
 );
@@ -108,7 +112,9 @@ CREATE TABLE IF NOT EXISTS asset_depreciation_entries (
   UNIQUE (workspace_id, id),
   UNIQUE (workspace_id, transaction_id),
   FOREIGN KEY (workspace_id, asset_id) REFERENCES assets(workspace_id, id),
-  FOREIGN KEY (workspace_id, config_id) REFERENCES asset_depreciation_schedules(workspace_id, id)
+  -- The config must belong to the same asset as the entry.
+  FOREIGN KEY (workspace_id, asset_id, config_id)
+    REFERENCES asset_depreciation_schedules(workspace_id, asset_id, id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_asset_depreciation_entries_year

@@ -67,9 +67,31 @@ export interface AcquisitionCostAllocation {
 }
 
 /**
+ * Splits `total` across `weights` proportionally using the largest-remainder
+ * method: every share is floored at unit precision and the leftover units go
+ * to the largest fractional remainders (ties by position). Shares are never
+ * negative and always sum to `total` exactly.
+ */
+function allocateProportionally(total: bigint, weights: readonly bigint[]): bigint[] {
+  const weightSum = weights.reduce((sum, w) => sum + w, 0n);
+  const shares = weights.map((w) => (total * w) / weightSum);
+  const remainders = weights.map((w, i) => ({ i, r: (total * w) % weightSum }));
+  let leftover = total - shares.reduce((sum, s) => sum + s, 0n);
+  remainders.sort((a, b) => (a.r === b.r ? a.i - b.i : a.r > b.r ? -1 : 1));
+  for (const { i } of remainders) {
+    if (leftover <= 0n) {
+      break;
+    }
+    shares[i] = (shares[i] ?? 0n) + 1n;
+    leftover -= 1n;
+  }
+  return shares;
+}
+
+/**
  * Splits acquisition side costs across components proportional to their cost
- * share. Each component's share is rounded at `scale`; the last component
- * absorbs the remainder so the allocated total equals the side costs exactly.
+ * share (largest-remainder rounding at `scale`), so the allocated total equals
+ * the side costs exactly and no component receives a negative share.
  */
 export function allocateAcquisitionCosts(
   asset: Asset,
@@ -83,16 +105,12 @@ export function allocateAcquisitionCosts(
   const sideCosts = asset.acquisitionSideCosts
     .map((s) => scaled(s.amount.amount, scale, `Side cost ${s.id}`))
     .reduce((sum, s) => sum + s, 0n);
+  const shares = allocateProportionally(sideCosts, costs);
 
-  let allocated = 0n;
   let depreciableBasis = 0n;
   const components: ComponentCostAllocation[] = asset.components.map((component, index) => {
     const cost = costs[index] ?? 0n;
-    const isLast = index === asset.components.length - 1;
-    const share = isLast
-      ? sideCosts - allocated
-      : divideRoundHalfAwayFromZero(sideCosts * cost, purchasePrice);
-    allocated += share;
+    const share = shares[index] ?? 0n;
     const total = cost + share;
     if (component.depreciable) {
       depreciableBasis += total;
@@ -148,12 +166,19 @@ export interface DepreciationScheduleRow {
   accumulatedDepreciation: string;
   notes: DepreciationRowNote[];
   /**
-   * Improvement events applied so far. Their evidence carries onto the row;
-   * only improvements to depreciable components raise the basis.
+   * Events applied so far (improvements, and the disposal in the disposal
+   * year). Their evidence carries onto the row; only improvements to
+   * depreciable components raise the basis.
    */
   appliedEventIds: string[];
-  /** Acquisition, side-cost, and applied-improvement documents substantiating this row. */
+  /** Acquisition, side-cost, and applied-event documents substantiating this row. */
   evidenceDocumentIds: string[];
+  /**
+   * Contributors to this row that have no evidence document at all, as
+   * `asset:<id>`, `side_cost:<id>`, or `event:<id>`. Empty when every cost
+   * feeding the row is substantiated.
+   */
+  missingEvidenceFor: string[];
 }
 
 export interface DepreciationSchedule {
@@ -233,6 +258,32 @@ interface ValidatedEvents {
   disposal: ValidatedDisposal | undefined;
 }
 
+/**
+ * Resolves retractions: returns the ids of events a retraction points at,
+ * validating that each target exists on this asset and is not itself a
+ * retraction.
+ */
+function retractedEventIds(asset: Asset, events: readonly AssetEvent[]): Set<string> {
+  const byId = new Map(events.map((e) => [e.id, e] as const));
+  const retracted = new Set<string>();
+  for (const event of events) {
+    if (event.kind !== "retraction") {
+      continue;
+    }
+    const target = byId.get(event.retractsEventId);
+    if (target === undefined || target.assetId !== asset.id) {
+      throw new DepreciationError(
+        `Retraction ${event.id} references unknown event ${event.retractsEventId}`,
+      );
+    }
+    if (target.kind === "retraction") {
+      throw new DepreciationError(`Retraction ${event.id} cannot retract another retraction`);
+    }
+    retracted.add(target.id);
+  }
+  return retracted;
+}
+
 function validateEvents(
   asset: Asset,
   events: readonly AssetEvent[],
@@ -245,6 +296,13 @@ function validateEvents(
   for (const event of events) {
     if (event.assetId !== asset.id || event.workspaceId !== asset.workspaceId) {
       throw new DepreciationError(`Event ${event.id} does not belong to asset ${asset.id}`);
+    }
+  }
+  const retracted = retractedEventIds(asset, events);
+
+  for (const event of events) {
+    if (event.kind === "retraction" || retracted.has(event.id)) {
+      continue;
     }
     const on = parseYearMonth(event.occurredOn, `Event ${event.id} occurredOn`);
     if (isBefore(on, acquired)) {
@@ -332,11 +390,25 @@ export function computeDepreciationSchedule(
     ...asset.evidenceDocumentIds,
     ...asset.acquisitionSideCosts.flatMap((s) => s.evidenceDocumentIds),
   ]);
+  const baseMissing = [
+    ...(asset.evidenceDocumentIds.length === 0 ? [`asset:${asset.id}`] : []),
+    ...asset.acquisitionSideCosts
+      .filter((s) => s.evidenceDocumentIds.length === 0)
+      .map((s) => `side_cost:${s.id}`),
+  ];
   const lastImprovementYear = Math.max(acquired.year - 1, ...improvementsByYear.keys());
 
   const rows: DepreciationScheduleRow[] = [];
   const appliedEventIds: string[] = [];
   const appliedEvidence: string[] = [];
+  const appliedMissing: string[] = [];
+  const applyEvent = (event: AssetImprovementEvent | AssetDisposalEvent): void => {
+    appliedEventIds.push(event.id);
+    appliedEvidence.push(...event.evidenceDocumentIds);
+    if (event.evidenceDocumentIds.length === 0) {
+      appliedMissing.push(`event:${event.id}`);
+    }
+  };
   let basis = acquisitionBasis;
   let accumulated = 0n;
   let monthsElapsed = 0;
@@ -351,8 +423,7 @@ export function computeDepreciationSchedule(
     const exhaustedBefore = rows.length > 0 && basis - residual - accumulated <= 0n;
     const improvements = improvementsByYear.get(year) ?? [];
     for (const improvement of improvements) {
-      appliedEventIds.push(improvement.id);
-      appliedEvidence.push(...improvement.evidenceDocumentIds);
+      applyEvent(improvement);
       if (depreciableComponentIds.has(improvement.componentId)) {
         basis += requireMoneyInCommodity(
           improvement.amount,
@@ -365,6 +436,9 @@ export function computeDepreciationSchedule(
 
     const remaining = basis - residual - accumulated;
     const isDisposalYear = disposal?.on.year === year;
+    if (isDisposalYear && disposal !== undefined) {
+      applyEvent(disposal.event);
+    }
     if (remaining <= 0n) {
       if (isDisposalYear || year >= lastImprovementYear) {
         break;
@@ -416,6 +490,7 @@ export function computeDepreciationSchedule(
       notes,
       appliedEventIds: [...appliedEventIds],
       evidenceDocumentIds: unique([...baseEvidence, ...appliedEvidence]),
+      missingEvidenceFor: [...baseMissing, ...appliedMissing],
     });
     accumulated += amount;
     monthsElapsed += months;

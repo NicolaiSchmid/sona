@@ -165,13 +165,33 @@ export const assetDisposalEventSchema = z.object({
   createdAt: z.string().datetime({ offset: true }),
 });
 
+/**
+ * Correction path for the append-only history: retracts an earlier
+ * improvement or disposal so schedules ignore it. A corrected event is then
+ * appended as a new improvement/disposal. Retractions cannot be retracted.
+ */
+export const assetRetractionEventSchema = z.object({
+  kind: z.literal("retraction"),
+  id: z.string().min(1),
+  workspaceId: z.string().min(1),
+  assetId: z.string().min(1),
+  /** Id of the improvement or disposal event being retracted. */
+  retractsEventId: z.string().min(1),
+  occurredOn: isoDateSchema,
+  description: z.string().min(1),
+  evidenceDocumentIds: z.array(z.string().min(1)),
+  createdAt: z.string().datetime({ offset: true }),
+});
+
 export const assetEventSchema = z.discriminatedUnion("kind", [
   assetImprovementEventSchema,
   assetDisposalEventSchema,
+  assetRetractionEventSchema,
 ]);
 
 export type AssetImprovementEvent = z.infer<typeof assetImprovementEventSchema>;
 export type AssetDisposalEvent = z.infer<typeof assetDisposalEventSchema>;
+export type AssetRetractionEvent = z.infer<typeof assetRetractionEventSchema>;
 export type AssetEvent = z.infer<typeof assetEventSchema>;
 export type AssetEventKind = AssetEvent["kind"];
 
@@ -207,28 +227,33 @@ export type DepreciationMethod = z.infer<typeof depreciationMethodSchema>;
  * whenever the user changes the configuration; already-generated rows keep
  * pointing at the version that produced them.
  */
-export const depreciationScheduleConfigSchema = z.object({
-  id: z.string().min(1),
-  workspaceId: z.string().min(1),
-  assetId: z.string().min(1),
-  version: z.number().int().positive(),
-  method: depreciationMethodSchema,
-  /**
-   * Pro rata temporis: the acquisition year (and a disposal year) is
-   * depreciated by months in service, counting the acquisition and disposal
-   * months as full months. When false, every year takes the full annual amount.
-   */
-  proRataTemporis: z.boolean(),
-  /** Book value the schedule never depreciates below. Defaults to zero. */
-  residualValue: nonNegativeMoneySchema.optional(),
-  /** Fractional digits amounts are rounded to. Defaults to 2. */
-  roundingScale: z.number().int().min(0).max(6).optional(),
-  /** Ledger account debited each year, e.g. "Expenses:RealEstate:Depreciation:Musterstr 1". */
-  expenseAccount: z.string().min(1),
-  /** Contra-asset account credited each year, e.g. "Assets:RealEstate:Musterstr 1:AccumulatedDepreciation". */
-  accumulatedDepreciationAccount: z.string().min(1),
-  createdAt: z.string().datetime({ offset: true }),
-});
+export const depreciationScheduleConfigSchema = z
+  .object({
+    id: z.string().min(1),
+    workspaceId: z.string().min(1),
+    assetId: z.string().min(1),
+    version: z.number().int().positive(),
+    method: depreciationMethodSchema,
+    /**
+     * Pro rata temporis: the acquisition year (and a disposal year) is
+     * depreciated by months in service, counting the acquisition and disposal
+     * months as full months. When false, every year takes the full annual amount.
+     */
+    proRataTemporis: z.boolean(),
+    /** Book value the schedule never depreciates below. Defaults to zero. */
+    residualValue: nonNegativeMoneySchema.optional(),
+    /** Fractional digits amounts are rounded to. Defaults to 2. */
+    roundingScale: z.number().int().min(0).max(6).optional(),
+    /** Ledger account debited each year, e.g. "Expenses:RealEstate:Depreciation:Musterstr 1". */
+    expenseAccount: z.string().min(1),
+    /** Contra-asset account credited each year, e.g. "Assets:RealEstate:Musterstr 1:AccumulatedDepreciation". */
+    accumulatedDepreciationAccount: z.string().min(1),
+    createdAt: z.string().datetime({ offset: true }),
+  })
+  .refine((config) => config.expenseAccount !== config.accumulatedDepreciationAccount, {
+    message: "expense and accumulated depreciation accounts must differ",
+    path: ["accumulatedDepreciationAccount"],
+  });
 
 export type DepreciationScheduleConfig = z.infer<typeof depreciationScheduleConfigSchema>;
 

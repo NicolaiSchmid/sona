@@ -90,12 +90,47 @@ describe("allocateAcquisitionCosts", () => {
       ],
     };
     const allocation = allocateAcquisitionCosts(asset);
+    // Largest remainder: equal remainders, so the leftover cent goes to the first component.
     expect(allocation.components.map((c) => c.allocatedSideCosts)).toEqual([
-      "0.33",
-      "0.33",
       "0.34",
+      "0.33",
+      "0.33",
     ]);
     expect(sumDecimals(allocation.components.map((c) => c.allocatedSideCosts))).toBe("1.00");
+  });
+
+  it("never assigns a negative side-cost share when rounding overshoots", () => {
+    const asset: Asset = {
+      ...SAMPLE_PROPERTY,
+      components: [
+        { ...componentOf(SAMPLE_PROPERTY, 0), cost: { amount: "0.01", commodity: "EUR" } },
+        { ...componentOf(SAMPLE_PROPERTY, 1), cost: { amount: "0.01", commodity: "EUR" } },
+        {
+          id: "cmp_zero",
+          role: "other",
+          label: "Zero-cost",
+          cost: { amount: "0.00", commodity: "EUR" },
+          depreciable: true,
+        },
+      ],
+      acquisitionSideCosts: [
+        {
+          id: "sc",
+          label: "Fee",
+          amount: { amount: "0.01", commodity: "EUR" },
+          evidenceDocumentIds: [],
+        },
+      ],
+    };
+    const allocation = allocateAcquisitionCosts(asset);
+    expect(allocation.components.map((c) => c.allocatedSideCosts)).toEqual([
+      "0.01",
+      "0.00",
+      "0.00",
+    ]);
+    for (const component of allocation.components) {
+      expect(component.allocatedSideCosts.startsWith("-")).toBe(false);
+    }
   });
 
   it("rejects an asset without any positive component cost", () => {
@@ -152,7 +187,33 @@ describe("computeDepreciationSchedule — linear percentage", () => {
         "doc_transfer_tax",
         "doc_notary",
       ]);
+      expect(row.missingEvidenceFor).toEqual([]);
     }
+  });
+
+  it("names every contributor that lacks evidence, even when others have some", () => {
+    const s = computeDepreciationSchedule({
+      asset: {
+        ...SAMPLE_PROPERTY,
+        evidenceDocumentIds: [],
+        // Strip evidence from the transfer-tax side cost only; the notary keeps its invoice.
+        acquisitionSideCosts: SAMPLE_PROPERTY.acquisitionSideCosts.map((sideCost) =>
+          sideCost.id === "sc_transfer_tax" ? { ...sideCost, evidenceDocumentIds: [] } : sideCost,
+        ),
+      },
+      config: SAMPLE_PROPERTY_CONFIG,
+      events: [{ ...SAMPLE_IMPROVEMENT, evidenceDocumentIds: [] }],
+    });
+    expect(rowFor(s, 2025).evidenceDocumentIds).toEqual(["doc_notary"]);
+    expect(rowFor(s, 2025).missingEvidenceFor).toEqual([
+      "asset:asset_flat",
+      "side_cost:sc_transfer_tax",
+    ]);
+    expect(rowFor(s, 2026).missingEvidenceFor).toEqual([
+      "asset:asset_flat",
+      "side_cost:sc_transfer_tax",
+      "event:evt_bath_2026",
+    ]);
   });
 
   it("records the configuration version it was computed from", () => {
@@ -375,6 +436,11 @@ describe("computeDepreciationSchedule — disposal", () => {
     expect(s.complete).toBe(true);
     // Remaining book value is left for an explicit disposal posting, not depreciated away.
     expect(last.closingBookValue).toBe("299980.00");
+    // The disposal event and its evidence are part of the disposal-year row's provenance.
+    expect(last.appliedEventIds).toEqual(["evt_sale_2027"]);
+    expect(last.evidenceDocumentIds).toContain("doc_sale_contract");
+    expect(rowFor(s, 2026).appliedEventIds).toEqual([]);
+    expect(rowFor(s, 2026).evidenceDocumentIds).not.toContain("doc_sale_contract");
   });
 
   it("counts acquisition through disposal month when both fall in one year", () => {
@@ -403,6 +469,82 @@ describe("computeDepreciationSchedule — disposal", () => {
         events: [SAMPLE_DISPOSAL, { ...SAMPLE_IMPROVEMENT, occurredOn: "2028-01-01" }],
       }),
     ).toThrow(/after disposal/);
+  });
+});
+
+describe("computeDepreciationSchedule — retractions", () => {
+  const retraction = {
+    kind: "retraction" as const,
+    id: "evt_retract_bath",
+    workspaceId: "ws_1",
+    assetId: "asset_flat",
+    retractsEventId: "evt_bath_2026",
+    occurredOn: "2026-09-01",
+    description: "Booked as maintenance instead",
+    evidenceDocumentIds: [],
+    createdAt: "2026-09-01T00:00:00Z",
+  };
+
+  it("ignores a retracted improvement so the schedule matches one without it", () => {
+    const without = computeDepreciationSchedule({
+      asset: SAMPLE_PROPERTY,
+      config: SAMPLE_PROPERTY_CONFIG,
+    });
+    const retracted = computeDepreciationSchedule({
+      asset: SAMPLE_PROPERTY,
+      config: SAMPLE_PROPERTY_CONFIG,
+      events: [SAMPLE_IMPROVEMENT, retraction],
+    });
+    expect(retracted.rows).toEqual(without.rows);
+  });
+
+  it("lets a corrected event follow a retraction", () => {
+    const corrected = computeDepreciationSchedule({
+      asset: SAMPLE_PROPERTY,
+      config: SAMPLE_PROPERTY_CONFIG,
+      events: [
+        SAMPLE_IMPROVEMENT,
+        retraction,
+        {
+          ...SAMPLE_IMPROVEMENT,
+          id: "evt_bath_fixed",
+          amount: { amount: "20000.00", commodity: "EUR" },
+        },
+      ],
+    });
+    expect(rowFor(corrected, 2026).depreciableBasis).toBe("338000.00");
+    expect(rowFor(corrected, 2026).appliedEventIds).toEqual(["evt_bath_fixed"]);
+  });
+
+  it("lets a retracted disposal be replaced and rejects dangling or nested retractions", () => {
+    const replaced = computeDepreciationSchedule({
+      asset: SAMPLE_PROPERTY,
+      config: SAMPLE_PROPERTY_CONFIG,
+      events: [
+        SAMPLE_DISPOSAL,
+        { ...retraction, id: "evt_retract_sale", retractsEventId: "evt_sale_2027" },
+        { ...SAMPLE_DISPOSAL, id: "evt_sale_2028", occurredOn: "2028-01-31" },
+      ],
+    });
+    expect(replaced.disposedOn).toBe("2028-01-31");
+    expect(() =>
+      computeDepreciationSchedule({
+        asset: SAMPLE_PROPERTY,
+        config: SAMPLE_PROPERTY_CONFIG,
+        events: [{ ...retraction, retractsEventId: "evt_missing" }],
+      }),
+    ).toThrow(/unknown event/);
+    expect(() =>
+      computeDepreciationSchedule({
+        asset: SAMPLE_PROPERTY,
+        config: SAMPLE_PROPERTY_CONFIG,
+        events: [
+          SAMPLE_IMPROVEMENT,
+          retraction,
+          { ...retraction, id: "evt_nested", retractsEventId: "evt_retract_bath" },
+        ],
+      }),
+    ).toThrow(/cannot retract another retraction/);
   });
 });
 

@@ -84,6 +84,15 @@ describe("depreciationScheduleConfigSchema", () => {
     expect(parse("3.33333")).toBe(false);
   });
 
+  it("rejects identical expense and accumulated depreciation accounts", () => {
+    expect(
+      depreciationScheduleConfigSchema.safeParse({
+        ...SAMPLE_PROPERTY_CONFIG,
+        accumulatedDepreciationAccount: SAMPLE_PROPERTY_CONFIG.expenseAccount,
+      }).success,
+    ).toBe(false);
+  });
+
   it("requires positive versions and account paths", () => {
     expect(
       depreciationScheduleConfigSchema.safeParse({ ...SAMPLE_PROPERTY_CONFIG, version: 0 }).success,

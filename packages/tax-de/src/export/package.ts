@@ -102,13 +102,51 @@ function taxCategoriesCsv(lines: readonly TaxExportLine[]): string {
   );
 }
 
-function evidenceLinksJson(lines: readonly TaxExportLine[]): string {
-  const links = lines
-    .filter((l) => l.evidenceDocumentIds.length > 0)
-    .map((l) => ({
+/**
+ * Evidence-bearing records of the package: ledger export lines plus
+ * depreciation schedule rows (which reference contracts and improvement
+ * invoices even when no ledger line does yet).
+ */
+interface EvidenceBearing {
+  postingId: string;
+  transactionId: string;
+  account: string;
+  sectionId: string;
+  documentIds: string[];
+}
+
+function evidenceBearing(
+  lines: readonly TaxExportLine[],
+  depreciationRows: readonly DepreciationExportRow[],
+): EvidenceBearing[] {
+  return [
+    ...lines.map((l) => ({
       postingId: l.sourcePostingId,
       transactionId: l.sourceTransactionId,
+      account: l.account,
+      sectionId: l.sectionId,
       documentIds: l.evidenceDocumentIds,
+    })),
+    ...depreciationRows.map((r) => {
+      const reference = `schedule:${r.configId}:${r.year}`;
+      return {
+        postingId: r.postingIds[0] ?? reference,
+        transactionId: r.transactionId ?? reference,
+        account: `asset:${r.assetId}`,
+        sectionId: "depreciation",
+        documentIds: r.evidenceDocumentIds,
+      };
+    }),
+  ];
+}
+
+function evidenceLinksJson(records: readonly EvidenceBearing[]): string {
+  const links = records
+    .filter((r) => r.documentIds.length > 0)
+    .map((r) => ({
+      postingId: r.postingId,
+      transactionId: r.transactionId,
+      documentIds: r.documentIds,
     }));
   return JSON.stringify(links, null, 2);
 }
@@ -162,11 +200,11 @@ function depreciationSchedulesCsv(rows: readonly DepreciationExportRow[]): strin
   );
 }
 
-function receiptManifestCsv(lines: readonly TaxExportLine[]): string {
+function receiptManifestCsv(records: readonly EvidenceBearing[]): string {
   const rows: string[][] = [];
-  for (const line of lines) {
-    for (const documentId of line.evidenceDocumentIds) {
-      rows.push([documentId, line.sourcePostingId, line.account, line.sectionId]);
+  for (const record of records) {
+    for (const documentId of record.documentIds) {
+      rows.push([documentId, record.postingId, record.account, record.sectionId]);
     }
   }
   return csv(["documentId", "postingId", "account", "section"], rows);
@@ -230,6 +268,7 @@ export function generateExportPackage(input: GeneratePackageInput): TaxExportPac
     ...postingMissing,
     ...depreciation.missingEvidence.filter((m) => !reportedPostingIds.has(m.postingId)),
   ];
+  const evidence = evidenceBearing(lines, depreciation.rows);
 
   const files: ExportFile[] = [
     {
@@ -252,8 +291,8 @@ export function generateExportPackage(input: GeneratePackageInput): TaxExportPac
         ]),
       ),
     },
-    { path: "receipt-manifest.csv", content: receiptManifestCsv(lines) },
-    { path: "evidence-links.json", content: evidenceLinksJson(lines) },
+    { path: "receipt-manifest.csv", content: receiptManifestCsv(evidence) },
+    { path: "evidence-links.json", content: evidenceLinksJson(evidence) },
     { path: "depreciation-schedules.csv", content: depreciationSchedulesCsv(depreciation.rows) },
   ];
 
