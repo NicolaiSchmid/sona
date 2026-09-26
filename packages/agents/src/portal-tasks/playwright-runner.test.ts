@@ -172,7 +172,7 @@ describe("LocalPlaywrightPortalTaskRunner", () => {
 
   it("converts selector timeout errors to selector_missing", async () => {
     const page = new FixturePortalPage({
-      timeoutSelectors: new Set(["[data-testid='invoice-list']"]),
+      waitTimeoutSelectors: new Set(["[data-testid='invoice-list']"]),
     });
     const runner = await makeRunner({ page });
 
@@ -238,15 +238,46 @@ describe("LocalPlaywrightPortalTaskRunner", () => {
     expect(provider.sessionCount).toBe(0);
   });
 
-  it("reports a fill or click that times out as selector_missing", async () => {
-    const page = new FixturePortalPage({ timeoutSelectors: new Set(["#email"]) });
+  it("reports a fill target that never appears as selector_missing", async () => {
+    const page = new FixturePortalPage({ missingSelectors: new Set(["#email"]) });
     const runner = await makeRunner({ page });
 
     const result = await runner.runTask(input());
 
     expect(result.status).toBe("selector_missing");
     expect(result.errors).toEqual(["selector_missing: #email"]);
-    expect(page.waitCounts.size).toBe(0);
+    expect(page.waitCounts.get("#email")).toBe(1);
+    expect(page.waitCounts.has("[data-testid='invoice-list']")).toBe(false);
+  });
+
+  it("keeps an action that times out on a present element as a retryable failure", async () => {
+    const page = new FixturePortalPage({ timeoutSelectors: new Set(["#email"]) });
+    const runner = await makeRunner({ page });
+
+    const result = await runner.runTask(input());
+
+    expect(result.status).toBe("failed");
+    expect(result.errors).toEqual(["Timeout 15000ms exceeded"]);
+  });
+
+  it("refuses to load credentials for a browser provider the connection was not approved for", async () => {
+    const secretStore = new CountingSecretStore();
+    const provider = new FixtureBrowserProvider({ page: new FixturePortalPage() });
+    const runner = await makeRunner({
+      page: new FixturePortalPage(),
+      provider,
+      secretStore,
+      approvedBrowserProvider: "browserbase",
+    });
+
+    const result = await runner.runTask(input());
+
+    expect(result.status).toBe("failed");
+    expect(result.errors).toEqual([
+      'portal connection is approved for browser provider "browserbase", not "local-playwright"',
+    ]);
+    expect(secretStore.getCount).toBe(0);
+    expect(provider.sessionCount).toBe(0);
   });
 
   it("stops as blocked when a click triggers a request the guard refuses", async () => {
@@ -265,7 +296,7 @@ describe("LocalPlaywrightPortalTaskRunner", () => {
         reason: "non_idempotent_method",
       },
     ]);
-    expect(page.waitCounts.size).toBe(0);
+    expect(page.waitCounts.has("[data-testid='invoice-list']")).toBe(false);
     expect(page.requestCount).toBe(0);
   });
 
@@ -567,6 +598,7 @@ describe("LocalPlaywrightPortalTaskRunner", () => {
           workspaceId: "ws_other",
           taskId: task.id,
           taskDigest: portalTaskDigest(task),
+          approvedBrowserProvider: "local-playwright",
           credentialRefs: {},
         };
       },
@@ -701,6 +733,8 @@ interface MakeRunnerInput {
   connectionTaskId?: string;
   /** Task revision the in-memory connection is bound to (default: the synthetic task). */
   connectionTask?: PortalTask;
+  /** Browser provider the in-memory connection was approved for (default: the fixture's). */
+  approvedBrowserProvider?: string;
   /** Overrides the in-memory connection repository entirely. */
   connections?: PortalConnectionRepository;
   closeFailure?: Error;
@@ -726,6 +760,7 @@ async function makeRunner(inputValue: MakeRunnerInput): Promise<LocalPlaywrightP
         workspaceId: context.workspaceId,
         taskId: inputValue.connectionTaskId ?? task.id,
         taskDigest: portalTaskDigest(inputValue.connectionTask ?? task),
+        approvedBrowserProvider: inputValue.approvedBrowserProvider ?? "local-playwright",
         credentialRefs: {
           username: usernameRef,
           password: passwordRef,
@@ -791,7 +826,11 @@ class FixtureBrowserProvider implements PortalBrowserProvider {
 }
 
 interface FixturePortalPageOptions {
+  /** Selectors `waitForSelector` resolves false for. */
   missingSelectors?: ReadonlySet<string>;
+  /** Selectors `waitForSelector` rejects with a timeout error for. */
+  waitTimeoutSelectors?: ReadonlySet<string>;
+  /** Selectors that are present but whose fill/click action times out. */
   timeoutSelectors?: ReadonlySet<string>;
   download?: (url: string, options: PortalDownloadRequestOptions) => PortalDownloadResponse;
   linkCount?: number;
@@ -812,6 +851,7 @@ class FixturePortalPage implements PortalBrowserPage {
   requestCount = 0;
   readonly #linkHrefs: readonly string[] | undefined;
   readonly #missingSelectors: ReadonlySet<string>;
+  readonly #waitTimeoutSelectors: ReadonlySet<string>;
   readonly #timeoutSelectors: ReadonlySet<string>;
   readonly #download:
     | ((url: string, options: PortalDownloadRequestOptions) => PortalDownloadResponse)
@@ -825,6 +865,7 @@ class FixturePortalPage implements PortalBrowserPage {
 
   constructor(options: FixturePortalPageOptions = {}) {
     this.#missingSelectors = options.missingSelectors ?? new Set();
+    this.#waitTimeoutSelectors = options.waitTimeoutSelectors ?? new Set();
     this.#timeoutSelectors = options.timeoutSelectors ?? new Set();
     this.#download = options.download;
     this.#linkCount = options.linkCount ?? 2;
@@ -877,7 +918,7 @@ class FixturePortalPage implements PortalBrowserPage {
 
   async waitForSelector(selector: string): Promise<boolean> {
     this.waitCounts.set(selector, (this.waitCounts.get(selector) ?? 0) + 1);
-    if (this.#timeoutSelectors.has(selector)) {
+    if (this.#waitTimeoutSelectors.has(selector)) {
       throw new Error("Timeout 30000ms exceeded");
     }
     return !this.#missingSelectors.has(selector);

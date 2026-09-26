@@ -28,10 +28,8 @@ export type PortalRequestGuard = (request: PortalRequest) => void | Promise<void
 
 /**
  * A guarded browser session. `guardRequests` must present every request the
- * session can make, including popups and WebSocket handshakes, to the guard
- * before it leaves the browser. Redirect hops a browser follows on its own must
- * still be reported to the guard even when they can no longer be aborted, so
- * the run records the escape and fails.
+ * session can make, including popups, WebSocket handshakes, and every redirect
+ * hop, to the guard before it is sent; a guard that throws aborts the request.
  */
 export interface PortalBrowserSession {
   page: PortalBrowserPage;
@@ -57,10 +55,10 @@ export interface PortalBrowserPage {
   waitForSelector(selector: string, options?: PortalSelectorOptions): Promise<boolean>;
   queryAll(selector: string): Promise<PortalElementHandle[]>;
   /**
-   * Downloads from inside the authenticated page so the portal sees the
-   * browser's cookies, IP, and TLS fingerprint. Implementations must stop
-   * reading once `maxBytes` is exceeded and throw `DownloadTooLargeError`; they
-   * report status, media type, and final URL and leave policy to the runner.
+   * Downloads with the session's cookies. Implementations follow redirects one
+   * hop at a time and consult `onRedirect` before each, stop reading once
+   * `maxBytes` is exceeded (throwing `DownloadTooLargeError`), and report
+   * status, media type, and final URL, leaving acceptance policy to the runner.
    */
   requestBytes(url: string, options: PortalDownloadRequestOptions): Promise<PortalDownloadResponse>;
   screenshot?(): Promise<Uint8Array>;
@@ -70,6 +68,9 @@ export interface PortalBrowserPage {
 export interface PortalDownloadRequestOptions {
   expectedMimeType: string;
   maxBytes: number;
+  maxRedirects: number;
+  /** Returns false to refuse a redirect target; the download then fails. */
+  onRedirect(url: string): boolean;
 }
 
 export interface PortalDownloadResponse {

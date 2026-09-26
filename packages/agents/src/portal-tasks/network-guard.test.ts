@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createNetworkGuard } from "./network-guard.js";
+import { createNetworkGuard, type PortalRequest } from "./network-guard.js";
 import type { PortalTask } from "./schema.js";
 
 const task: PortalTask = {
@@ -227,8 +227,48 @@ describe("createNetworkGuard", () => {
     expect(decision.action).toBe("abort");
     expect(guard.snapshot().blockedRequests[0]).toMatchObject({
       url: "https://portal.test/login/delete-account",
-      reason: "non_idempotent_method",
+      reason: "destructive_url",
     });
+  });
+
+  it("refuses URLs that name a forbidden operation even over GET", () => {
+    const guard = createNetworkGuard({ task });
+    const request = (url: string, resourceType: PortalRequest["resourceType"]) =>
+      guard.evaluateRequest({ url, method: "GET", resourceType });
+
+    expect(request("https://portal.test/cancel-subscription", "document")).toEqual({
+      action: "abort",
+      reason: "destructive_url",
+    });
+    expect(request("https://portal.test/api/cart/remove?id=1", "xhr")).toEqual({
+      action: "abort",
+      reason: "destructive_url",
+    });
+    expect(request("https://portal.test/api/orders?action=refund", "fetch")).toEqual({
+      action: "abort",
+      reason: "destructive_url",
+    });
+    expect(request("https://portal.test/invoices/2026-01.pdf", "document")).toEqual({
+      action: "allow",
+    });
+    expect(request("https://portal.test/img/add.svg", "image")).toEqual({ action: "allow" });
+    expect(request("https://portal.test/js/confirm-dialog.js", "script")).toEqual({
+      action: "allow",
+    });
+  });
+
+  it("redacts identifier-like path segments in recorded request URLs", () => {
+    const guard = createNetworkGuard({ task });
+
+    guard.evaluateRequest({
+      url: "https://tracking.example/u/user%40example.test/t/AbCdEfGhIjKlMnOpQrStUvWxYz0123?sig=x",
+      method: "GET",
+      resourceType: "image",
+    });
+
+    expect(guard.snapshot().blockedRequests[0]?.url).toBe(
+      "https://tracking.example/u/[REDACTED_SEGMENT]/t/[REDACTED_SEGMENT]",
+    );
   });
 });
 

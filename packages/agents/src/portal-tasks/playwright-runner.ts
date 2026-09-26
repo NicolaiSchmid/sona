@@ -31,18 +31,21 @@ import {
   type RunPortalTaskResult,
 } from "./runner.js";
 import { type PortalTaskStep, portalTaskDigest, safeParsePortalTask } from "./schema.js";
-import { redactSensitiveUrlPath, resolveUrl, sanitizeUrl, sanitizeUrlsInText } from "./url.js";
+import { redactSensitiveUrlPath, resolveUrl, sanitizeUrlsInText } from "./url.js";
 
 /**
- * A user's approval to run one reviewed task revision with stored credentials.
- * `taskDigest` pins the exact definition (domains and steps included) so a
- * later revision cannot reuse the credentials without a fresh approval.
+ * A user's approval to run one reviewed task revision with stored credentials
+ * on one execution backend. `taskDigest` pins the exact definition (domains
+ * and steps included) and `approvedBrowserProvider` the provider name the user
+ * consented to (a managed remote browser is a different data processor than a
+ * local one), so neither can change without a fresh approval.
  */
 export interface PortalConnection {
   id: string;
   workspaceId: string;
   taskId: string;
   taskDigest: string;
+  approvedBrowserProvider: string;
   credentialRefs: Readonly<Record<string, SecretRef>>;
 }
 
@@ -84,6 +87,7 @@ export interface LocalPlaywrightPortalTaskRunnerOptions {
 const MAX_DOWNLOAD_DOCUMENTS_PER_RUN = 50;
 const DEFAULT_MAX_DOWNLOAD_BYTES = 10 * 1024 * 1024;
 const DEFAULT_SELECTOR_TIMEOUT_MS = 15_000;
+const MAX_DOWNLOAD_REDIRECTS = 5;
 
 interface ExecutionState {
   input: RunPortalTaskInput;
@@ -175,6 +179,13 @@ export class LocalPlaywrightPortalTaskRunner implements PortalTaskRunner {
         );
         return result;
       }
+      if (connection.approvedBrowserProvider !== this.#browserProvider.providerName) {
+        result.status = "failed";
+        result.errors.push(
+          `portal connection is approved for browser provider "${connection.approvedBrowserProvider}", not "${this.#browserProvider.providerName}"`,
+        );
+        return result;
+      }
 
       const credentials = await this.loadCredentials(context, connection, redactor);
       session = await this.#browserProvider.createSession({ task, runId: input.runId });
@@ -197,7 +208,7 @@ export class LocalPlaywrightPortalTaskRunner implements PortalTaskRunner {
         const decision = guard.evaluateRequest(request);
         if (decision.action === "abort") {
           throw new Error(
-            `blocked request: ${decision.reason} ${request.method} ${sanitizeUrl(request.url) ?? "[unparseable url]"}`,
+            `blocked request: ${decision.reason} ${request.method} ${redactSensitiveUrlPath(request.url) ?? "[unparseable url]"}`,
           );
         }
       });
@@ -314,33 +325,18 @@ async function executeStep(
         state.result.errors.push(`missing credential: ${step.credentialKey}`);
         return "failed";
       }
-      return await selectorStep(state, step.selector, () =>
+      return await selectorStep(state, step.selector, undefined, () =>
         state.session.page.fill(step.selector, value, selectorOptions()),
       );
     }
     case "click":
-      return await selectorStep(state, step.selector, () =>
+      return await selectorStep(state, step.selector, undefined, () =>
         state.session.page.click(step.selector, selectorOptions()),
       );
     case "waitForSelector":
-      return await selectorStep(state, step.selector, async () => {
-        const found = await state.session.page.waitForSelector(
-          step.selector,
-          selectorOptions(step.timeoutMs),
-        );
-        if (!found) {
-          throw new SelectorMissingError(step.selector);
-        }
-      });
+      return await selectorStep(state, step.selector, step.timeoutMs);
     case "downloadLinks":
       return await downloadLinks(state, step);
-  }
-}
-
-class SelectorMissingError extends Error {
-  constructor(selector: string) {
-    super(`selector not found: ${selector}`);
-    this.name = "SelectorMissingError";
   }
 }
 
@@ -351,23 +347,32 @@ function selectorOptions(timeoutMs: number | undefined = DEFAULT_SELECTOR_TIMEOU
 }
 
 /**
- * A missing element is a portal layout change, not a crash: it is reported as
- * `selector_missing` exactly once, with a failure artifact, and never retried.
+ * Waits for the element first so an absent selector is reported as
+ * `selector_missing` (a layout change: terminal, never retried) exactly once
+ * with a failure artifact. An action that then times out on an element that is
+ * present (covered, disabled, unstable) is a transient failure and propagates
+ * as such, so the job stays retryable.
  */
 async function selectorStep(
   state: ExecutionState,
   selector: string,
-  action: () => Promise<void>,
+  timeoutMs: number | undefined,
+  action?: () => Promise<void>,
 ): Promise<PortalTaskRunStatus> {
+  let present: boolean;
   try {
-    await action();
-    return "completed";
+    present = await state.session.page.waitForSelector(selector, selectorOptions(timeoutMs));
   } catch (error) {
-    if (!(error instanceof SelectorMissingError) && !isSelectorTimeoutError(error)) {
+    if (!isSelectorTimeoutError(error)) {
       throw error;
     }
+    present = false;
+  }
+  if (!present) {
     return await reportSelectorMissing(state, selector);
   }
+  await action?.();
+  return "completed";
 }
 
 async function reportSelectorMissing(
@@ -416,6 +421,8 @@ async function downloadLinks(
       response = await state.session.page.requestBytes(href, {
         expectedMimeType: step.mimeType,
         maxBytes: state.maxDownloadBytes,
+        maxRedirects: MAX_DOWNLOAD_REDIRECTS,
+        onRedirect: (redirectUrl) => evaluateDownloadUrl(state, redirectUrl).action === "allow",
       });
     } catch (error) {
       state.result.errors.push(describeError(state.redactor, error));

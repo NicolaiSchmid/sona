@@ -3,6 +3,11 @@
  * runtime rather than imported statically so `@sona/agents` loads without the
  * optional `playwright` peer; the module shape is narrowed structurally below
  * instead of relying on Playwright's own types.
+ *
+ * Every HTTP request of a guarded session is issued by the worker through
+ * Playwright's request interception with redirects disabled, so each hop is
+ * evaluated by the guard before it is sent. A remote (Browserbase) browser
+ * therefore contributes rendering and script execution, not network egress.
  */
 import type {
   PortalBrowserPage,
@@ -15,12 +20,15 @@ import type {
   PortalSelectorOptions,
 } from "./browser.js";
 import { isSelectorTimeoutError } from "./browser.js";
-import { DownloadTooLargeError } from "./download.js";
+import { isRedirectStatus, parseContentLength, readBodyWithLimit } from "./download.js";
 import type { PortalRequest } from "./network-guard.js";
 import { PORTAL_RESOURCE_TYPES, type PortalResourceType } from "./provenance.js";
+import { resolveUrl } from "./url.js";
 
 const PLAYWRIGHT_SPECIFIER = "playwright";
 const MIN_TOKEN_LENGTH = 8;
+const MAX_ROUTE_REDIRECTS = 5;
+const DOWNLOAD_TIMEOUT_MS = 60_000;
 
 export function createLocalPlaywrightBrowserProvider(): PortalBrowserProvider {
   return new PlaywrightBrowserProvider("local-playwright", undefined);
@@ -55,8 +63,14 @@ interface PlaywrightContext {
     handler: (route: PlaywrightWebSocketRoute) => void | Promise<void>,
   ): Promise<void>;
   on(event: "request", handler: (request: PlaywrightRequest) => void): void;
+  cookies(urls: readonly string[]): Promise<PlaywrightCookie[]>;
   newPage(): Promise<PlaywrightPage>;
   close(): Promise<void>;
+}
+
+interface PlaywrightCookie {
+  name: string;
+  value: string;
 }
 
 interface PlaywrightRequest {
@@ -64,6 +78,7 @@ interface PlaywrightRequest {
   method(): string;
   resourceType(): string;
   postData(): string | null;
+  isNavigationRequest(): boolean;
   redirectedFrom(): object | null;
 }
 
@@ -79,14 +94,30 @@ interface PlaywrightPage {
   click(selector: string, options: { timeout?: number }): Promise<void>;
   waitForSelector(selector: string, options: { timeout?: number }): Promise<unknown>;
   $$(selector: string): Promise<PlaywrightElement[]>;
-  evaluate<Result, Arg>(pageFunction: (arg: Arg) => Promise<Result>, arg: Arg): Promise<Result>;
   screenshot(): Promise<Buffer>;
   url(): string;
 }
 
+interface PlaywrightRouteFetchOptions {
+  url?: string;
+  method?: string;
+  postData?: string;
+  maxRedirects: number;
+}
+
+interface PlaywrightApiResponse {
+  status(): number;
+  headers(): Record<string, string>;
+}
+
 interface PlaywrightRoute {
   request(): PlaywrightRequest;
-  continue(): Promise<void>;
+  fetch(options: PlaywrightRouteFetchOptions): Promise<PlaywrightApiResponse>;
+  fulfill(
+    options:
+      | { response: PlaywrightApiResponse }
+      | { status: number; contentType: string; body: string },
+  ): Promise<void>;
   abort(): Promise<void>;
 }
 
@@ -121,7 +152,7 @@ class PlaywrightBrowserProvider implements PortalBrowserProvider {
       const guardedContext = context;
       const page = await context.newPage();
       return {
-        page: new PlaywrightPageAdapter(page),
+        page: new PlaywrightPageAdapter(page, guardedContext),
         guardRequests: (guard) => installRequestGuard(guardedContext, guard),
         close: async () => {
           await guardedContext.close();
@@ -140,11 +171,9 @@ class PlaywrightBrowserProvider implements PortalBrowserProvider {
 /**
  * Installs the guard at the browser-context level so popups are covered from
  * their first request, on WebSocket handshakes (which `route` never sees), and
- * on redirect hops. Playwright presents only the first URL of a redirect chain
- * to a route handler and the browser follows later hops on its own; those hops
- * still surface as request events, so they are reported to the guard for
- * provenance and, once any hop is disallowed, every further request in the
- * session is aborted (fail closed).
+ * on every redirect hop: the browser is never handed a 3xx to follow on its
+ * own (see {@link fulfillGuarded}). Should a redirected request nevertheless
+ * surface, it is reported to the guard and the session fails closed.
  */
 async function installRequestGuard(
   context: PlaywrightContext,
@@ -158,7 +187,7 @@ async function installRequestGuard(
     }
     try {
       await guard(toPortalRequest(route.request()));
-      await route.continue();
+      await fulfillGuarded(route, guard);
     } catch {
       await route.abort();
     }
@@ -183,6 +212,64 @@ async function installRequestGuard(
         escaped = true;
       });
   });
+}
+
+/**
+ * Performs an already-allowed request with redirects disabled and resolves
+ * the chain hop by hop, presenting each target to the guard before it is
+ * sent. An allowed GET navigation is handed back to the browser as a
+ * client-side redirect so the next hop becomes a fresh, routed navigation and
+ * the page URL stays truthful; every other allowed hop is followed here and
+ * the final response fulfilled in place.
+ */
+async function fulfillGuarded(route: PlaywrightRoute, guard: PortalRequestGuard): Promise<void> {
+  const request = route.request();
+  const resourceType = toResourceType(request.resourceType());
+  let url = request.url();
+  let method = request.method();
+  let postData = request.postData();
+  for (let hop = 0; ; hop += 1) {
+    const response = await route.fetch({
+      url,
+      method,
+      postData: postData ?? undefined,
+      maxRedirects: 0,
+    });
+    const status = response.status();
+    if (!isRedirectStatus(status)) {
+      await route.fulfill({ response });
+      return;
+    }
+    if (hop >= MAX_ROUTE_REDIRECTS) {
+      throw new Error(`redirect chain exceeded ${MAX_ROUTE_REDIRECTS} hops`);
+    }
+    const location = response.headers()["location"];
+    if (location === undefined) {
+      throw new Error(`redirect ${status} without a Location header`);
+    }
+    const nextUrl = resolveUrl(location, url);
+    const preservesMethod = status === 307 || status === 308;
+    const nextMethod = preservesMethod ? method : "GET";
+    const nextPostData = preservesMethod ? postData : null;
+    await guard({ url: nextUrl, method: nextMethod, resourceType, postData: nextPostData });
+    if (request.isNavigationRequest() && nextMethod === "GET") {
+      await route.fulfill({
+        status: 200,
+        contentType: "text/html",
+        body: clientRedirectPage(nextUrl),
+      });
+      return;
+    }
+    url = nextUrl;
+    method = nextMethod;
+    postData = nextPostData;
+  }
+}
+
+function clientRedirectPage(url: string): string {
+  const literal = JSON.stringify(url);
+  const attribute = url.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
+  return `<!doctype html><meta http-equiv="refresh" content="0;url=${attribute}"><script>location.replace(${literal})</script>`;
 }
 
 function toPortalRequest(request: PlaywrightRequest): PortalRequest {
@@ -261,9 +348,11 @@ function isPlaywrightModule(value: unknown): value is PlaywrightModule {
 
 class PlaywrightPageAdapter implements PortalBrowserPage {
   readonly #page: PlaywrightPage;
+  readonly #context: PlaywrightContext;
 
-  constructor(page: PlaywrightPage) {
+  constructor(page: PlaywrightPage, context: PlaywrightContext) {
     this.#page = page;
+    this.#context = context;
   }
 
   async goto(url: string): Promise<void> {
@@ -295,30 +384,69 @@ class PlaywrightPageAdapter implements PortalBrowserPage {
   }
 
   /**
-   * Fetches inside the page so the portal sees the browser's own cookies, IP,
-   * and TLS fingerprint (with Browserbase the browser is remote), and streams
-   * the body in the browser so no more than `maxBytes` is ever buffered. The
-   * first hop passes through the route guard; later redirect hops are
-   * reported to it as request events and the runner re-checks the final URL.
+   * Downloads with Node's streaming `fetch`, which (unlike Playwright's request
+   * API) exposes the body before buffering it, so reading stops the moment the
+   * cap is crossed. Each hop carries the session's cookies for that URL, is
+   * bounded by a wall-clock deadline, and is presented to `onRedirect` before
+   * it is followed. Being worker-issued, it does not depend on page CORS.
    */
   async requestBytes(
     url: string,
     options: PortalDownloadRequestOptions,
   ): Promise<PortalDownloadResponse> {
-    const result = await this.#page.evaluate(fetchBoundedInPage, {
-      url,
-      accept: `${options.expectedMimeType}, */*;q=0.1`,
-      maxBytes: options.maxBytes,
-    });
-    if (result.truncated) {
-      throw new DownloadTooLargeError(options.maxBytes);
+    const signal = AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS);
+    let currentUrl = url;
+    let redirectsFollowed = 0;
+    while (true) {
+      const response = await fetch(currentUrl, {
+        method: "GET",
+        headers: await this.downloadHeaders(currentUrl, options.expectedMimeType),
+        redirect: "manual",
+        signal,
+      });
+      if (isRedirectStatus(response.status)) {
+        await response.body?.cancel();
+        if (redirectsFollowed >= options.maxRedirects) {
+          throw new Error(`download exceeded ${options.maxRedirects} redirects`);
+        }
+        const location = response.headers.get("location");
+        if (location === null) {
+          throw new Error(`download redirect ${response.status} missing Location header`);
+        }
+        const nextUrl = resolveUrl(location, currentUrl);
+        if (!options.onRedirect(nextUrl)) {
+          throw new Error("download redirect blocked by portal network policy");
+        }
+        currentUrl = nextUrl;
+        redirectsFollowed += 1;
+        continue;
+      }
+
+      const contentLength = parseContentLength(response.headers.get("content-length"));
+      if (contentLength !== undefined && contentLength > options.maxBytes) {
+        await response.body?.cancel();
+        throw new Error(`download exceeds ${options.maxBytes} byte limit`);
+      }
+      const bytes = await readBodyWithLimit(response.body, options.maxBytes);
+      return {
+        bytes,
+        mimeType: response.headers.get("content-type") ?? "",
+        finalUrl: currentUrl,
+        status: response.status,
+      };
     }
-    return {
-      bytes: new Uint8Array(Buffer.from(result.base64, "base64")),
-      mimeType: result.mimeType,
-      finalUrl: result.finalUrl,
-      status: result.status,
-    };
+  }
+
+  private async downloadHeaders(
+    url: string,
+    expectedMimeType: string,
+  ): Promise<Record<string, string>> {
+    const headers: Record<string, string> = { accept: `${expectedMimeType}, */*;q=0.1` };
+    const cookies = await this.#context.cookies([url]);
+    if (cookies.length > 0) {
+      headers["cookie"] = cookies.map((cookie) => `${cookie.name}=${cookie.value}`).join("; ");
+    }
+    return headers;
   }
 
   async screenshot(): Promise<Uint8Array> {
@@ -328,73 +456,6 @@ class PlaywrightPageAdapter implements PortalBrowserPage {
   url(): string {
     return this.#page.url();
   }
-}
-
-interface InPageDownloadInput {
-  url: string;
-  accept: string;
-  maxBytes: number;
-}
-
-interface InPageDownloadResult {
-  status: number;
-  mimeType: string;
-  finalUrl: string;
-  base64: string;
-  truncated: boolean;
-}
-
-/**
- * Runs inside the browser page (serialized by Playwright), so it must stay
- * self-contained: no references to module scope.
- */
-async function fetchBoundedInPage(input: InPageDownloadInput): Promise<InPageDownloadResult> {
-  const response = await fetch(input.url, {
-    credentials: "include",
-    headers: { accept: input.accept },
-    redirect: "follow",
-  });
-  const chunks: Uint8Array[] = [];
-  let total = 0;
-  const reader = response.body?.getReader();
-  if (reader !== undefined) {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) {
-        break;
-      }
-      total += value.byteLength;
-      if (total > input.maxBytes) {
-        await reader.cancel();
-        return {
-          status: response.status,
-          mimeType: response.headers.get("content-type") ?? "",
-          finalUrl: response.url,
-          base64: "",
-          truncated: true,
-        };
-      }
-      chunks.push(value);
-    }
-  }
-  const merged = new Uint8Array(total);
-  let offset = 0;
-  for (const chunk of chunks) {
-    merged.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  let binary = "";
-  const sliceSize = 0x8000;
-  for (let index = 0; index < merged.length; index += sliceSize) {
-    binary += String.fromCharCode(...merged.subarray(index, index + sliceSize));
-  }
-  return {
-    status: response.status,
-    mimeType: response.headers.get("content-type") ?? "",
-    finalUrl: response.url,
-    base64: btoa(binary),
-    truncated: false,
-  };
 }
 
 function matchEveryUrl(): boolean {

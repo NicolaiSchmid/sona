@@ -49,13 +49,18 @@ instantiated without an injected browser provider. Each run:
   browser launches, and refuses tasks without executable steps;
 - only fills credentials when the connection is bound to the digest of the
   exact reviewed task revision (domains and steps included);
+- only runs on the browser provider (local or managed) the connection was
+  approved for, since a managed remote browser is a separate data processor;
 - installs a network guard on the browser context that aborts off-allowlist
-  and cleartext requests, every WebSocket handshake, and any non-idempotent
-  request that is not an exact-URL, reviewed-body-field POST exception;
-- reports redirect hops the browser follows on its own to the guard, records
-  an escape as blocked, and aborts every further request in that session;
-- downloads inside the authenticated page with a hard byte cap, then checks
-  final URL, status, media type, and a document signature before storing;
+  and cleartext requests, URLs naming a forbidden operation even over GET,
+  every WebSocket handshake, and any non-idempotent request that is not an
+  exact-URL, reviewed-body-field POST exception;
+- issues every HTTP request of the session from the worker with redirects
+  disabled, so each hop is evaluated by the guard before it is sent (a remote
+  browser contributes rendering and scripting, not network egress);
+- downloads with the session cookies under a hard byte cap and wall-clock
+  deadline, then checks final URL, status, media type, and a document
+  signature before storing;
 - redacts credentials, provider secrets, and query strings from errors,
   provenance, and stored metadata, and never returns document bytes.
 
