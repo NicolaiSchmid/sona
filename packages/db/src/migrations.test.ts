@@ -5,6 +5,7 @@ import { applyMigrations } from "./runner";
 import {
   ASSET_TABLES,
   CORE_TABLES,
+  EMAIL_TABLES,
   LEDGER_REPOSITORY_TABLES,
   PORTFOLIO_TABLES,
   RECEIPT_TABLES,
@@ -38,6 +39,7 @@ describe("core migrations", () => {
         ...LEDGER_REPOSITORY_TABLES,
         ...ASSET_TABLES,
         ...PORTFOLIO_TABLES,
+        ...EMAIL_TABLES,
       ]) {
         expect(names.has(table), `missing table ${table}`).toBe(true);
       }
@@ -70,6 +72,28 @@ describe("core migrations", () => {
     try {
       applyMigrations(db, CORE_MIGRATIONS);
       expect(() => applyMigrations(db, CORE_MIGRATIONS)).not.toThrow();
+    } finally {
+      db.close();
+    }
+  });
+
+  it("adds the workspace-scoped sync-run key and cursor index for email sources", () => {
+    const db = new DatabaseSync(":memory:");
+    try {
+      applyMigrations(db, CORE_MIGRATIONS);
+      applyMigrations(db, CORE_MIGRATIONS);
+      const indexes = db
+        .prepare("SELECT name, tbl_name FROM sqlite_master WHERE type = 'index'")
+        .all() as Array<{ name: string; tbl_name: string }>;
+      expect(indexes).toContainEqual({
+        name: "uq_sync_runs_workspace_id",
+        tbl_name: "source_sync_runs",
+      });
+      expect(indexes).toContainEqual({
+        name: "idx_email_sync_cursors_source",
+        tbl_name: "email_sync_cursors",
+      });
+      expect(indexes.filter((i) => i.name === "uq_sync_runs_workspace_id")).toHaveLength(1);
     } finally {
       db.close();
     }

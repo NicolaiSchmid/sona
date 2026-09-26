@@ -149,6 +149,10 @@ Implemented controls and their known limits:
   sees it; WebSocket and EventSource channels are refused and long-lived media
   streams are not supported inside guarded sessions.
 
+## Email mailbox access
+
+The IMAP source is read-only by design: the client interface has no flag, move, copy, delete, or expunge operation, folders are opened with `EXAMINE`, and the test fake fails if any mutating command is issued. Only server-parsed envelopes, body structures, and selected attachment parts are downloaded; bodies are never fetched, and of the envelope only sender, subject, date, and Message-ID are kept — recipient lists are discarded in memory and never stored. The app password is resolved from the secret store at connect time and every client error is re-thrown with addresses and credentials redacted. Sync summaries carry counts, redacted error messages, and the UID cursor (which names the configured folder) — no addresses, subjects, filenames, or content.
+
 ## Early launch posture
 
 For early friend users:

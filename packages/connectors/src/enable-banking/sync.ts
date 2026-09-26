@@ -5,7 +5,13 @@
  * are injected so this composes with real repositories or in-memory fakes.
  */
 import { createRawSourceRecord, type JsonValue, type RawSourceRecord } from "@sona/core";
-import type { RawLink, SyncEnv, SyncStatus } from "../shared.js";
+import {
+  type RawLink,
+  type RawRecordStore,
+  type SyncEnv,
+  type SyncStatus,
+  toJsonValue,
+} from "../shared.js";
 import type { EnableBankingClient } from "./client.js";
 import {
   accountUidsFromSession,
@@ -36,17 +42,7 @@ export interface SyncRunStore {
   }): Promise<void>;
 }
 
-export interface RawRecordStore {
-  /**
-   * Appends a raw record. MUST be idempotent on the record's dedup key
-   * (workspace + source + payload hash): re-importing an unchanged provider
-   * payload must be a no-op, not an error, so repeated syncs don't fail on the
-   * `uq_raw_records_dedup` constraint.
-   */
-  append(record: RawSourceRecord): Promise<void>;
-}
-
-export type { RawLink, SyncEnv };
+export type { RawLink, RawRecordStore, SyncEnv };
 
 export interface BankRecordStore {
   saveAccount(account: NormalizedAccount, link: RawLink): Promise<void>;
@@ -169,7 +165,7 @@ export async function runEnableBankingSync(input: RunEnableBankingSyncInput): Pr
         "bank_balance",
         `${ext}:balances`,
         { accountExternalId: ext, kind: "balances" },
-        toJson(balances),
+        toJsonValue(balances),
       );
       for (const balance of balances.balances) {
         await bankStore.saveBalance(normalizeBalance(ext, balance), { rawRecordId: balancesRawId });
@@ -193,7 +189,7 @@ export async function runEnableBankingSync(input: RunEnableBankingSyncInput): Pr
           "bank_transaction",
           `${ext}:transactions:${page}`,
           { accountExternalId: ext, kind: "transactions", page },
-          toJson(transactions),
+          toJsonValue(transactions),
         );
         for (const transaction of transactions.transactions) {
           await bankStore.saveTransaction(
@@ -218,8 +214,4 @@ export async function runEnableBankingSync(input: RunEnableBankingSyncInput): Pr
   const status: SyncStatus = summary.errors.length > 0 ? "completed_with_errors" : "succeeded";
   await runStore.finish({ runId, status, finishedAt: env.nowIso(), summary });
   return summary;
-}
-
-function toJson(value: unknown): JsonValue {
-  return JSON.parse(JSON.stringify(value)) as JsonValue;
 }
