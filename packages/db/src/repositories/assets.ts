@@ -124,12 +124,7 @@ export class SqliteAssetRepository {
     if (existing !== undefined) {
       throw new Error("asset events are append-only");
     }
-    const money =
-      event.kind === "improvement"
-        ? event.amount
-        : event.kind === "disposal"
-          ? event.proceeds
-          : undefined;
+    const money = eventMoney(event);
     this.#db
       .prepare(
         "INSERT INTO asset_events (id, workspace_id, asset_id, kind, component_id, retracts_event_id, occurred_on, description, amount, commodity, evidence_document_ids_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -341,6 +336,18 @@ export class SqliteAssetRepository {
       }
       throw error;
     }
+  }
+}
+
+/** The one money column an event kind carries: improvement cost or disposal proceeds. */
+function eventMoney(event: AssetEvent): MoneyAmount | undefined {
+  switch (event.kind) {
+    case "improvement":
+      return event.amount;
+    case "disposal":
+      return event.proceeds;
+    case "retraction":
+      return undefined;
   }
 }
 

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  decimalsEqual,
   divideRoundHalfAwayFromZero,
   fromScaledBigInt,
   InvalidDecimalError,
@@ -67,6 +68,14 @@ describe("scaled bigint helpers", () => {
     expect(negateDecimal("-1.5")).toBe("1.5");
     expect(negateDecimal("0")).toBe("0");
     expect(negateDecimal("0.00")).toBe("0.00");
+  });
+
+  it("compares decimals by value, not by textual scale", () => {
+    expect(decimalsEqual("6360", "6360.00")).toBe(true);
+    expect(decimalsEqual("-0.5", "-0.50")).toBe(true);
+    expect(decimalsEqual("0", "-0")).toBe(true);
+    expect(decimalsEqual("6360.00", "6360.01")).toBe(false);
+    expect(() => decimalsEqual("nope", "1")).toThrow(InvalidDecimalError);
   });
 
   it("divides with deterministic half-away-from-zero rounding", () => {

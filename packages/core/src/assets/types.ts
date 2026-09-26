@@ -134,6 +134,17 @@ export const assetSchema = z
 
 export type Asset = z.infer<typeof assetSchema>;
 
+/** Fields every append-only asset history event carries. */
+const assetEventBaseShape = {
+  id: z.string().min(1),
+  workspaceId: z.string().min(1),
+  assetId: z.string().min(1),
+  occurredOn: isoDateSchema,
+  description: z.string().min(1),
+  evidenceDocumentIds: z.array(z.string().min(1)),
+  createdAt: z.string().datetime({ offset: true }),
+} as const;
+
 /**
  * Post-acquisition capitalized improvement (nachträgliche Herstellungskosten).
  * Raises the depreciable basis of the named component from its year onward.
@@ -141,28 +152,16 @@ export type Asset = z.infer<typeof assetSchema>;
  */
 export const assetImprovementEventSchema = z.object({
   kind: z.literal("improvement"),
-  id: z.string().min(1),
-  workspaceId: z.string().min(1),
-  assetId: z.string().min(1),
+  ...assetEventBaseShape,
   componentId: z.string().min(1),
-  occurredOn: isoDateSchema,
-  description: z.string().min(1),
   amount: nonNegativeMoneySchema,
-  evidenceDocumentIds: z.array(z.string().min(1)),
-  createdAt: z.string().datetime({ offset: true }),
 });
 
 /** Disposal (sale, scrapping, withdrawal). Ends the schedule in the disposal year. */
 export const assetDisposalEventSchema = z.object({
   kind: z.literal("disposal"),
-  id: z.string().min(1),
-  workspaceId: z.string().min(1),
-  assetId: z.string().min(1),
-  occurredOn: isoDateSchema,
-  description: z.string().min(1),
+  ...assetEventBaseShape,
   proceeds: nonNegativeMoneySchema.optional(),
-  evidenceDocumentIds: z.array(z.string().min(1)),
-  createdAt: z.string().datetime({ offset: true }),
 });
 
 /**
@@ -172,15 +171,9 @@ export const assetDisposalEventSchema = z.object({
  */
 export const assetRetractionEventSchema = z.object({
   kind: z.literal("retraction"),
-  id: z.string().min(1),
-  workspaceId: z.string().min(1),
-  assetId: z.string().min(1),
+  ...assetEventBaseShape,
   /** Id of the improvement or disposal event being retracted. */
   retractsEventId: z.string().min(1),
-  occurredOn: isoDateSchema,
-  description: z.string().min(1),
-  evidenceDocumentIds: z.array(z.string().min(1)),
-  createdAt: z.string().datetime({ offset: true }),
 });
 
 export const assetEventSchema = z.discriminatedUnion("kind", [
@@ -195,22 +188,20 @@ export type AssetRetractionEvent = z.infer<typeof assetRetractionEventSchema>;
 export type AssetEvent = z.infer<typeof assetEventSchema>;
 export type AssetEventKind = AssetEvent["kind"];
 
+/** Maximum fractional digits of a configured percentage rate (e.g. "2.5", "3.3333"). */
+export const DEPRECIATION_RATE_SCALE = 4;
+
 /**
  * How the annual amount is derived. Both are user-configured data: Sona does
  * not pick a rate or useful life on the user's behalf.
  */
-/** Maximum fractional digits of a configured percentage rate (e.g. "2.5", "3.3333"). */
-export const DEPRECIATION_RATE_SCALE = 4;
-
-const rateScaleRe = new RegExp(`^\\d+(\\.\\d{1,${DEPRECIATION_RATE_SCALE}})?$`);
-
 export const depreciationMethodSchema = z.discriminatedUnion("kind", [
   z.object({
     kind: z.literal("linear_percentage"),
     /** Annual rate in percent of the depreciable basis, e.g. "2", "2.5", "3". */
     annualRatePercent: nonNegativeDecimalSchema
       .refine((v) => !isZeroDecimal(v), { message: "annual rate must be greater than zero" })
-      .refine((v) => rateScaleRe.test(v), {
+      .refine((v) => (v.split(".")[1]?.length ?? 0) <= DEPRECIATION_RATE_SCALE, {
         message: `annual rate supports at most ${DEPRECIATION_RATE_SCALE} fractional digits`,
       }),
   }),

@@ -74,16 +74,15 @@ export interface AcquisitionCostAllocation {
  */
 function allocateProportionally(total: bigint, weights: readonly bigint[]): bigint[] {
   const weightSum = weights.reduce((sum, w) => sum + w, 0n);
-  const shares = weights.map((w) => (total * w) / weightSum);
-  const remainders = weights.map((w, i) => ({ i, r: (total * w) % weightSum }));
-  let leftover = total - shares.reduce((sum, s) => sum + s, 0n);
-  remainders.sort((a, b) => (a.r === b.r ? a.i - b.i : a.r > b.r ? -1 : 1));
-  for (const { i } of remainders) {
-    if (leftover <= 0n) {
-      break;
-    }
+  const products = weights.map((w) => total * w);
+  const shares = products.map((p) => p / weightSum);
+  // Fewer leftover units than weights, so Number() is exact.
+  const leftover = Number(total - shares.reduce((sum, s) => sum + s, 0n));
+  const byRemainder = products
+    .map((p, i) => ({ i, r: p % weightSum }))
+    .sort((a, b) => (a.r > b.r ? -1 : a.r < b.r ? 1 : 0)); // stable: ties keep position order
+  for (const { i } of byRemainder.slice(0, leftover)) {
     shares[i] = (shares[i] ?? 0n) + 1n;
-    leftover -= 1n;
   }
   return shares;
 }
@@ -260,10 +259,10 @@ interface ValidatedEvents {
 
 /**
  * Resolves retractions: returns the ids of events a retraction points at,
- * validating that each target exists on this asset and is not itself a
- * retraction.
+ * validating that each target is in `events` (already checked to belong to
+ * the asset) and is not itself a retraction.
  */
-function retractedEventIds(asset: Asset, events: readonly AssetEvent[]): Set<string> {
+function retractedEventIds(events: readonly AssetEvent[]): Set<string> {
   const byId = new Map(events.map((e) => [e.id, e] as const));
   const retracted = new Set<string>();
   for (const event of events) {
@@ -271,7 +270,7 @@ function retractedEventIds(asset: Asset, events: readonly AssetEvent[]): Set<str
       continue;
     }
     const target = byId.get(event.retractsEventId);
-    if (target === undefined || target.assetId !== asset.id) {
+    if (target === undefined) {
       throw new DepreciationError(
         `Retraction ${event.id} references unknown event ${event.retractsEventId}`,
       );
@@ -298,7 +297,7 @@ function validateEvents(
       throw new DepreciationError(`Event ${event.id} does not belong to asset ${asset.id}`);
     }
   }
-  const retracted = retractedEventIds(asset, events);
+  const retracted = retractedEventIds(events);
 
   for (const event of events) {
     if (event.kind === "retraction" || retracted.has(event.id)) {
@@ -399,16 +398,8 @@ export function computeDepreciationSchedule(
   const lastImprovementYear = Math.max(acquired.year - 1, ...improvementsByYear.keys());
 
   const rows: DepreciationScheduleRow[] = [];
-  const appliedEventIds: string[] = [];
-  const appliedEvidence: string[] = [];
-  const appliedMissing: string[] = [];
-  const applyEvent = (event: AssetImprovementEvent | AssetDisposalEvent): void => {
-    appliedEventIds.push(event.id);
-    appliedEvidence.push(...event.evidenceDocumentIds);
-    if (event.evidenceDocumentIds.length === 0) {
-      appliedMissing.push(`event:${event.id}`);
-    }
-  };
+  /** Improvements applied so far, plus the disposal in its year; each row reports their evidence. */
+  const applied: Array<AssetImprovementEvent | AssetDisposalEvent> = [];
   let basis = acquisitionBasis;
   let accumulated = 0n;
   let monthsElapsed = 0;
@@ -423,7 +414,7 @@ export function computeDepreciationSchedule(
     const exhaustedBefore = rows.length > 0 && basis - residual - accumulated <= 0n;
     const improvements = improvementsByYear.get(year) ?? [];
     for (const improvement of improvements) {
-      applyEvent(improvement);
+      applied.push(improvement);
       if (depreciableComponentIds.has(improvement.componentId)) {
         basis += requireMoneyInCommodity(
           improvement.amount,
@@ -436,8 +427,8 @@ export function computeDepreciationSchedule(
 
     const remaining = basis - residual - accumulated;
     const isDisposalYear = disposal?.on.year === year;
-    if (isDisposalYear && disposal !== undefined) {
-      applyEvent(disposal.event);
+    if (isDisposalYear) {
+      applied.push(disposal.event);
     }
     if (remaining <= 0n) {
       if (isDisposalYear || year >= lastImprovementYear) {
@@ -450,7 +441,7 @@ export function computeDepreciationSchedule(
     let months = 12;
     if (config.proRataTemporis) {
       const firstMonth = year === acquired.year ? acquired.month : 1;
-      const lastMonth = disposal?.on.year === year ? disposal.on.month : 12;
+      const lastMonth = isDisposalYear ? disposal.on.month : 12;
       months = lastMonth - firstMonth + 1;
       if (months < 12) {
         notes.push("pro_rata");
@@ -488,9 +479,15 @@ export function computeDepreciationSchedule(
       closingBookValue: fromScaledBigInt(basis - accumulated - amount, scale),
       accumulatedDepreciation: fromScaledBigInt(accumulated + amount, scale),
       notes,
-      appliedEventIds: [...appliedEventIds],
-      evidenceDocumentIds: unique([...baseEvidence, ...appliedEvidence]),
-      missingEvidenceFor: [...baseMissing, ...appliedMissing],
+      appliedEventIds: applied.map((e) => e.id),
+      evidenceDocumentIds: unique([
+        ...baseEvidence,
+        ...applied.flatMap((e) => e.evidenceDocumentIds),
+      ]),
+      missingEvidenceFor: [
+        ...baseMissing,
+        ...applied.filter((e) => e.evidenceDocumentIds.length === 0).map((e) => `event:${e.id}`),
+      ],
     });
     accumulated += amount;
     monthsElapsed += months;
