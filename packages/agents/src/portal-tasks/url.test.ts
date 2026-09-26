@@ -1,28 +1,26 @@
 import { describe, expect, it } from "vitest";
-import { redactSensitiveUrlPath, resolveUrl, sanitizeUrl, sanitizeUrlsInText } from "./url.js";
+import { decodedPathAndQuery, redactUrl, redactUrlsInText, resolveUrl } from "./url.js";
 
-describe("sanitizeUrl", () => {
+describe("redactUrl", () => {
   it("strips the query string and fragment but keeps a non-default port", () => {
-    expect(sanitizeUrl("https://portal.test:8443/a/b?session=abc#frag")).toBe(
+    expect(redactUrl("https://portal.test:8443/a/b?session=abc#frag")).toBe(
       "https://portal.test:8443/a/b",
     );
   });
 
   it("drops embedded userinfo so credentials never reach provenance", () => {
-    expect(sanitizeUrl("https://user:pw@portal.test/invoices")).toBe(
-      "https://portal.test/invoices",
-    );
+    expect(redactUrl("https://user:pw@portal.test/invoices")).toBe("https://portal.test/invoices");
   });
 
   it("normalizes the host and default port", () => {
-    expect(sanitizeUrl("HTTPS://Portal.TEST:443/Invoices")).toBe("https://portal.test/Invoices");
-    expect(sanitizeUrl("https://portal.test")).toBe("https://portal.test/");
+    expect(redactUrl("HTTPS://Portal.TEST:443/Invoices")).toBe("https://portal.test/Invoices");
+    expect(redactUrl("https://portal.test")).toBe("https://portal.test/");
   });
 
   it("returns undefined for input that is not a URL", () => {
-    expect(sanitizeUrl("not a url")).toBeUndefined();
-    expect(sanitizeUrl("")).toBeUndefined();
-    expect(sanitizeUrl("/relative/path?x=1")).toBeUndefined();
+    expect(redactUrl("not a url")).toBeUndefined();
+    expect(redactUrl("")).toBeUndefined();
+    expect(redactUrl("/relative/path?x=1")).toBeUndefined();
   });
 });
 
@@ -58,24 +56,24 @@ describe("resolveUrl", () => {
   });
 });
 
-describe("sanitizeUrlsInText", () => {
+describe("redactUrlsInText", () => {
   it("strips query strings and fragments from every URL in a message", () => {
     expect(
-      sanitizeUrlsInText(
+      redactUrlsInText(
         "page.goto: net::ERR_FAILED at https://portal.test/login?session=abc#top (ws://localhost:3000/live?t=1)",
       ),
     ).toBe("page.goto: net::ERR_FAILED at https://portal.test/login (ws://localhost:3000/live)");
   });
 
   it("leaves text without URLs untouched", () => {
-    expect(sanitizeUrlsInText("Timeout 15000ms exceeded")).toBe("Timeout 15000ms exceeded");
+    expect(redactUrlsInText("Timeout 15000ms exceeded")).toBe("Timeout 15000ms exceeded");
   });
 });
 
-describe("redactSensitiveUrlPath", () => {
+describe("redactUrl path segments", () => {
   it("replaces e-mail-like, long token, and long numeric segments", () => {
     expect(
-      redactSensitiveUrlPath(
+      redactUrl(
         "https://portal.test/u/user%40example.test/acct/12345678/dl/AbCdEfGhIjKlMnOpQrStUvWxYz0123/inv.pdf?sig=x",
       ),
     ).toBe(
@@ -83,13 +81,38 @@ describe("redactSensitiveUrlPath", () => {
     );
   });
 
-  it("keeps short human-readable segments and file names", () => {
-    expect(redactSensitiveUrlPath("https://portal.test/invoices/2026/INV-2026-000123.pdf")).toBe(
-      "https://portal.test/invoices/2026/INV-2026-000123.pdf",
+  it("keeps short human-readable segments and file names with few digits", () => {
+    expect(redactUrl("https://portal.test/invoices/2026/INV-26-123.pdf")).toBe(
+      "https://portal.test/invoices/2026/INV-26-123.pdf",
+    );
+    expect(redactUrl("https://portal.test/rechnung-januar-2026.pdf")).toBe(
+      "https://portal.test/rechnung-januar-2026.pdf",
     );
   });
 
+  it("redacts IBAN-like, order-number-like, and JWT-like segments", () => {
+    expect(
+      redactUrl(
+        "https://portal.test/acct/DE89370400440532013000/orders/302-1234567-1234567/eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c/x.pdf",
+      ),
+    ).toBe(
+      "https://portal.test/acct/[REDACTED_SEGMENT]/orders/[REDACTED_SEGMENT]/[REDACTED_SEGMENT]/x.pdf",
+    );
+  });
+});
+
+describe("decodedPathAndQuery", () => {
+  it("decodes percent escapes in path and query and drops the fragment", () => {
+    expect(decodedPathAndQuery("https://portal.test/a%2Fb/%64elete?op=%63ancel#x")).toBe(
+      "/a/b/delete?op=cancel",
+    );
+  });
+
+  it("returns malformed input decoded as far as possible", () => {
+    expect(decodedPathAndQuery("not a url %41")).toBe("not a url A");
+  });
+
   it("returns undefined for input that is not a URL", () => {
-    expect(redactSensitiveUrlPath("not a url")).toBeUndefined();
+    expect(redactUrl("not a url")).toBeUndefined();
   });
 });

@@ -20,14 +20,18 @@ import type {
   PortalSelectorOptions,
 } from "./browser.js";
 import { isSelectorTimeoutError } from "./browser.js";
-import { isRedirectStatus, parseContentLength, readBodyWithLimit } from "./download.js";
+import {
+  isRedirectStatus,
+  parseContentLength,
+  readBodyWithLimit,
+  redirectPreservesMethod,
+  redirectTarget,
+} from "./download.js";
 import type { PortalRequest } from "./network-guard.js";
 import { PORTAL_RESOURCE_TYPES, type PortalResourceType } from "./provenance.js";
-import { resolveUrl } from "./url.js";
 
 const PLAYWRIGHT_SPECIFIER = "playwright";
 const MIN_TOKEN_LENGTH = 8;
-const MAX_ROUTE_REDIRECTS = 5;
 const DOWNLOAD_TIMEOUT_MS = 60_000;
 
 export function createLocalPlaywrightBrowserProvider(): PortalBrowserProvider {
@@ -77,6 +81,7 @@ interface PlaywrightRequest {
   url(): string;
   method(): string;
   resourceType(): string;
+  headers(): Record<string, string>;
   postData(): string | null;
   isNavigationRequest(): boolean;
   redirectedFrom(): object | null;
@@ -101,8 +106,11 @@ interface PlaywrightPage {
 interface PlaywrightRouteFetchOptions {
   url?: string;
   method?: string;
-  postData?: string;
-  maxRedirects: number;
+  headers?: Record<string, string>;
+  /** A Buffer (possibly empty) replaces the body; a missing value re-sends the original. */
+  postData?: string | Buffer;
+  /** The whole design relies on the browser never following a hop itself. */
+  maxRedirects: 0;
 }
 
 interface PlaywrightApiResponse {
@@ -143,28 +151,32 @@ class PlaywrightBrowserProvider implements PortalBrowserProvider {
       this.#cdpEndpoint === undefined
         ? await module.chromium.launch({ headless: true })
         : await module.chromium.connectOverCDP(this.#cdpEndpoint);
-    let context: PlaywrightContext | undefined;
-    try {
-      context = await browser.newContext({
-        acceptDownloads: false,
-        serviceWorkers: "block",
+    // A failed setup must not leak a Chromium process or a managed session.
+    const context = await browser
+      .newContext({ acceptDownloads: false, serviceWorkers: "block" })
+      .catch(async (error: unknown) => {
+        await browser.close().catch(() => undefined);
+        throw error;
       });
-      const guardedContext = context;
-      const page = await context.newPage();
-      return {
-        page: new PlaywrightPageAdapter(page, guardedContext),
-        guardRequests: (guard) => installRequestGuard(guardedContext, guard),
-        close: async () => {
-          await guardedContext.close();
-          await browser.close();
-        },
-      };
+    let page: PlaywrightPage;
+    try {
+      page = await context.newPage();
     } catch (error) {
-      // A failed setup must not leak a Chromium process or a managed session.
-      await context?.close().catch(() => undefined);
+      await context.close().catch(() => undefined);
       await browser.close().catch(() => undefined);
       throw error;
     }
+    return {
+      page: new PlaywrightPageAdapter(page, context),
+      guardRequests: (guard) => installRequestGuard(context, guard),
+      close: async () => {
+        try {
+          await context.close();
+        } finally {
+          await browser.close();
+        }
+      },
+    };
   }
 }
 
@@ -172,22 +184,23 @@ class PlaywrightBrowserProvider implements PortalBrowserProvider {
  * Installs the guard at the browser-context level so popups are covered from
  * their first request, on WebSocket handshakes (which `route` never sees), and
  * on every redirect hop: the browser is never handed a 3xx to follow on its
- * own (see {@link fulfillGuarded}). Should a redirected request nevertheless
- * surface, it is reported to the guard and the session fails closed.
+ * own (see {@link resolveRouteThroughGuard}). Should a redirected request
+ * nevertheless surface, it is reported to the guard and the session fails
+ * closed.
  */
 async function installRequestGuard(
   context: PlaywrightContext,
   guard: PortalRequestGuard,
 ): Promise<void> {
-  let escaped = false;
+  let guardBypassed = false;
   await context.route("**/*", async (route) => {
-    if (escaped) {
+    if (guardBypassed) {
       await route.abort();
       return;
     }
     try {
       await guard(toPortalRequest(route.request()));
-      await fulfillGuarded(route, guard);
+      await resolveRouteThroughGuard(route, guard);
     } catch {
       await route.abort();
     }
@@ -209,7 +222,7 @@ async function installRequestGuard(
     void Promise.resolve()
       .then(() => guard(toPortalRequest(request)))
       .catch(() => {
-        escaped = true;
+        guardBypassed = true;
       });
   });
 }
@@ -222,35 +235,49 @@ async function installRequestGuard(
  * the page URL stays truthful; every other allowed hop is followed here and
  * the final response fulfilled in place.
  */
-async function fulfillGuarded(route: PlaywrightRoute, guard: PortalRequestGuard): Promise<void> {
+async function resolveRouteThroughGuard(
+  route: PlaywrightRoute,
+  guard: PortalRequestGuard,
+): Promise<void> {
   const request = route.request();
   const resourceType = toResourceType(request.resourceType());
+  const originalMethod = request.method();
+  const originalOrigin = new URL(request.url()).origin;
   let url = request.url();
-  let method = request.method();
-  let postData = request.postData();
+  let method = originalMethod;
+  let postData = request.postData() ?? undefined;
   for (let hop = 0; ; hop += 1) {
-    const response = await route.fetch({
-      url,
-      method,
-      postData: postData ?? undefined,
-      maxRedirects: 0,
-    });
+    const response = await route.fetch(
+      hop === 0
+        ? { maxRedirects: 0 }
+        : {
+            url,
+            method,
+            headers: hopHeaders(request.headers(), {
+              methodChanged: method !== originalMethod,
+              originChanged: new URL(url).origin !== originalOrigin,
+            }),
+            // An empty Buffer is an explicit "no body"; undefined would re-send
+            // the original. Playwright still labels it `application/octet-stream`
+            // with `content-length: 0`, which is harmless for a body-less GET.
+            postData: postData === undefined ? Buffer.alloc(0) : postData,
+            maxRedirects: 0,
+          },
+    );
     const status = response.status();
     if (!isRedirectStatus(status)) {
       await route.fulfill({ response });
       return;
     }
-    if (hop >= MAX_ROUTE_REDIRECTS) {
-      throw new Error(`redirect chain exceeded ${MAX_ROUTE_REDIRECTS} hops`);
-    }
-    const location = response.headers()["location"];
-    if (location === undefined) {
-      throw new Error(`redirect ${status} without a Location header`);
-    }
-    const nextUrl = resolveUrl(location, url);
-    const preservesMethod = status === 307 || status === 308;
+    const nextUrl = redirectTarget({
+      status,
+      location: response.headers()["location"],
+      currentUrl: url,
+      hop,
+    });
+    const preservesMethod = redirectPreservesMethod(status);
     const nextMethod = preservesMethod ? method : "GET";
-    const nextPostData = preservesMethod ? postData : null;
+    const nextPostData = preservesMethod ? postData : undefined;
     await guard({ url: nextUrl, method: nextMethod, resourceType, postData: nextPostData });
     if (request.isNavigationRequest() && nextMethod === "GET") {
       await route.fulfill({
@@ -266,6 +293,46 @@ async function fulfillGuarded(route: PlaywrightRoute, guard: PortalRequestGuard)
   }
 }
 
+const BODY_HEADERS = new Set([
+  "content-type",
+  "content-length",
+  "content-encoding",
+  "content-language",
+  "content-location",
+]);
+
+/**
+ * Headers for an in-place hop. `route.fetch` would otherwise re-send the
+ * original request's headers verbatim: the `Cookie` header must go so the
+ * context jar re-derives cookies for the new URL, `Authorization` must not
+ * cross origins, and body headers are meaningless once a redirect turned the
+ * request into a GET.
+ */
+function hopHeaders(
+  original: Record<string, string>,
+  change: { methodChanged: boolean; originChanged: boolean },
+): Record<string, string> {
+  const headers: Record<string, string> = {};
+  for (const [name, value] of Object.entries(original)) {
+    const lower = name.toLowerCase();
+    if (lower === "cookie") {
+      continue;
+    }
+    if (lower === "authorization" && change.originChanged) {
+      continue;
+    }
+    if (BODY_HEADERS.has(lower) && change.methodChanged) {
+      continue;
+    }
+    headers[lower] = value;
+  }
+  return headers;
+}
+
+/**
+ * Both a meta refresh and `location.replace` are emitted: the script keeps the
+ * interstitial out of history, the meta tag covers a page with scripting off.
+ */
 function clientRedirectPage(url: string): string {
   const literal = JSON.stringify(url);
   const attribute = url.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
@@ -277,7 +344,7 @@ function toPortalRequest(request: PlaywrightRequest): PortalRequest {
     url: request.url(),
     method: request.method(),
     resourceType: toResourceType(request.resourceType()),
-    postData: request.postData(),
+    postData: request.postData() ?? undefined,
   };
 }
 
@@ -400,20 +467,21 @@ class PlaywrightPageAdapter implements PortalBrowserPage {
     while (true) {
       const response = await fetch(currentUrl, {
         method: "GET",
-        headers: await this.downloadHeaders(currentUrl, options.expectedMimeType),
+        headers: await this.#downloadHeaders(currentUrl, options.expectedMimeType),
         redirect: "manual",
         signal,
       });
       if (isRedirectStatus(response.status)) {
         await response.body?.cancel();
+        const nextUrl = redirectTarget({
+          status: response.status,
+          location: response.headers.get("location"),
+          currentUrl,
+          hop: redirectsFollowed,
+        });
         if (redirectsFollowed >= options.maxRedirects) {
           throw new Error(`download exceeded ${options.maxRedirects} redirects`);
         }
-        const location = response.headers.get("location");
-        if (location === null) {
-          throw new Error(`download redirect ${response.status} missing Location header`);
-        }
-        const nextUrl = resolveUrl(location, currentUrl);
         if (!options.onRedirect(nextUrl)) {
           throw new Error("download redirect blocked by portal network policy");
         }
@@ -437,10 +505,7 @@ class PlaywrightPageAdapter implements PortalBrowserPage {
     }
   }
 
-  private async downloadHeaders(
-    url: string,
-    expectedMimeType: string,
-  ): Promise<Record<string, string>> {
+  async #downloadHeaders(url: string, expectedMimeType: string): Promise<Record<string, string>> {
     const headers: Record<string, string> = { accept: `${expectedMimeType}, */*;q=0.1` };
     const cookies = await this.#context.cookies([url]);
     if (cookies.length > 0) {

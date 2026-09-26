@@ -1,32 +1,19 @@
 /**
- * Drops the query string, fragment, and userinfo from a URL. Authenticated
- * portal URLs often carry session ids or signed parameters, so this runs before
- * a URL lands in provenance, stored metadata, or blocked-request records.
- * Returns undefined when the input is not a parseable URL.
+ * URL scrubbing before anything is retained or shown. Portal URLs carry
+ * session ids in query strings and account numbers, e-mail addresses, or
+ * signed tokens in path segments, so one policy applies everywhere a URL lands
+ * in provenance, stored metadata, blocked-request records, or error text.
  */
-export function sanitizeUrl(rawUrl: string): string | undefined {
-  try {
-    const url = new URL(rawUrl);
-    return `${url.protocol}//${url.host}${url.pathname}`;
-  } catch {
-    return undefined;
-  }
-}
 
-/** Sanitizes every URL embedded in free text, such as a browser error message. */
-export function sanitizeUrlsInText(text: string): string {
-  return text.replace(URL_IN_TEXT_RE, (match) => sanitizeUrl(match) ?? "[unparseable url]");
-}
-
-const URL_IN_TEXT_RE = /\b(?:https?|wss?):\/\/[^\s"'<>()[\]]+/gi;
+export const UNPARSEABLE_URL = "[unparseable url]";
+const REDACTED_SEGMENT = "[REDACTED_SEGMENT]";
 
 /**
- * Portals put account numbers, e-mail addresses, and signed tokens in path
- * segments too. Segments that look like identifiers of that kind are replaced
- * before a URL is retained; short human-readable segments and file names stay
- * so the document remains traceable.
+ * Keeps protocol, host, and path shape; drops query, fragment, and userinfo
+ * and replaces identifier-like path segments. Returns undefined when the input
+ * is not a parseable URL.
  */
-export function redactSensitiveUrlPath(rawUrl: string): string | undefined {
+export function redactUrl(rawUrl: string): string | undefined {
   let url: URL;
   try {
     url = new URL(rawUrl);
@@ -39,22 +26,56 @@ export function redactSensitiveUrlPath(rawUrl: string): string | undefined {
   return `${url.protocol}//${url.host}${segments.join("/")}`;
 }
 
-const REDACTED_SEGMENT = "[REDACTED_SEGMENT]";
-const TOKEN_SEGMENT_RE = /^[A-Za-z0-9_-]{24,}$/;
-const NUMERIC_ID_SEGMENT_RE = /^\d{8,}$/;
+/** Applies {@link redactUrl} to every URL embedded in free text, such as a browser error. */
+export function redactUrlsInText(text: string): string {
+  return text.replace(URL_IN_TEXT_RE, (match) => redactUrl(match) ?? UNPARSEABLE_URL);
+}
 
+const URL_IN_TEXT_RE = /\b(?:https?|wss?):\/\/[^\s"'<>()[\]]+/gi;
+
+/**
+ * Path and query with percent escapes decoded, for screening: servers decode
+ * `/%64elete` to `/delete`, so the guard must too. Malformed input is returned
+ * as is so it can still be screened literally.
+ */
+export function decodedPathAndQuery(rawUrl: string): string {
+  try {
+    const url = new URL(rawUrl);
+    return safeDecode(`${url.pathname}${url.search}`);
+  } catch {
+    return safeDecode(rawUrl);
+  }
+}
+
+const DIGIT_RUN_RE = /(?:\D*\d){8}/;
+const TOKEN_CHARS_RE = /^[A-Za-z0-9._~+=%-]+$/;
+const FILE_EXTENSION_RE = /\.[a-z]{2,4}$/i;
+const MIN_TOKEN_SEGMENT_LENGTH = 20;
+
+/**
+ * E-mail-like segments, anything carrying eight or more digits (account and
+ * order numbers, IBANs), and long token-shaped segments without a file
+ * extension (signed URLs, JWTs, base64 ids) are treated as sensitive. File
+ * names stay when they carry fewer digits; the downloaded filename is retained
+ * separately, so traceability does not depend on the URL.
+ */
 function isSensitivePathSegment(segment: string): boolean {
   const decoded = safeDecode(segment);
+  if (decoded.includes("@") || DIGIT_RUN_RE.test(decoded)) {
+    return true;
+  }
   return (
-    decoded.includes("@") || TOKEN_SEGMENT_RE.test(decoded) || NUMERIC_ID_SEGMENT_RE.test(decoded)
+    decoded.length >= MIN_TOKEN_SEGMENT_LENGTH &&
+    TOKEN_CHARS_RE.test(decoded) &&
+    !FILE_EXTENSION_RE.test(decoded)
   );
 }
 
-function safeDecode(segment: string): string {
+function safeDecode(value: string): string {
   try {
-    return decodeURIComponent(segment);
+    return decodeURIComponent(value);
   } catch {
-    return segment;
+    return value;
   }
 }
 

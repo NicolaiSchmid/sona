@@ -57,13 +57,17 @@ export type PortalFetchJobReservation =
 
 export interface RecordPortalFetchRunInput {
   context: WorkspaceContext;
+  /** The approved connection the run used; several connections may share a task. */
+  connectionId: string;
   result: RunPortalTaskResult;
 }
 
 /**
  * Durable run history. Every run that produced a result is recorded before the
  * lease is settled, so blocked requests, allowed exceptions, and outcomes stay
- * auditable after the queue has forgotten the job.
+ * auditable after the queue has forgotten the job. Recording is retried a few
+ * times; if it still fails the lease is kept so the browser is never rerun for
+ * documents that were already stored under the original run id.
  */
 export interface PortalFetchRunRecorder {
   recordRun(input: RecordPortalFetchRunInput): Promise<void>;
@@ -88,9 +92,10 @@ export interface RunPortalFetchJobInput {
 }
 
 /**
- * `failed` is retryable (the lease was released); `rejected` is terminal: the
- * task definition or portal layout must change before this connection can run
- * again, so the job id is consumed and a queue must not retry it.
+ * `duplicate`/`cooldown`: no run happened (`runId` undefined). `failed` is
+ * retryable (the lease was released); `rejected` is terminal: the task
+ * definition, approval, or portal layout must change before this connection
+ * can run again, so the job id is consumed and a queue must not retry it.
  */
 export type PortalFetchJobStatus = "completed" | "duplicate" | "cooldown" | "failed" | "rejected";
 
@@ -102,12 +107,6 @@ export interface RunPortalFetchJobResult {
   runResult: RunPortalTaskResult | undefined;
   error: string | undefined;
 }
-
-const TERMINAL_RUN_STATUSES: ReadonlySet<PortalTaskRunStatus> = new Set<PortalTaskRunStatus>([
-  "policy_refused",
-  "selector_missing",
-  "blocked",
-]);
 
 export async function runPortalFetchJob(
   input: RunPortalFetchJobInput,
@@ -157,20 +156,13 @@ export async function runPortalFetchJob(
   }
 
   if (runResult !== undefined) {
-    try {
-      await input.runs.recordRun({ context, result: runResult });
-    } catch (thrown) {
-      // Without a durable record the run is not auditable; hand the job back
-      // to the queue (dedup by content hash makes the rerun safe).
-      await releaseQuietly(input.state, leaseKey);
-      throw thrown;
-    }
+    await recordRunOrKeepLease(input, context, runResult);
   }
 
-  const settledStatus = runResult === undefined ? undefined : settledJobStatus(runResult.status);
-  if (settledStatus !== undefined) {
+  const settled = runResult === undefined ? undefined : SETTLED_JOB_STATUS[runResult.status];
+  if (settled !== undefined) {
     await input.state.complete(leaseKey);
-    return { ...base, status: settledStatus, runId, cooldownUntil, runResult };
+    return { ...base, status: settled, runId, cooldownUntil, runResult };
   }
   const releaseError = await releaseQuietly(input.state, leaseKey);
   return {
@@ -184,13 +176,42 @@ export async function runPortalFetchJob(
 }
 
 /** Job statuses that consume the job id; anything else releases the lease for a retry. */
-function settledJobStatus(
-  status: PortalTaskRunStatus,
-): Extract<PortalFetchJobStatus, "completed" | "rejected"> | undefined {
-  if (status === "completed") {
-    return "completed";
+
+type SettledJobStatus = Extract<PortalFetchJobStatus, "completed" | "rejected">;
+
+/** Exhaustive: a new runner status must decide explicitly whether it is retryable. */
+const SETTLED_JOB_STATUS = {
+  completed: "completed",
+  policy_refused: "rejected",
+  selector_missing: "rejected",
+  blocked: "rejected",
+  failed: undefined,
+} as const satisfies Record<PortalTaskRunStatus, SettledJobStatus | undefined>;
+
+const RECORD_RUN_ATTEMPTS = 3;
+
+async function recordRunOrKeepLease(
+  input: RunPortalFetchJobInput,
+  context: WorkspaceContext,
+  result: RunPortalTaskResult,
+): Promise<void> {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= RECORD_RUN_ATTEMPTS; attempt += 1) {
+    try {
+      await input.runs.recordRun({ context, connectionId: input.connectionId, result });
+      return;
+    } catch (error) {
+      lastError = error;
+    }
   }
-  return TERMINAL_RUN_STATUSES.has(status) ? "rejected" : undefined;
+  // Documents may already be stored under this run id; rerunning the browser
+  // would only produce a document-less duplicate run. Keep the lease and let
+  // the queue surface the infrastructure failure.
+  throw new Error(
+    `portal run ${result.runId} could not be recorded after ${RECORD_RUN_ATTEMPTS} attempts; lease kept: ${
+      lastError instanceof Error ? lastError.message : String(lastError)
+    }`,
+  );
 }
 
 async function releaseQuietly(

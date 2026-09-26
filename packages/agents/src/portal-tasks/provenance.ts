@@ -6,7 +6,10 @@
 import type { JsonValue } from "@sona/core";
 import type { StoredDocument } from "@sona/receipts";
 import type { ALLOWED_NON_IDEMPOTENT_REASONS, PortalHttpMethodException } from "./schema.js";
-import { sanitizeUrl } from "./url.js";
+import { redactUrl } from "./url.js";
+
+/** Identity of an execution backend, e.g. "local-playwright", "browserbase", "fake". */
+export type BrowserProviderName = string;
 
 /** Per-run provenance for an executed portal task. */
 export interface TaskRunProvenance {
@@ -15,8 +18,10 @@ export interface TaskRunProvenance {
   taskVersion: number;
   /** Portal domain the run operated against (from the task allowlist). */
   portalDomain: string;
-  /** Which execution backend ran the task (e.g. "browserbase", "fake"). */
-  browserProvider: string;
+  /** Which execution backend ran the task; equals `PortalBrowserProvider.providerName`. */
+  browserProvider: BrowserProviderName;
+  /** The approved portal connection whose credentials the run used. */
+  connectionId: string;
   workspaceId: string;
   /** ISO timestamp of the run. */
   fetchedAt: string;
@@ -150,7 +155,7 @@ export function toStoredDocument(input: ToStoredDocumentInput): StoredDocument {
 
 /** Provenance JSON carries the sanitized URL, or null when absent or unparseable. */
 function jsonSourceUrl(raw: string | undefined): string | null {
-  return raw === undefined ? null : (sanitizeUrl(raw) ?? null);
+  return raw === undefined ? null : (redactUrl(raw) ?? null);
 }
 
 function provenanceToJson(provenance: FetchedDocumentProvenance): JsonValue {

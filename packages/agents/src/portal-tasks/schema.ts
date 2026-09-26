@@ -5,11 +5,13 @@
  */
 import { sha256Hex } from "@sona/core";
 import { z } from "zod";
+import { DOWNLOAD_MIME_TYPES } from "./download.js";
 import {
   forbiddenConceptFor,
   forbiddenSelectorConceptFor,
   validateReadOnlyActions,
 } from "./policy.js";
+import { decodedPathAndQuery } from "./url.js";
 
 /** Risk labels for portal tasks. Only read-only fetching is supported today. */
 export const PORTAL_TASK_RISKS = ["read_only_document_fetch"] as const;
@@ -89,7 +91,8 @@ export const portalTaskStepSchema = z.discriminatedUnion("kind", [
     kind: z.literal("downloadLinks"),
     hrefAttribute: z.string().min(1).default("href"),
     filenameAttribute: z.string().min(1).optional(),
-    mimeType: z.string().min(1).default("application/pdf"),
+    /** Only formats whose bytes the runner can verify may become evidence. */
+    mimeType: z.enum(DOWNLOAD_MIME_TYPES).default("application/pdf"),
   }),
 ]);
 
@@ -105,8 +108,48 @@ export const portalHttpMethodExceptionSchema = z
      * repurposed for a mutation under this exception.
      */
     allowedBodyFields: z.array(z.string().min(1)).min(1),
+    /**
+     * Fields whose values are opaque credentials (username, password, OTP)
+     * and are therefore never screened. Every other field is a control field:
+     * its value is screened for forbidden operations, or must equal one of
+     * its pinned values when listed in `pinnedBodyValues`.
+     */
+    credentialBodyFields: z.array(z.string().min(1)).default([]),
+    /** Control fields whose values are reviewed exactly, e.g. `{ action: ["login"] }`. */
+    pinnedBodyValues: z.record(z.string().min(1), z.array(z.string()).min(1)).default({}),
   })
-  .strict();
+  .strict()
+  .superRefine((exception, ctx) => {
+    const allowed = new Set(exception.allowedBodyFields);
+    for (const field of exception.credentialBodyFields) {
+      if (!allowed.has(field)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["credentialBodyFields"],
+          message: `Credential field "${field}" is not in allowedBodyFields`,
+        });
+      }
+    }
+    for (const [field, values] of Object.entries(exception.pinnedBodyValues)) {
+      if (!allowed.has(field)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["pinnedBodyValues", field],
+          message: `Pinned field "${field}" is not in allowedBodyFields`,
+        });
+      }
+      for (const value of values) {
+        const concept = forbiddenConceptFor(value);
+        if (concept !== undefined) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ["pinnedBodyValues", field],
+            message: `Pinned value "${value}" implies a forbidden operation (${concept})`,
+          });
+        }
+      }
+    }
+  });
 
 export const portalTaskSchema = z
   .object({
@@ -137,7 +180,7 @@ export const portalTaskSchema = z
     // A justified POST is the only bypass of the read-only network guard, so
     // its endpoint must not itself name a destructive operation.
     for (const [index, exception] of task.httpMethodExceptions.entries()) {
-      const concept = forbiddenConceptFor(urlPathAndQuery(exception.urlPattern));
+      const concept = forbiddenConceptFor(decodedPathAndQuery(exception.urlPattern));
       if (concept !== undefined) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
@@ -161,15 +204,6 @@ export const portalTaskSchema = z
     }
   });
 
-function urlPathAndQuery(rawUrl: string): string {
-  try {
-    const url = new URL(rawUrl);
-    return `${url.pathname}${url.search}`;
-  } catch {
-    return rawUrl;
-  }
-}
-
 export type PortalTask = z.infer<typeof portalTaskSchema>;
 export type PortalTaskStep = z.infer<typeof portalTaskStepSchema>;
 export type PortalHttpMethodException = z.infer<typeof portalHttpMethodExceptionSchema>;
@@ -187,10 +221,12 @@ export function safeParsePortalTask(input: unknown): z.SafeParseReturnType<unkno
 /**
  * Content digest of a task definition. A portal connection is bound to the
  * digest of the definition the user approved, so credentials are only ever
- * filled into the exact reviewed revision, domains and steps included.
+ * filled into the exact reviewed revision, domains and steps included. The
+ * input is normalized through the schema first so defaults are part of the
+ * digest whether the caller passes raw YAML data or a parsed task.
  */
-export function portalTaskDigest(task: PortalTask): string {
-  return sha256Hex(new TextEncoder().encode(canonicalJson(task)));
+export function portalTaskDigest(task: unknown): string {
+  return sha256Hex(new TextEncoder().encode(canonicalJson(parsePortalTask(task))));
 }
 
 function canonicalJson(value: unknown): string {
@@ -198,6 +234,7 @@ function canonicalJson(value: unknown): string {
     return `[${value.map(canonicalJson).join(",")}]`;
   }
   if (typeof value === "object" && value !== null) {
+    // Code-unit order rather than localeCompare: the digest must not depend on the runtime locale.
     const entries = Object.entries(value)
       .filter(([, entryValue]) => entryValue !== undefined)
       .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))

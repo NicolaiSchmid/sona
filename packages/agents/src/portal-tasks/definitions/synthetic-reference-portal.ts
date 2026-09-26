@@ -17,6 +17,8 @@ export const syntheticReferencePortalTask = {
       reason: "login",
       justification: "Portal login form requires POST before read-only invoice access.",
       allowedBodyFields: ["email", "password"],
+      credentialBodyFields: ["email", "password"],
+      pinnedBodyValues: {},
     },
   ],
   steps: [

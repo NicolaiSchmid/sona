@@ -26,9 +26,14 @@ export {
   type BrowserbasePortalTaskRunnerOptions,
 } from "./portal-tasks/browserbase.js";
 export { syntheticReferencePortalTask } from "./portal-tasks/definitions/synthetic-reference-portal.js";
-export { DownloadTooLargeError } from "./portal-tasks/download.js";
+export {
+  DOWNLOAD_MIME_TYPES,
+  type DownloadMimeType,
+  DownloadTooLargeError,
+} from "./portal-tasks/download.js";
 export {
   createNetworkGuard,
+  isMaterialBlock,
   NetworkGuard,
   type NetworkGuardOptions,
   type NetworkGuardSnapshot,
@@ -44,12 +49,15 @@ export {
   type GetPortalConnectionInput,
   InMemoryPortalConnectionRepository,
   InMemoryPortalDocumentRegistry,
+  InMemoryPortalEvidenceRepository,
   LocalPlaywrightPortalTaskRunner,
   type LocalPlaywrightPortalTaskRunnerOptions,
   type PortalConnection,
   type PortalConnectionRepository,
   type PortalDocumentRegistry,
+  type PortalEvidenceRepository,
   type RecordContentHashInput,
+  type SavePortalEvidenceInput,
 } from "./portal-tasks/playwright-runner.js";
 export {
   forbiddenConceptFor,
@@ -63,6 +71,7 @@ export {
   type AllowedNonIdempotentRequestReason,
   type BlockedPortalRequest,
   type BlockedPortalRequestReason,
+  type BrowserProviderName,
   type ExtractionStatus,
   type FetchedContent,
   type FetchedDocument,
@@ -75,6 +84,7 @@ export {
   toStoredDocument,
 } from "./portal-tasks/provenance.js";
 export {
+  createInitialRunResult,
   FakePortalTaskRunner,
   type PortalTaskRunner,
   type PortalTaskRunStatus,

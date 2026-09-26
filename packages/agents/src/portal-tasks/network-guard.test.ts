@@ -19,6 +19,8 @@ const task: PortalTask = {
       reason: "login",
       justification: "Portal login form requires a POST before read-only invoice access.",
       allowedBodyFields: ["email", "password", "action", "q"],
+      credentialBodyFields: ["email", "password"],
+      pinnedBodyValues: {},
     },
   ],
   steps: [],
@@ -116,6 +118,8 @@ describe("createNetworkGuard", () => {
           reason: "search",
           justification: "Invoice search form posts its filter before listing results.",
           allowedBodyFields: ["email", "password", "action", "q"],
+          credentialBodyFields: ["email", "password"],
+          pinnedBodyValues: {},
         },
       ],
     };
@@ -153,10 +157,12 @@ describe("createNetworkGuard", () => {
           reason: "search",
           justification: "Invoice search form posts its filter before listing results.",
           allowedBodyFields: ["action", "q"],
+          credentialBodyFields: [],
+          pinnedBodyValues: {},
         },
       ],
     };
-    const post = (postData: string | null | undefined) =>
+    const post = (postData: string | undefined) =>
       createNetworkGuard({ task: searchTask }).evaluateRequest({
         url: "https://portal.test/api",
         method: "POST",
@@ -196,6 +202,42 @@ describe("createNetworkGuard", () => {
     expect(login).toEqual({ action: "allow" });
     expect(extraField).toEqual({ action: "abort", reason: "unreviewed_body" });
     expect(guard.snapshot().blockedRequests).toHaveLength(1);
+  });
+
+  it("requires pinned control-field values and never screens credential values", () => {
+    const loginTask: PortalTask = {
+      ...task,
+      httpMethodExceptions: [
+        {
+          method: "POST",
+          urlPattern: "https://portal.test/api",
+          reason: "login",
+          justification: "Multiplexed login endpoint dispatches on the action field.",
+          allowedBodyFields: ["action", "email", "password", "remember"],
+          credentialBodyFields: ["email", "password"],
+          pinnedBodyValues: { action: ["login"] },
+        },
+      ],
+    };
+    const post = (postData: string) =>
+      createNetworkGuard({ task: loginTask }).evaluateRequest({
+        url: "https://portal.test/api",
+        method: "POST",
+        resourceType: "xhr",
+        postData,
+      });
+
+    expect(post("action=login&email=a%40b.test&password=Delete-Me-2024&remember=1")).toEqual({
+      action: "allow",
+    });
+    expect(post("action=delete&email=a%40b.test&password=x")).toEqual({
+      action: "abort",
+      reason: "unreviewed_body",
+    });
+    expect(post("action=login&remember=delete")).toEqual({
+      action: "abort",
+      reason: "unreviewed_body",
+    });
   });
 
   it("refuses WebSocket handshakes even to allowlisted hosts", () => {
@@ -472,6 +514,8 @@ describe("NetworkGuard methods and exceptions", () => {
           reason: "search",
           justification: "Invoice search form posts its filter before listing results.",
           allowedBodyFields: ["email", "password", "action", "q"],
+          credentialBodyFields: ["email", "password"],
+          pinnedBodyValues: {},
         },
       ],
     };
@@ -504,6 +548,8 @@ describe("NetworkGuard methods and exceptions", () => {
           reason: "login",
           justification: "Third-party SSO login is not on the task allowlist.",
           allowedBodyFields: ["email", "password", "action", "q"],
+          credentialBodyFields: ["email", "password"],
+          pinnedBodyValues: {},
         },
       ],
     };
@@ -530,12 +576,14 @@ describe("NetworkGuard destructive URLs and reviewed bodies", () => {
         reason: "search",
         justification: "Invoice search form posts its filter before listing results.",
         allowedBodyFields: ["action", "q"],
+        credentialBodyFields: [],
+        pinnedBodyValues: {},
       },
     ],
   };
   const get = (url: string, resourceType: PortalRequest["resourceType"]) =>
     createNetworkGuard({ task }).evaluateRequest({ url, method: "GET", resourceType });
-  const post = (postData: string | null | undefined) =>
+  const post = (postData: string | undefined) =>
     createNetworkGuard({ task: searchTask }).evaluateRequest({
       url: "https://portal.test/api",
       method: "POST",
@@ -543,25 +591,29 @@ describe("NetworkGuard destructive URLs and reviewed bodies", () => {
       postData,
     });
 
-  it("screens document, xhr, fetch, and other requests but exempts every static type", () => {
-    for (const resourceType of ["document", "xhr", "fetch", "other"] as const) {
+  it("screens every resource type and exempts only static asset paths", () => {
+    for (const resourceType of [
+      "document",
+      "xhr",
+      "fetch",
+      "other",
+      "image",
+      "script",
+      "stylesheet",
+    ] as const) {
       expect(get("https://portal.test/remove-item", resourceType), resourceType).toEqual({
         action: "abort",
         reason: "destructive_url",
       });
-    }
-    for (const resourceType of [
-      "stylesheet",
-      "image",
-      "media",
-      "font",
-      "script",
-      "texttrack",
-    ] as const) {
       expect(get("https://portal.test/remove-item.css", resourceType), resourceType).toEqual({
         action: "allow",
       });
     }
+    // A query string turns an asset-looking path back into an operation.
+    expect(get("https://portal.test/remove-item.css?id=1", "stylesheet")).toEqual({
+      action: "abort",
+      reason: "destructive_url",
+    });
   });
 
   it("matches forbidden operations case-insensitively, through encoded separators, and in the query alone", () => {
@@ -584,10 +636,7 @@ describe("NetworkGuard destructive URLs and reviewed bodies", () => {
     expect(get("https://portal.test/api?op=list", "xhr")).toEqual({ action: "allow" });
   });
 
-  // Production gap: the screen inspects the raw path and query without
-  // percent-decoding, so `%63ancel` (which the server decodes to `cancel`) is
-  // not recognized. Flip to `it` once the guard decodes before screening.
-  it.fails("recognizes forbidden operations spelled with percent-encoded letters", () => {
+  it("recognizes forbidden operations spelled with percent-encoded letters", () => {
     expect(get("https://portal.test/%63ancel-subscription", "document")).toEqual({
       action: "abort",
       reason: "destructive_url",
@@ -638,7 +687,7 @@ describe("NetworkGuard destructive URLs and reviewed bodies", () => {
   it("treats an empty or whitespace-only body as a body without fields", () => {
     expect(post("")).toEqual({ action: "allow" });
     expect(post("  \n\t ")).toEqual({ action: "allow" });
-    expect(post(null)).toEqual({ action: "allow" });
+    expect(post(undefined)).toEqual({ action: "allow" });
   });
 
   it("refuses JSON bodies that are not objects and bodies it cannot parse", () => {
@@ -663,7 +712,7 @@ describe("NetworkGuard destructive URLs and reviewed bodies", () => {
   // Production gap: `new Map(new URLSearchParams(body))` keeps only the last
   // value of a repeated key, so a forbidden value in an earlier duplicate is
   // never screened. Flip to `it` once every value is inspected.
-  it.fails("screens every value of a repeated form key", () => {
+  it("screens every value of a repeated form key", () => {
     expect(post("action=delete&action=search")).toEqual({
       action: "abort",
       reason: "unreviewed_body",
@@ -680,6 +729,8 @@ describe("NetworkGuard destructive URLs and reviewed bodies", () => {
           reason: "search",
           justification: "Account-scoped invoice search posts its filter before listing.",
           allowedBodyFields: ["q"],
+          credentialBodyFields: [],
+          pinnedBodyValues: {},
         },
       ],
     };

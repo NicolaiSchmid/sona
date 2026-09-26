@@ -76,6 +76,7 @@ export function createInitialRunResult(
       taskVersion: identity.version,
       portalDomain: identity.domain,
       browserProvider: provider,
+      connectionId: input.connectionId,
       workspaceId: input.workspaceId,
       fetchedAt: input.now,
       blockedRequests: [],
