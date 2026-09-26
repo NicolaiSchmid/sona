@@ -130,7 +130,15 @@ export const portalHttpMethodExceptionSchema = z
         });
       }
     }
+    const credentials = new Set(exception.credentialBodyFields);
     for (const [field, values] of Object.entries(exception.pinnedBodyValues)) {
+      if (credentials.has(field)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["pinnedBodyValues", field],
+          message: `Field "${field}" cannot be both a credential and a pinned control field`,
+        });
+      }
       if (!allowed.has(field)) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,

@@ -266,10 +266,7 @@ describe("portal_fetch job", () => {
 
     expect(result.status).toBe("completed");
     expect(recorded).toHaveLength(1);
-    expect(recorded[0]).toMatchObject({
-      connectionId: "conn_1",
-      context: { workspaceId: "ws_1" },
-    });
+    expect(recorded[0]).toMatchObject({ context: { workspaceId: "ws_1" } });
     expect(recorded[0]?.result.provenance.connectionId).toBe("conn_1");
   });
 

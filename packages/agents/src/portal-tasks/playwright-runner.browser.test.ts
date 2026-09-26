@@ -48,7 +48,7 @@ describe.skipIf(!runBrowserTests)("LocalPlaywrightPortalTaskRunner browser fixtu
     expect(result.status).toBe("completed");
     expect(result.provenance.blockedRequests).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ resourceType: "websocket", reason: "websocket" }),
+        expect.objectContaining({ resourceType: "websocket", reason: "streaming_channel" }),
         expect.objectContaining({
           url: "https://tracking.example/pixel.gif",
           reason: "off_allowlist",

@@ -54,7 +54,7 @@ instantiated without an injected browser provider. Each run:
 - installs a network guard on the browser context that aborts off-allowlist
   and cleartext requests, URLs naming a forbidden operation (decoded, any
   method, any initiator; only static asset paths are exempt), every WebSocket
-  handshake, and any non-idempotent request that is not an exact-URL POST
+  or EventSource channel, and any non-idempotent request that is not an exact-URL POST
   exception whose body carries only reviewed fields (credential fields are
   opaque, control fields are pinned or screened);
 - treats a refused navigation, download, or mutation attempt as `blocked`

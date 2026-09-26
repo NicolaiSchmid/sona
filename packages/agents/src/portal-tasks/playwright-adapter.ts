@@ -185,8 +185,8 @@ class PlaywrightBrowserProvider implements PortalBrowserProvider {
  * their first request, on WebSocket handshakes (which `route` never sees), and
  * on every redirect hop: the browser is never handed a 3xx to follow on its
  * own (see {@link resolveRouteThroughGuard}). Should a redirected request
- * nevertheless surface, it is reported to the guard and the session fails
- * closed.
+ * nevertheless surface, it is reported to the guard and, if refused, the
+ * session fails closed.
  */
 async function installRequestGuard(
   context: PlaywrightContext,
@@ -304,7 +304,7 @@ function hopFetchOptions(request: PlaywrightRequest, target: Hop): PlaywrightRou
   };
 }
 
-const BODY_HEADERS = new Set([
+const BODY_HEADERS: ReadonlySet<string> = new Set([
   "content-type",
   "content-length",
   "content-encoding",
@@ -326,7 +326,7 @@ function hopHeaders(
   const headers: Record<string, string> = {};
   for (const [name, value] of Object.entries(original)) {
     const lower = name.toLowerCase();
-    if (lower === "cookie") {
+    if (lower === "cookie" || lower === "host") {
       continue;
     }
     if (lower === "authorization" && change.originChanged) {
@@ -489,10 +489,8 @@ class PlaywrightPageAdapter implements PortalBrowserPage {
           location: response.headers.get("location"),
           currentUrl,
           hop: redirectsFollowed,
+          maxHops: options.maxRedirects,
         });
-        if (redirectsFollowed >= options.maxRedirects) {
-          throw new Error(`download exceeded ${options.maxRedirects} redirects`);
-        }
         if (!options.onRedirect(nextUrl)) {
           throw new Error("download redirect blocked by portal network policy");
         }
