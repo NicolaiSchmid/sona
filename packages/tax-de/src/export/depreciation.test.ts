@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { generateDepreciationSection } from "./depreciation.js";
-import { SAMPLE_DEPRECIATION } from "./fixtures.js";
+import { SAMPLE_DEPRECIATION, SAMPLE_EQUIPMENT_DEPRECIATION } from "./fixtures.js";
 
 describe("generateDepreciationSection", () => {
   it("emits a traceable row for the export year in final mode when reviewed", () => {
@@ -136,6 +136,73 @@ describe("generateDepreciationSection", () => {
       postingId: "schedule:cfg_flat_v1:2027",
       transactionId: "schedule:cfg_flat_v1:2027",
     });
+  });
+
+  it("treats a year whose only transaction is superseded as not generated in a final export", () => {
+    const { rows, excluded } = generateDepreciationSection(
+      [
+        {
+          ...SAMPLE_DEPRECIATION,
+          transactions: [
+            {
+              year: 2026,
+              transactionId: "t_old",
+              postingIds: ["p_old"],
+              reviewState: "superseded",
+            },
+          ],
+        },
+      ],
+      { year: 2026, mode: "final" },
+    );
+    expect(rows).toEqual([]);
+    expect(excluded).toEqual([
+      { assetId: "asset_flat", year: 2026, reason: "no depreciation transaction generated yet" },
+    ]);
+  });
+
+  it("emits one row per asset and keeps each asset's own schedule and transaction", () => {
+    const { rows, excluded } = generateDepreciationSection(
+      [SAMPLE_DEPRECIATION, SAMPLE_EQUIPMENT_DEPRECIATION],
+      { year: 2026, mode: "final" },
+    );
+    expect(excluded).toEqual([]);
+    expect(rows.map((r) => r.assetId)).toEqual(["asset_flat", "asset_workstation"]);
+    const workstation = rows.find((r) => r.assetId === "asset_workstation");
+    expect(workstation).toMatchObject({
+      assetKind: "equipment",
+      scheduleConfigId: "cfg_workstation_v1",
+      configuredMethod: "linear over 3 years",
+      monthsInService: 12,
+      amount: "4000.00",
+      transactionId: "t_depr_workstation",
+      postingIds: ["p_depr_workstation", "p_depr_workstation_accumulated"],
+      status: "user_reviewed",
+      evidenceDocumentIds: ["doc_workstation_invoice"],
+    });
+    // The flat row is unchanged by the presence of a second asset.
+    expect(rows.find((r) => r.assetId === "asset_flat")?.transactionId).toBe("t_depr");
+  });
+
+  it("gates each asset independently within one export", () => {
+    // 2025: the flat has a draft transaction; the workstation has none yet.
+    const { rows, excluded } = generateDepreciationSection(
+      [SAMPLE_DEPRECIATION, SAMPLE_EQUIPMENT_DEPRECIATION],
+      { year: 2025, mode: "final" },
+    );
+    expect(rows).toEqual([]);
+    expect(excluded.map((e) => [e.assetId, e.reason])).toEqual([
+      ["asset_flat", expect.stringContaining('"draft"')],
+      ["asset_workstation", "no depreciation transaction generated yet"],
+    ]);
+    const draft = generateDepreciationSection(
+      [SAMPLE_DEPRECIATION, SAMPLE_EQUIPMENT_DEPRECIATION],
+      { year: 2025, mode: "draft" },
+    );
+    expect(draft.rows.map((r) => [r.assetId, r.status, r.monthsInService, r.amount])).toEqual([
+      ["asset_flat", "draft", 12, "6360.00"],
+      ["asset_workstation", "not_generated", 3, "1000.00"],
+    ]);
   });
 
   it("never uses legal-certainty wording", () => {

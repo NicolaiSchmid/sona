@@ -1,7 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { evidenceLinkSchema } from "../evidence/types";
 import { validateBalancedTransaction } from "../ledger/balance";
-import { SAMPLE_DISPOSAL, SAMPLE_PROPERTY, SAMPLE_PROPERTY_CONFIG } from "./fixtures";
+import {
+  SAMPLE_DISPOSAL,
+  SAMPLE_IMPROVEMENT,
+  SAMPLE_PROPERTY,
+  SAMPLE_PROPERTY_CONFIG,
+} from "./fixtures";
 import {
   buildDepreciationDraft,
   depreciationTransactionId,
@@ -227,5 +232,155 @@ describe("planDepreciationDrafts", () => {
     });
     expect(plan.create.map((d) => d.year)).toEqual([2024]);
     expect(plan.discrepancies).toEqual([]);
+  });
+
+  it("returns an empty plan when the requested year precedes the acquisition year", () => {
+    const plan = planDepreciationDrafts({
+      asset: SAMPLE_PROPERTY,
+      config: SAMPLE_PROPERTY_CONFIG,
+      schedule,
+      recorded: [],
+      throughYear: 2023,
+      createdAt: CREATED_AT,
+    });
+    expect(plan).toEqual({ create: [], skipped: [], discrepancies: [] });
+  });
+
+  it("reports a recorded year in another commodity as a discrepancy even with the same digits", () => {
+    const plan = planDepreciationDrafts({
+      asset: SAMPLE_PROPERTY,
+      config: SAMPLE_PROPERTY_CONFIG,
+      schedule,
+      recorded: [
+        {
+          year: 2025,
+          transactionId: "tx_usd_2025",
+          amount: { amount: "6360.00", commodity: "USD" },
+          reviewState: "user_reviewed",
+        },
+      ],
+      throughYear: 2025,
+      createdAt: CREATED_AT,
+    });
+    expect(plan.create.map((d) => d.year)).toEqual([2024]);
+    expect(plan.skipped.map((s) => s.year)).toEqual([2025]);
+    expect(plan.discrepancies).toEqual([
+      {
+        year: 2025,
+        transactionId: "tx_usd_2025",
+        recordedAmount: "6360.00",
+        scheduledAmount: "6360.00",
+        reviewState: "user_reviewed",
+        resolution: "adjustment_posting_required",
+      },
+    ]);
+  });
+
+  it("never rewrites a recorded year, even when the schedule is regenerated under a new config version", () => {
+    const v2 = { ...SAMPLE_PROPERTY_CONFIG, id: "cfg_flat_v2", version: 2 };
+    const scheduleV2 = computeDepreciationSchedule({ asset: SAMPLE_PROPERTY, config: v2 });
+    const plan = planDepreciationDrafts({
+      asset: SAMPLE_PROPERTY,
+      config: v2,
+      schedule: scheduleV2,
+      recorded: [
+        {
+          year: 2024,
+          transactionId: depreciationTransactionId("asset_flat", 1, 2024),
+          amount: { amount: "3180.00", commodity: "EUR" },
+          reviewState: "exported",
+        },
+      ],
+      throughYear: 2025,
+      createdAt: CREATED_AT,
+    });
+    expect(plan.skipped.map((s) => s.transactionId)).toEqual(["depr:asset_flat:v1:2024"]);
+    expect(plan.create.map((d) => d.transaction.id)).toEqual(["depr:asset_flat:v2:2025"]);
+    expect(plan.create[0]?.configVersion).toBe(2);
+    expect(plan.discrepancies).toEqual([]);
+  });
+});
+
+describe("buildDepreciationDraft — every schedule row", () => {
+  it("balances both postings for all 51 rows of the property schedule", () => {
+    expect(schedule.rows).toHaveLength(51);
+    for (const row of schedule.rows) {
+      const draft = buildDepreciationDraft({
+        asset: SAMPLE_PROPERTY,
+        config: SAMPLE_PROPERTY_CONFIG,
+        schedule,
+        row,
+        createdAt: CREATED_AT,
+      });
+      const balance = validateBalancedTransaction(draft.transaction.postings);
+      expect(balance.balanced, `year ${row.year}: ${balance.errors.join("; ")}`).toBe(true);
+      expect(draft.transaction.postings.map((p) => p.amount.commodity)).toEqual(["EUR", "EUR"]);
+      expect(draft.transaction.postings[0]?.amount.amount).toBe(row.amount);
+      expect(draft.transaction.postings[1]?.amount.amount).toBe(`-${row.amount}`);
+      expect(draft.transaction.reviewState).toBe("draft");
+      expect(draft.transaction.bookedOn).toBe(`${row.year}-12-31`);
+    }
+  });
+
+  it("uses a distinct deterministic transaction id per year", () => {
+    const ids = schedule.rows.map(
+      (row) =>
+        buildDepreciationDraft({
+          asset: SAMPLE_PROPERTY,
+          config: SAMPLE_PROPERTY_CONFIG,
+          schedule,
+          row,
+          createdAt: CREATED_AT,
+        }).transaction.id,
+    );
+    expect(new Set(ids).size).toBe(schedule.rows.length);
+  });
+
+  it("grows the substantiating links when an improvement adds evidence", () => {
+    const improved = computeDepreciationSchedule({
+      asset: SAMPLE_PROPERTY,
+      config: SAMPLE_PROPERTY_CONFIG,
+      events: [SAMPLE_IMPROVEMENT],
+    });
+    const before = improved.rows.find((r) => r.year === 2025);
+    const after = improved.rows.find((r) => r.year === 2026);
+    if (before === undefined || after === undefined) {
+      throw new Error("expected 2025 and 2026 rows");
+    }
+    const draftBefore = buildDepreciationDraft({
+      asset: SAMPLE_PROPERTY,
+      config: SAMPLE_PROPERTY_CONFIG,
+      schedule: improved,
+      row: before,
+      createdAt: CREATED_AT,
+    });
+    const draftAfter = buildDepreciationDraft({
+      asset: SAMPLE_PROPERTY,
+      config: SAMPLE_PROPERTY_CONFIG,
+      schedule: improved,
+      row: after,
+      createdAt: CREATED_AT,
+    });
+    for (const link of [...draftBefore.evidenceLinks, ...draftAfter.evidenceLinks]) {
+      expect(evidenceLinkSchema.safeParse(link).success).toBe(true);
+    }
+    const docsBefore = draftBefore.evidenceLinks
+      .filter((l) => l.kind === "substantiates")
+      .map((l) => l.fromId);
+    const docsAfter = draftAfter.evidenceLinks
+      .filter((l) => l.kind === "substantiates")
+      .map((l) => l.fromId);
+    expect(docsBefore).toEqual(["doc_purchase_contract", "doc_transfer_tax", "doc_notary"]);
+    expect(docsAfter).toEqual([
+      "doc_purchase_contract",
+      "doc_transfer_tax",
+      "doc_notary",
+      "doc_bath_invoice",
+    ]);
+    // Link ids stay unique within a draft.
+    expect(new Set(draftAfter.evidenceLinks.map((l) => l.id)).size).toBe(
+      draftAfter.evidenceLinks.length,
+    );
+    expect(draftAfter.transaction.postings[0]?.amount.amount).toBe("7360.00");
   });
 });

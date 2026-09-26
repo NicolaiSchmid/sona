@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { PRIVATE_DE_TEMPLATE } from "../templates/private-de.js";
-import { SAMPLE_DEPRECIATION, SAMPLE_POSTINGS } from "./fixtures.js";
+import { SAMPLE_DEPRECIATION, SAMPLE_EQUIPMENT_DEPRECIATION, SAMPLE_POSTINGS } from "./fixtures.js";
 import { generateExportPackage, PACKAGE_FILES } from "./package.js";
 import type { TaxPostingInput } from "./types.js";
 
@@ -169,6 +169,60 @@ describe("generateExportPackage", () => {
     });
     const missing2 = p2.files.find((f) => f.path === "missing-evidence.csv")?.content ?? "";
     expect(missing2.split("\n").filter((l) => l.includes("p_depr"))).toHaveLength(1);
+  });
+
+  it("neutralizes formula injection in depreciation-schedules.csv text fields", () => {
+    const p = generateExportPackage({
+      year: 2026,
+      postings: SAMPLE_POSTINGS,
+      template: PRIVATE_DE_TEMPLATE,
+      mode: "final",
+      depreciation: [{ ...SAMPLE_DEPRECIATION, assetName: '=HYPERLINK("http://evil","x")' }],
+    });
+    const csv = p.files.find((f) => f.path === "depreciation-schedules.csv")?.content ?? "";
+    const [, row] = csv.split("\n");
+    expect(row).toBeDefined();
+    expect(row).toContain("'=HYPERLINK");
+    expect(row).not.toMatch(/(^|,)=HYPERLINK/);
+    // Numeric columns are untouched by the escaping.
+    expect(row).toContain(",318000.00,");
+    expect(row).toContain(",6360.00,");
+  });
+
+  it("writes one depreciation row per asset and none for a year before acquisition", () => {
+    const both = generateExportPackage({
+      year: 2026,
+      postings: SAMPLE_POSTINGS,
+      template: PRIVATE_DE_TEMPLATE,
+      mode: "final",
+      depreciation: [SAMPLE_DEPRECIATION, SAMPLE_EQUIPMENT_DEPRECIATION],
+    });
+    const csv = both.files.find((f) => f.path === "depreciation-schedules.csv")?.content ?? "";
+    const lines = csv.split("\n");
+    expect(lines).toHaveLength(3);
+    expect(lines.filter((l) => l.startsWith("asset_flat,"))).toHaveLength(1);
+    expect(lines.filter((l) => l.startsWith("asset_workstation,"))).toHaveLength(1);
+    expect(lines[2]).toContain("cfg_workstation_v1");
+    expect(lines[2]).toContain("t_depr_workstation");
+    expect(lines[2]).toContain("p_depr_workstation;p_depr_workstation_accumulated");
+    expect(both.files.find((f) => f.path === "summary.md")?.content).toContain(
+      "## Depreciation schedules: 2 row(s)",
+    );
+
+    // Neither asset had entered service in 2023: nothing to schedule, nothing to export.
+    const before = generateExportPackage({
+      year: 2023,
+      postings: [],
+      template: PRIVATE_DE_TEMPLATE,
+      mode: "draft",
+      depreciation: [SAMPLE_DEPRECIATION, SAMPLE_EQUIPMENT_DEPRECIATION],
+    });
+    expect(
+      before.files.find((f) => f.path === "depreciation-schedules.csv")?.content.split("\n"),
+    ).toHaveLength(1);
+    expect(before.files.find((f) => f.path === "summary.md")?.content).toContain(
+      "## Depreciation schedules: 0 row(s)",
+    );
   });
 
   it("neutralizes spreadsheet formula injection in text fields", () => {
