@@ -199,3 +199,64 @@ describe("DownloadTooLargeError", () => {
     expect(error.message).toBe("download exceeds 1024 byte limit");
   });
 });
+
+describe("readBodyWithLimit lock release", () => {
+  it("releases the reader lock after aborting an oversized body", async () => {
+    const { stream } = streamOf([new Uint8Array(4), new Uint8Array(4)]);
+
+    await expect(readBodyWithLimit(stream, 5)).rejects.toBeInstanceOf(DownloadTooLargeError);
+
+    expect(stream.locked).toBe(false);
+  });
+
+  it("releases the reader lock and propagates the error when the stream itself fails", async () => {
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        controller.error(new Error("connection reset"));
+      },
+    });
+
+    await expect(readBodyWithLimit(stream, 5)).rejects.toThrow("connection reset");
+
+    expect(stream.locked).toBe(false);
+  });
+});
+
+describe("documentBytesProblem content-type parameters", () => {
+  const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1]);
+
+  it("ignores parameters and case when resolving the declared media type", () => {
+    expect(documentBytesProblem(png, "image/PNG; charset=binary")).toBeUndefined();
+    expect(documentBytesProblem(png, "  IMAGE/png ;q=1")).toBeUndefined();
+  });
+
+  it("reports the bare media type when parameters accompany an unsupported or mismatched type", () => {
+    expect(documentBytesProblem(png, "text/html; charset=utf-8")).toBe(
+      "download media type text/html is not a supported evidence format",
+    );
+    expect(documentBytesProblem(png, "image/JPEG; charset=binary")).toBe(
+      "download payload does not carry the image/jpeg signature",
+    );
+  });
+});
+
+describe("redirectTarget hop boundary", () => {
+  it("allows the last hop below the cap and refuses the one at it", () => {
+    expect(
+      redirectTarget({
+        status: 302,
+        location: "/x",
+        currentUrl: "https://a.test/",
+        hop: MAX_REDIRECT_HOPS - 1,
+      }),
+    ).toBe("https://a.test/x");
+    expect(() =>
+      redirectTarget({
+        status: 302,
+        location: "/x",
+        currentUrl: "https://a.test/",
+        hop: MAX_REDIRECT_HOPS,
+      }),
+    ).toThrow(`exceeded ${MAX_REDIRECT_HOPS} hops`);
+  });
+});

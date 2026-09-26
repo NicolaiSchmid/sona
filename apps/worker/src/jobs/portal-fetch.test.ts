@@ -1,6 +1,7 @@
 import type {
   PortalTask,
   PortalTaskRunner,
+  PortalTaskRunStatus,
   RunPortalTaskInput,
   RunPortalTaskResult,
 } from "@sona/agents";
@@ -13,6 +14,7 @@ import {
   type PortalFetchConnection,
   type PortalFetchConnectionRepository,
   type PortalFetchJobStateStore,
+  type PortalFetchJobStatus,
   type RecordPortalFetchRunInput,
   type RunPortalFetchJobInput,
   runPortalFetchJob,
@@ -160,6 +162,30 @@ describe("portal_fetch job", () => {
     expect(result.status).toBe("rejected");
     expect(result.runResult?.status).toBe(status);
     expect(retry.status).toBe("duplicate");
+  });
+
+  it("settles every runner status explicitly: only failed leaves the job id retryable", async () => {
+    const expected = {
+      completed: "completed",
+      policy_refused: "rejected",
+      selector_missing: "rejected",
+      blocked: "rejected",
+      failed: "failed",
+    } as const satisfies Record<PortalTaskRunStatus, PortalFetchJobStatus>;
+    const connections = singleConnection();
+
+    for (const status of Object.keys(expected) as readonly PortalTaskRunStatus[]) {
+      const state = new InMemoryPortalFetchJobStateStore();
+      const result = await runPortalFetchJob(
+        jobInput({ state, connections, runner: new StatusPortalTaskRunner(status) }),
+      );
+      const again = await runPortalFetchJob(
+        jobInput({ state, connections, now: "2026-02-01T00:05:00Z" }),
+      );
+
+      expect(result.status, status).toBe(expected[status]);
+      expect(again.status, status).toBe(status === "failed" ? "completed" : "duplicate");
+    }
   });
 
   it("records every run that produced a result before settling the lease", async () => {
