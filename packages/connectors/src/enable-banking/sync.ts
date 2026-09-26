@@ -5,6 +5,7 @@
  * are injected so this composes with real repositories or in-memory fakes.
  */
 import { createRawSourceRecord, type JsonValue, type RawSourceRecord } from "@sona/core";
+import type { RawLink, SyncEnv, SyncStatus } from "../shared.js";
 import type { EnableBankingClient } from "./client.js";
 import {
   accountUidsFromSession,
@@ -45,10 +46,7 @@ export interface RawRecordStore {
   append(record: RawSourceRecord): Promise<void>;
 }
 
-/** Link from a normalized bank record back to the raw source record it came from. */
-export interface RawLink {
-  rawRecordId: string;
-}
+export type { RawLink, SyncEnv };
 
 export interface BankRecordStore {
   saveAccount(account: NormalizedAccount, link: RawLink): Promise<void>;
@@ -56,14 +54,7 @@ export interface BankRecordStore {
   saveTransaction(transaction: NormalizedTransaction, link: RawLink): Promise<void>;
 }
 
-export interface SyncEnv {
-  /** Unique id generator for raw records and the run. */
-  ids: () => string;
-  /** Current time as an ISO-8601 string. */
-  nowIso: () => string;
-}
-
-export type SyncStatus = "succeeded" | "completed_with_errors" | "failed";
+export type { SyncStatus };
 
 /** Pseudo "account" id used to record a session-level (non per-account) failure. */
 const SESSION_SCOPE = "(session)";

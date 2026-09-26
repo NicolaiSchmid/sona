@@ -21,6 +21,8 @@ export * from "./ledger/balance";
 export * from "./ledger/types";
 export * from "./money/decimal";
 export * from "./money/types";
+export * from "./portfolio/postings";
+export * from "./portfolio/types";
 export * from "./review/types";
 export * from "./runtime/backends";
 export * from "./runtime/config";

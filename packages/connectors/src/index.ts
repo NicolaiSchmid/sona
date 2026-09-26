@@ -9,3 +9,4 @@
 export const sonaConnectorsVersion = "0.0.0" as const;
 
 export * as enableBanking from "./enable-banking/index.js";
+export * as portfolioPerformance from "./portfolio-performance/index.js";

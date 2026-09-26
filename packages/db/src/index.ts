@@ -55,6 +55,13 @@ export {
 } from "./repositories/ledger.js";
 export { SqliteMatchCandidateRepository } from "./repositories/matches.js";
 export { SqlitePortalTaskRunRepository } from "./repositories/portal-task-runs.js";
+export {
+  createWorkspacePortfolioStore,
+  type PersistedBrokerAccount,
+  type PersistedPortfolioEvent,
+  type PersistedSecurity,
+  SqlitePortfolioRepository,
+} from "./repositories/portfolio.js";
 export { SqliteRawRecordRepository } from "./repositories/raw-records.js";
 export { RECORD_TYPES, type RecordRef, type RecordType } from "./repositories/records.js";
 export { reviewEventId, SqliteReviewEventRepository } from "./repositories/review-events.js";
@@ -73,6 +80,10 @@ export type {
   NormalizedAccount,
   NormalizedBalance,
   NormalizedTransaction,
+  PortfolioBrokerAccountInput,
+  PortfolioSaveResult,
+  PortfolioSecurityInput,
+  PortfolioStore,
   RawLink,
   SyncRunStore,
   SyncStatus,

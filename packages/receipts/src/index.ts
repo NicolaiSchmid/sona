@@ -65,8 +65,24 @@ export {
   reconcileMatchSet,
 } from "./reconciliation/policies.js";
 export {
+  amountsEqual,
   DEFAULT_MAX_DATE_DISTANCE_DAYS,
+  dateDistanceDays,
+  normalizeCurrency,
   type ScoreOptions,
   scoreMatch,
   vendorSimilarity,
 } from "./reconciliation/scoring.js";
+export {
+  DEFAULT_TRANSFER_AUTO_APPLY_POLICY,
+  DEFAULT_TRANSFER_MAX_DATE_DISTANCE_DAYS,
+  decideTransferLegs,
+  type MatchableCashMovement,
+  type ReconcileTransferLegsInput,
+  reconcileTransferLegs,
+  scoreTransferLegs,
+  TRANSFER_SCORER_VERSION,
+  type TransferLegMatch,
+  type TransferReconciliationResult,
+  type TransferReviewItem,
+} from "./reconciliation/transfers.js";

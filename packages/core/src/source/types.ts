@@ -36,6 +36,9 @@ export type RawSourceRecordType =
   | "bank_transaction"
   | "document"
   | "portfolio_event"
+  | "portfolio_valuation"
+  /** A complete uploaded/exported file, preserved verbatim before row parsing. */
+  | "source_file"
   | "asset_event";
 
 export interface RawSourceRecord {

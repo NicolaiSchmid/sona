@@ -3,7 +3,7 @@
  * implementation is intentionally simple and replaceable; every contribution is
  * reflected in `reasons`/`blockers` so decisions are auditable.
  */
-import { isValidDecimalString, isZeroDecimal, sumDecimals } from "@sona/core";
+import { decimalsEqual, isValidDecimalString, isZeroDecimal } from "@sona/core";
 import type { MatchableDocument, MatchableTransaction, MatchScore } from "./matches.js";
 
 /** Score weights. They sum to 1.0 for a perfectly aligned pair. */
@@ -19,9 +19,9 @@ export const DEFAULT_MAX_DATE_DISTANCE_DAYS = 5;
 const MIN_CONFIDENCE = 0.6;
 
 /** Below this source reliability a match is flagged for review. */
-const MIN_SOURCE_RELIABILITY = 0.5;
+export const MIN_SOURCE_RELIABILITY = 0.5;
 
-function normalizeCurrency(code: string | undefined): string | undefined {
+export function normalizeCurrency(code: string | undefined): string | undefined {
   return code?.trim().toUpperCase();
 }
 
@@ -42,19 +42,17 @@ const LEGAL_FORM_TOKENS = new Set([
   "co",
 ]);
 
-function negate(amount: string): string {
-  return amount.startsWith("-") ? amount.slice(1) : `-${amount}`;
-}
-
-function absDecimal(amount: string): string {
+/** Strips a leading sign without validating; a malformed amount stays malformed and fails equality. */
+function stripSign(amount: string): string {
   return amount.startsWith("-") ? amount.slice(1) : amount;
 }
 
-function amountsEqual(a: string, b: string): boolean {
+/** Exact decimal equality; false for invalid input. */
+export function amountsEqual(a: string, b: string): boolean {
   if (!isValidDecimalString(a) || !isValidDecimalString(b)) {
     return false;
   }
-  return isZeroDecimal(sumDecimals([a, negate(b)]));
+  return decimalsEqual(a, b);
 }
 
 function parseIsoDay(value: string | undefined): number | undefined {
@@ -86,7 +84,8 @@ function parseIsoDay(value: string | undefined): number | undefined {
   return Math.floor(ms / 86_400_000);
 }
 
-function dateDistanceDays(a: string | undefined, b: string | undefined): number | undefined {
+/** Absolute day distance between two ISO dates, or undefined if either is invalid. */
+export function dateDistanceDays(a: string | undefined, b: string | undefined): number | undefined {
   const da = parseIsoDay(a);
   const db = parseIsoDay(b);
   if (da === undefined || db === undefined) {
@@ -200,7 +199,7 @@ export function scoreMatch(
   let exactAmount = false;
   if (
     document.totalAmount !== undefined &&
-    amountsEqual(absDecimal(transaction.amount), document.totalAmount)
+    amountsEqual(stripSign(transaction.amount), document.totalAmount)
   ) {
     exactAmount = true;
     score += WEIGHT_AMOUNT;
