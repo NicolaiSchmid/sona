@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { CORE_MIGRATIONS } from "./migrations/index";
 import { applyMigrations } from "./runner";
 import {
+  ADAPTER_TABLES,
   ASSET_TABLES,
   CORE_TABLES,
   EMAIL_TABLES,
@@ -40,6 +41,7 @@ describe("core migrations", () => {
         ...ASSET_TABLES,
         ...PORTFOLIO_TABLES,
         ...EMAIL_TABLES,
+        ...ADAPTER_TABLES,
       ]) {
         expect(names.has(table), `missing table ${table}`).toBe(true);
       }

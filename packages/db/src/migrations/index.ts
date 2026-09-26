@@ -30,4 +30,5 @@ export const CORE_MIGRATIONS: readonly Migration[] = [
   { id: "0005_email_sources", sql: load("./0005_email_sources.sql") },
   { id: "0006_assets", sql: load("./0006_assets.sql") },
   { id: "0007_portfolio", sql: load("./0007_portfolio.sql") },
+  { id: "0010_adapters", sql: load("./0010_adapters.sql") },
 ];

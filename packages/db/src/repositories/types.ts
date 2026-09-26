@@ -178,3 +178,60 @@ export interface EmailSyncRunStore {
     folder: string;
   }): Promise<EmailSyncCursor | undefined>;
 }
+
+// --- Paperless import ---------------------------------------------------------
+// Structural twins of the `@sona/connectors` paperless sync store contracts.
+
+export interface PaperlessSyncCursor {
+  lastModified: string;
+  lastDocumentId: number;
+  policyHash: string;
+}
+
+export type PaperlessSyncStatus = "succeeded" | "completed_with_errors" | "failed";
+
+export type PaperlessCursorResetReason = "policy_changed";
+
+export interface PaperlessSyncError {
+  documentId: number | undefined;
+  message: string;
+}
+
+export interface PaperlessSyncSummary {
+  runId: string;
+  documentsSeen: number;
+  documentsIngested: number;
+  documentsSkippedNotAllowlisted: number;
+  documentsSkippedDuplicate: number;
+  documentsSkippedPolicy: number;
+  documentsStored: number;
+  documentsDeduplicated: number;
+  cursorReset: PaperlessCursorResetReason | undefined;
+  cursor: PaperlessSyncCursor | undefined;
+  errors: PaperlessSyncError[];
+}
+
+export interface PaperlessSyncRunStore {
+  start(run: {
+    runId: string;
+    workspaceId: string;
+    sourceId: string;
+    startedAt: string;
+  }): Promise<void>;
+  recordError(error: {
+    runId: string;
+    documentId: number | undefined;
+    message: string;
+    at: string;
+  }): Promise<void>;
+  finish(run: {
+    runId: string;
+    status: PaperlessSyncStatus;
+    finishedAt: string;
+    summary: PaperlessSyncSummary;
+  }): Promise<void>;
+  latestCursor(input: {
+    workspaceId: string;
+    sourceId: string;
+  }): Promise<PaperlessSyncCursor | undefined>;
+}

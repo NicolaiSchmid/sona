@@ -10,6 +10,12 @@
 export const sonaDbVersion = "0.0.0" as const;
 
 export { CORE_MIGRATIONS, type Migration } from "./migrations/index";
+export {
+  type ShareLinkActor,
+  type ShareLinkDownloadRequest,
+  type ShareLinkDownloadResult,
+  SqliteAccountantShareLinkRepository,
+} from "./repositories/accountant-share-links.js";
 export { SqliteAssetRepository } from "./repositories/assets.js";
 export {
   type AuditEventCursor,
@@ -61,6 +67,13 @@ export {
   UnbalancedLedgerTransactionError,
 } from "./repositories/ledger.js";
 export { SqliteMatchCandidateRepository } from "./repositories/matches.js";
+export {
+  createWorkspacePaperlessSyncRunStore,
+  type PaperlessSyncRunError,
+  type PersistedPaperlessSyncRun,
+  type PersistedPaperlessSyncRunStatus,
+  SqlitePaperlessSyncRunRepository,
+} from "./repositories/paperless-sync-runs.js";
 export { SqlitePortalTaskRunRepository } from "./repositories/portal-task-runs.js";
 export {
   createWorkspacePortfolioStore,
@@ -93,6 +106,12 @@ export type {
   NormalizedAccount,
   NormalizedBalance,
   NormalizedTransaction,
+  PaperlessCursorResetReason,
+  PaperlessSyncCursor,
+  PaperlessSyncError,
+  PaperlessSyncRunStore,
+  PaperlessSyncStatus,
+  PaperlessSyncSummary,
   PortfolioBrokerAccountInput,
   PortfolioSaveResult,
   PortfolioSecurityInput,
