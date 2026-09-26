@@ -24,8 +24,23 @@ export class DepreciationError extends Error {
   }
 }
 
-/** ISO calendar date, YYYY-MM-DD. */
-const isoDateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "expected YYYY-MM-DD");
+/** True if `value` is a YYYY-MM-DD string naming a real calendar day (no 2026-02-31). */
+export function isCalendarDate(value: string): boolean {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  if (match === null) {
+    return false;
+  }
+  const [year, month, day] = [Number(match[1]), Number(match[2]), Number(match[3])];
+  const date = new Date(Date.UTC(year, month - 1, day));
+  return (
+    date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day
+  );
+}
+
+/** ISO calendar date, YYYY-MM-DD, validated against the calendar. */
+const isoDateSchema = z
+  .string()
+  .refine(isCalendarDate, { message: "expected a valid calendar date (YYYY-MM-DD)" });
 
 /** ISO timestamp with offset, as written to `createdAt` columns. */
 const isoTimestampSchema = z.string().datetime({ offset: true });
@@ -129,7 +144,16 @@ export const assetSchema = z
         });
       }
     }
+    const sideCostIds = new Set<string>();
     for (const [index, sideCost] of asset.acquisitionSideCosts.entries()) {
+      if (sideCostIds.has(sideCost.id)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["acquisitionSideCosts", index, "id"],
+          message: `duplicate side cost id ${JSON.stringify(sideCost.id)}`,
+        });
+      }
+      sideCostIds.add(sideCost.id);
       if (sideCost.amount.commodity !== asset.commodity) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
