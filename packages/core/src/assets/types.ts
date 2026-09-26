@@ -8,8 +8,9 @@
  * decides which rate is legally applicable.
  *
  * Every amount is a core {@link MoneyAmount} decimal string. Asset history
- * (improvements, disposal) is append-only; schedule configuration is versioned
- * so each generated row can name the exact configuration that produced it.
+ * (improvements, disposal, retractions) is append-only; schedule configuration
+ * is versioned so each generated row can name the exact configuration that
+ * produced it.
  */
 import { z } from "zod";
 import { isZeroDecimal } from "../money/decimal";
@@ -250,3 +251,23 @@ export type DepreciationScheduleConfig = z.infer<typeof depreciationScheduleConf
 
 /** Default fractional digits for schedule amounts (currency minor units). */
 export const DEFAULT_DEPRECIATION_ROUNDING_SCALE = 2;
+
+/**
+ * A generated depreciation transaction recorded for one asset-year, as the
+ * persistence layer stores it (no review state — that lives on the ledger
+ * transaction). Insert-only; one row per transaction.
+ */
+export const recordedDepreciationEntrySchema = z.object({
+  id: z.string().min(1),
+  workspaceId: z.string().min(1),
+  assetId: z.string().min(1),
+  /** Schedule configuration the transaction was generated from. */
+  configId: z.string().min(1),
+  year: z.number().int(),
+  transactionId: z.string().min(1),
+  /** Debit amount booked on the expense posting. */
+  amount: nonNegativeMoneySchema,
+  createdAt: z.string().datetime({ offset: true }),
+});
+
+export type RecordedDepreciationEntry = z.infer<typeof recordedDepreciationEntrySchema>;

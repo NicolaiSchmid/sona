@@ -231,7 +231,21 @@ describe("SqliteAssetRepository", () => {
       // The foreign key refuses a retraction of an event that does not exist in the workspace.
       await expect(
         repo.appendEvent({ ...retraction, id: "evt_dangling", retractsEventId: "evt_missing" }),
-      ).rejects.toThrow(/FOREIGN KEY/i);
+      ).rejects.toThrow(/does not belong to asset/);
+      // Same workspace, but the target event belongs to another asset.
+      await repo.create(property({ id: "asset_b", name: "B" }));
+      await repo.appendEvent({ ...improvement, id: "evt_b", assetId: "asset_b" });
+      await expect(
+        repo.appendEvent({ ...retraction, id: "evt_cross_asset", retractsEventId: "evt_b" }),
+      ).rejects.toThrow(/does not belong to asset/);
+      // Retractions cannot be retracted.
+      await expect(
+        repo.appendEvent({ ...retraction, id: "evt_nested", retractsEventId: "evt_retract" }),
+      ).rejects.toThrow(/cannot retract another retraction/);
+      expect((await repo.listEvents("ws_1", "asset_flat")).map((e) => e.id)).toEqual([
+        "evt_bath",
+        "evt_retract",
+      ]);
     } finally {
       close();
     }
@@ -288,14 +302,32 @@ describe("SqliteAssetRepository", () => {
       await repo.create(property());
       await repo.saveScheduleConfig(config());
       const first = await repo.recordDepreciationEntry(entry(2024));
-      // Same transaction again: the stored entry wins, nothing is rewritten.
+      // Same transaction again (a retry): the stored entry wins, nothing is rewritten.
       const again = await repo.recordDepreciationEntry({
         ...entry(2024),
         id: "entry_dup",
-        amount: { amount: "999.00", commodity: "EUR" },
+        createdAt: "2026-01-02T00:00:00Z",
       });
       expect(first).toEqual(entry(2024));
       expect(again).toEqual(entry(2024));
+      // A different asset-year or amount under a known transaction id is a caller bug.
+      await expect(
+        repo.recordDepreciationEntry({
+          ...entry(2024),
+          id: "entry_wrong",
+          amount: { amount: "999.00", commodity: "EUR" },
+        }),
+      ).rejects.toThrow(/already recorded with a different/);
+      await expect(
+        repo.recordDepreciationEntry({ ...entry(2024), id: "entry_wrong_year", year: 2031 }),
+      ).rejects.toThrow(/already recorded with a different/);
+      // Invalid input is rejected at the write boundary before touching the database.
+      await expect(
+        repo.recordDepreciationEntry({
+          ...entry(2030),
+          amount: { amount: "not-a-decimal", commodity: "EUR" },
+        }),
+      ).rejects.toThrow();
       // A replacement transaction for the same year is a new history row.
       await repo.recordDepreciationEntry({
         ...entry(2024),

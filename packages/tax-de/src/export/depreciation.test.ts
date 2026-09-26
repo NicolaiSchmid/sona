@@ -158,6 +158,29 @@ describe("generateDepreciationSection", () => {
     ]);
   });
 
+  it("treats two live transactions for one year as a review gap instead of picking one", () => {
+    const doubled = {
+      ...SAMPLE_DEPRECIATION,
+      transactions: [
+        ...SAMPLE_DEPRECIATION.transactions,
+        {
+          year: 2026,
+          transactionId: "t_depr_second",
+          postingIds: ["p_second"],
+          amount: { amount: "6360.00", commodity: "EUR" },
+          configVersion: 1,
+          reviewState: "draft" as const,
+        },
+      ],
+    };
+    const final = generateDepreciationSection([doubled], { year: 2026, mode: "final" });
+    expect(final.rows).toEqual([]);
+    expect(final.excluded[0]?.reason).toContain("more than one live transaction");
+    const draft = generateDepreciationSection([doubled], { year: 2026, mode: "draft" });
+    expect(draft.rows[0]?.notes).toContain("t_depr, t_depr_second");
+    expect(draft.rows[0]?.notes).toContain("review required");
+  });
+
   it("ignores superseded transactions when resolving a year's status", () => {
     const { rows } = generateDepreciationSection(
       [
@@ -365,7 +388,7 @@ describe("generateDepreciationSection", () => {
       {
         postingId: "schedule:cfg_flat_v1:2026",
         transactionId: "schedule:cfg_flat_v1:2026",
-        date: "2026-12-31",
+        date: "2026-06-30",
         account: "asset:asset_flat",
         sectionId: "depreciation",
         amount: "3180.00",

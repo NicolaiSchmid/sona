@@ -35,6 +35,7 @@ import type { ExportMode } from "./types.js";
 export interface DepreciationTransactionRef {
   year: number;
   transactionId: string;
+  /** Posting ids of the transaction, expense posting first. */
   postingIds: string[];
   /** Debit amount actually booked on the expense posting. */
   amount: MoneyAmount;
@@ -171,10 +172,11 @@ export function generateDepreciationSection(
 
   for (const input of inputs) {
     const { schedule } = input;
-    const transaction = input.transactions.find(
+    const live = input.transactions.filter(
       (t): t is LiveDepreciationTransactionRef =>
         t.year === options.year && t.reviewState !== "superseded",
     );
+    const [transaction, ...duplicates] = live;
     const row = schedule.rows.find((r) => r.year === options.year);
     if (row === undefined) {
       if (transaction !== undefined) {
@@ -191,7 +193,10 @@ export function generateDepreciationSection(
     }
 
     const status: DepreciationRowStatus = transaction?.reviewState ?? "not_generated";
-    const gap = reviewGap(transaction, { amount: row.amount, commodity: schedule.commodity });
+    const gap =
+      duplicates.length > 0
+        ? `more than one live transaction recorded for this year (${live.map((t) => t.transactionId).join(", ")}); review required`
+        : reviewGap(transaction, { amount: row.amount, commodity: schedule.commodity });
     if (options.mode === "final" && gap !== undefined) {
       result.excluded.push({
         assetId: input.assetId,
@@ -239,7 +244,10 @@ export function generateDepreciationSection(
     if (missingEvidence) {
       result.missingEvidence.push({
         ...depreciationRowReference(exportRow),
-        date: `${row.year}-12-31`,
+        // Same booking date the draft transaction uses.
+        date: schedule.disposedOn?.startsWith(`${row.year}-`)
+          ? schedule.disposedOn
+          : `${row.year}-12-31`,
         amount: row.amount,
         currency: schedule.commodity,
       });
