@@ -1,4 +1,3 @@
-import { createRequire } from "node:module";
 import {
   type Asset,
   type AssetDisposalEvent,
@@ -9,33 +8,9 @@ import {
   type RecordedDepreciationEntry,
 } from "@sona/core";
 import { describe, expect, it } from "vitest";
-import { CORE_MIGRATIONS } from "../migrations/index.js";
-import {
-  applyMigrations,
-  createSqliteDbClient,
-  type DbClient,
-  type SqliteDatabase,
-} from "../runner.js";
 import { SqliteAssetRepository } from "./assets.js";
 import { SqliteEvidenceLinkRepository } from "./evidence-links.js";
-
-const require = createRequire(import.meta.url);
-const { DatabaseSync } = require("node:sqlite") as typeof import("node:sqlite");
-
-function createTestDatabase(): { db: DbClient; close: () => void } {
-  const sqlite = new DatabaseSync(":memory:") as SqliteDatabase;
-  sqlite.exec("PRAGMA foreign_keys = ON");
-  const db = createSqliteDbClient(sqlite);
-  applyMigrations(db, CORE_MIGRATIONS);
-  for (const workspaceId of ["ws_1", "ws_2"]) {
-    db.prepare("INSERT INTO workspaces (id, name, created_at) VALUES (?, ?, ?)").run(
-      workspaceId,
-      `Workspace ${workspaceId}`,
-      "2026-01-01T00:00:00Z",
-    );
-  }
-  return { db, close: () => sqlite.close() };
-}
+import { createTestDatabase } from "./test-support.js";
 
 const CREATED_AT = "2026-01-01T00:00:00Z";
 
@@ -610,6 +585,139 @@ describe("SqliteAssetRepository", () => {
       ).rejects.toThrow(/UNIQUE|PRIMARY KEY/i);
       expect(await repo.getById("ws_2", "asset_colliding")).toBeUndefined();
       expect(await repo.list("ws_2")).toEqual([]);
+    } finally {
+      close();
+    }
+  });
+
+  it("refuses a retry that re-describes a known transaction under a different config", async () => {
+    const { db, close } = createTestDatabase();
+    try {
+      const repo = new SqliteAssetRepository(db);
+      await repo.create(property());
+      await repo.saveScheduleConfig(config());
+      await repo.saveScheduleConfig(config({ id: "cfg_v2", version: 2 }));
+      await repo.recordDepreciationEntry(entry(2024));
+      // cfg_v2 exists for the same asset, so only the payload comparison can refuse this.
+      await expect(
+        repo.recordDepreciationEntry({ ...entry(2024), id: "entry_wrong_cfg", configId: "cfg_v2" }),
+      ).rejects.toThrow(/already recorded with a different/);
+      expect(await repo.listDepreciationEntries("ws_1", "asset_flat")).toEqual([entry(2024)]);
+    } finally {
+      close();
+    }
+  });
+
+  it("rejects a retraction whose target was recorded in another workspace", async () => {
+    const { db, close } = createTestDatabase();
+    try {
+      const repo = new SqliteAssetRepository(db);
+      await repo.create(property());
+      await repo.create(property({ id: "asset_other", workspaceId: "ws_2" }));
+      const foreign: AssetImprovementEvent = {
+        ...improvement,
+        id: "evt_ws2",
+        workspaceId: "ws_2",
+        assetId: "asset_other",
+      };
+      await repo.appendEvent(foreign);
+      // The target lookup is workspace-scoped: ws_1 cannot see, let alone retract, ws_2's event.
+      await expect(
+        repo.appendEvent({
+          kind: "retraction",
+          id: "evt_cross_ws",
+          workspaceId: "ws_1",
+          assetId: "asset_flat",
+          retractsEventId: "evt_ws2",
+          occurredOn: "2026-04-01",
+          description: "Cross-workspace retraction",
+          evidenceDocumentIds: [],
+          createdAt: "2026-04-01T00:00:00Z",
+        }),
+      ).rejects.toThrow(/does not belong to asset asset_flat/);
+      expect(await repo.listEvents("ws_1", "asset_flat")).toEqual([]);
+      expect(await repo.listEvents("ws_2", "asset_other")).toEqual([foreign]);
+    } finally {
+      close();
+    }
+  });
+
+  it("verifies the document endpoint of a draft's substantiating links in the workspace", async () => {
+    const { db, close } = createTestDatabase();
+    try {
+      const repo = new SqliteAssetRepository(db);
+      const links = new SqliteEvidenceLinkRepository(db);
+      await repo.create(property());
+      await repo.saveScheduleConfig(config());
+      const schedule = computeDepreciationSchedule({ asset: property(), config: config() });
+      const [draft] = planDepreciationDrafts({
+        asset: property(),
+        config: config(),
+        schedule,
+        recorded: [],
+        throughYear: 2024,
+        createdAt: CREATED_AT,
+      }).create;
+      if (draft === undefined) {
+        throw new Error("expected a draft for 2024");
+      }
+      const substantiating = draft.evidenceLinks.filter((l) => l.kind === "substantiates");
+      expect(substantiating.map((l) => l.fromId).sort()).toEqual(["doc_contract", "doc_notary"]);
+      db.prepare(
+        "INSERT INTO ledger_transactions (id, workspace_id, booked_on, description, review_state, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+      ).run(draft.transaction.id, "ws_1", draft.transaction.bookedOn, "draft", "draft", CREATED_AT);
+      const insertDocument = db.prepare(
+        "INSERT INTO documents (id, workspace_id, content_hash, mime_type, original_filename, storage_uri, source_kind, retention_state, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      );
+
+      // Documents missing entirely: every substantiating link is refused.
+      for (const link of substantiating) {
+        await expect(links.link(link)).rejects.toThrow(
+          new RegExp(`document:${link.fromId} not found in workspace`),
+        );
+      }
+      // A document that exists only in another workspace does not count.
+      insertDocument.run(
+        "doc_ws2_only",
+        "ws_2",
+        "hash_ws2",
+        "application/pdf",
+        "other.pdf",
+        "file://other",
+        "upload",
+        "active",
+        CREATED_AT,
+      );
+      const contractLink = substantiating.find((l) => l.fromId === "doc_contract");
+      if (contractLink === undefined) {
+        throw new Error("expected a link from doc_contract");
+      }
+      await expect(
+        links.link({ ...contractLink, id: "link_cross_ws", fromId: "doc_ws2_only" }),
+      ).rejects.toThrow(/document:doc_ws2_only not found in workspace/);
+      expect(await links.listForTransaction("ws_1", draft.transaction.id)).toEqual([]);
+
+      // Once both documents exist in ws_1, every link is created exactly once.
+      for (const [index, documentId] of ["doc_contract", "doc_notary"].entries()) {
+        insertDocument.run(
+          documentId,
+          "ws_1",
+          `hash_${index}`,
+          "application/pdf",
+          `${documentId}.pdf`,
+          `file://${documentId}`,
+          "upload",
+          "active",
+          CREATED_AT,
+        );
+      }
+      for (const link of substantiating) {
+        expect((await links.link(link)).created).toBe(true);
+        expect((await links.link(link)).created).toBe(false);
+      }
+      expect(
+        (await links.listForTransaction("ws_1", draft.transaction.id)).map((l) => l.fromId).sort(),
+      ).toEqual(["doc_contract", "doc_notary"]);
     } finally {
       close();
     }

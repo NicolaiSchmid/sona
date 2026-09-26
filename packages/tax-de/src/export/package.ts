@@ -6,6 +6,7 @@
 import {
   type DepreciationExportRow,
   type DepreciationScheduleExportInput,
+  type DepreciationSectionResult,
   depreciationRowReference,
   generateDepreciationSection,
 } from "./depreciation.js";
@@ -205,12 +206,20 @@ function receiptManifestCsv(records: readonly EvidenceBearing[]): string {
   return csv(["documentId", "postingId", "account", "section"], rows);
 }
 
+interface SummaryCounts {
+  missing: number;
+  depreciation: DepreciationSectionResult;
+}
+
 function summaryMd(
   input: GeneratePackageInput,
   lines: readonly TaxExportLine[],
-  missing: number,
-  depreciationRows: number,
+  counts: SummaryCounts,
 ): string {
+  const { missing, depreciation } = counts;
+  const excludedLines = depreciation.excluded.map(
+    (e) => `- ${e.assetId} ${e.year}: ${e.reason}${e.transactionId ? ` (${e.transactionId})` : ""}`,
+  );
   const totals = new Map<string, number>();
   for (const line of lines) {
     totals.set(line.sectionId, (totals.get(line.sectionId) ?? 0) + 1);
@@ -231,10 +240,13 @@ function summaryMd(
     `## Missing evidence: ${missing} posting(s)`,
     "See missing-evidence.csv.",
     "",
-    `## Depreciation schedules: ${depreciationRows} row(s)`,
+    `## Depreciation schedules: ${depreciation.rows.length} row(s)`,
     "Suggested amounts computed from user-configured schedule rules; each row names",
     "its schedule version, ledger transaction, and review status. Review required.",
     "See depreciation-schedules.csv.",
+    "",
+    `### Scheduled years left out of this ${input.mode} package: ${depreciation.excluded.length}`,
+    ...(excludedLines.length > 0 ? excludedLines : ["- (none)"]),
     "",
   ].join("\n");
 }
@@ -268,7 +280,7 @@ export function generateExportPackage(input: GeneratePackageInput): TaxExportPac
   const files: ExportFile[] = [
     {
       path: "summary.md",
-      content: summaryMd(input, lines, missing.length, depreciation.rows.length),
+      content: summaryMd(input, lines, { missing: missing.length, depreciation }),
     },
     { path: "tax-categories.csv", content: taxCategoriesCsv(lines) },
     {
