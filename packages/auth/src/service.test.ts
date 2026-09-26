@@ -1,7 +1,11 @@
 import { randomBytes } from "node:crypto";
 import { inspect } from "node:util";
 import type { AuditEvent } from "@sona/core";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+
+// scrypt-bound tests share CPU with the rest of the suite on loaded CI hosts.
+vi.setConfig({ testTimeout: 30_000 });
+
 import { createAesGcmSecretCipher } from "./crypto.js";
 import { type AuthError, isAuthError } from "./errors.js";
 import { createFixedWindowThrottle, NO_THROTTLE } from "./rate-limit.js";
@@ -1344,5 +1348,67 @@ describe("audit routing and lockouts", () => {
     await expect(
       h.service.login({ email: "nobody@sona.test", password: OWNER_PASSWORD }),
     ).rejects.toThrow(/systemAuditWorkspaceId/);
+  });
+});
+
+describe("bootstrap on an upgraded database", () => {
+  it("adopts a credential-less user and existing workspace instead of duplicating them", async () => {
+    const h = harness();
+    // Rows left by the pre-auth schema: a workspace and a user with no credential.
+    await h.store.createWorkspace({ id: "ws_old", name: "Old", createdAt: "2026-01-01T00:00:00Z" });
+    h.store.users.set("user_old", {
+      id: "user_old",
+      email: "owner@sona.test",
+      createdAt: "2026-01-01T00:00:00Z",
+    });
+    expect(await h.store.countUsers()).toBe(1);
+    expect(await h.store.countCredentials()).toBe(0);
+
+    const result = await h.service.bootstrapOwner({
+      email: "Owner@sona.test",
+      password: OWNER_PASSWORD,
+      workspaceName: "ignored when the workspace exists",
+      workspaceId: "ws_old",
+    });
+    expect(result?.user.id).toBe("user_old");
+    expect(result?.workspace).toMatchObject({ id: "ws_old", name: "Old" });
+    expect(result?.membership).toMatchObject({ workspaceId: "ws_old", role: "owner" });
+    expect(await h.store.countUsers()).toBe(1);
+    expect(h.store.workspaces.size).toBe(1);
+    await expect(
+      h.service.login({ email: "owner@sona.test", password: OWNER_PASSWORD }),
+    ).resolves.toMatchObject({ method: "password" });
+    // Now that a credential exists, bootstrap is a no-op again.
+    await expect(
+      h.service.bootstrapOwner({
+        email: "other@sona.test",
+        password: OWNER_PASSWORD,
+        workspaceName: "X",
+      }),
+    ).resolves.toBeUndefined();
+  });
+
+  it("refuses to promote an existing non-owner membership", async () => {
+    const h = harness();
+    await h.store.createWorkspace({ id: "ws_old", name: "Old", createdAt: "2026-01-01T00:00:00Z" });
+    h.store.users.set("user_old", {
+      id: "user_old",
+      email: "advisor@sona.test",
+      createdAt: "2026-01-01T00:00:00Z",
+    });
+    await h.store.createMembership({
+      workspaceId: "ws_old",
+      userId: "user_old",
+      role: "advisor_readonly",
+      createdAt: "2026-01-01T00:00:00Z",
+    });
+    await expect(
+      h.service.bootstrapOwner({
+        email: "advisor@sona.test",
+        password: OWNER_PASSWORD,
+        workspaceName: "Old",
+        workspaceId: "ws_old",
+      }),
+    ).rejects.toMatchObject({ code: "invalid_input", details: ["existing_membership_not_owner"] });
   });
 });

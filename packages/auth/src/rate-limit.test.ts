@@ -43,7 +43,11 @@ describe("createFixedWindowThrottle", () => {
   });
 
   it("defaults to five failures per fifteen minutes", () => {
-    expect(DEFAULT_LOGIN_THROTTLE).toEqual({ maxFailures: 5, windowMs: 15 * MINUTE });
+    expect(DEFAULT_LOGIN_THROTTLE).toEqual({
+      maxFailures: 5,
+      windowMs: 15 * 60_000,
+      maxKeys: 10_000,
+    });
     const throttle = createFixedWindowThrottle();
     for (let index = 0; index < 5; index += 1) {
       expect(throttle.allows("k", T0)).toBe(true);
@@ -72,5 +76,31 @@ describe("NO_THROTTLE", () => {
     }
     expect(NO_THROTTLE.allows("k", T0)).toBe(true);
     expect(() => NO_THROTTLE.reset("k")).not.toThrow();
+  });
+});
+
+describe("bounded key set", () => {
+  it("sweeps expired windows and evicts the oldest live one instead of growing", () => {
+    const throttle = createFixedWindowThrottle({ maxFailures: 1, windowMs: 60_000, maxKeys: 3 });
+    const later = new Date(T0.getTime() + 61_000);
+    throttle.recordFailure("stale-1", T0);
+    throttle.recordFailure("stale-2", T0);
+    throttle.recordFailure("live-1", later);
+    // Admitting a fourth key sweeps the two expired ones; the live lockout survives.
+    throttle.recordFailure("live-2", later);
+    expect(throttle.allows("live-1", later)).toBe(false);
+    expect(throttle.allows("live-2", later)).toBe(false);
+    // With no expired entries left, the oldest live key is evicted first.
+    throttle.recordFailure("live-3", later);
+    throttle.recordFailure("live-4", later);
+    expect(throttle.allows("live-1", later)).toBe(true);
+    expect(throttle.allows("live-2", later)).toBe(false);
+    expect(throttle.allows("live-4", later)).toBe(false);
+  });
+
+  it("rejects a non-positive key bound", () => {
+    expect(() => createFixedWindowThrottle({ maxFailures: 1, windowMs: 1000, maxKeys: 0 })).toThrow(
+      /maxKeys/,
+    );
   });
 });

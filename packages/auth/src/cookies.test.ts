@@ -111,4 +111,26 @@ describe("session cookies", () => {
     expect(clear).not.toContain("Secure");
     expect(live).not.toContain("Max-Age");
   });
+
+  it("rejects paths and domains that would inject attributes or split the header", () => {
+    for (const path of ["", "app", "/app; Domain=evil", "/app\r\nSet-Cookie: x=y", "/a;b"]) {
+      expect(() => serializeCookie(sessionCookie("v", expires, { path }))).toThrow(/path/);
+    }
+    for (const domain of [
+      "evil; Path=/",
+      "app.sona.test:443",
+      "https://app.sona.test",
+      "-bad.example",
+      "a b",
+      "",
+    ]) {
+      expect(() => serializeCookie(sessionCookie("v", expires, { domain }))).toThrow(/domain/);
+    }
+    expect(() =>
+      serializeCookie(sessionCookie("v", expires, { path: "/app/v1?x=1", domain: ".sona.test" })),
+    ).not.toThrow();
+    expect(() =>
+      serializeCookie(sessionCookie("v", expires, { domain: "app-1.sona.test" })),
+    ).not.toThrow();
+  });
 });

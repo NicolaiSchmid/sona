@@ -47,6 +47,13 @@ export class InMemoryAuthStore implements AuthStore {
     return this.credentials.get(userId);
   }
 
+  async createCredential(credential: UserCredential): Promise<void> {
+    if (!this.users.has(credential.userId) || this.credentials.has(credential.userId)) {
+      throw new Error("user missing or credential already exists");
+    }
+    this.credentials.set(credential.userId, { ...credential });
+  }
+
   async updateCredential(credential: UserCredential): Promise<void> {
     if (!this.credentials.has(credential.userId)) {
       throw new Error("credential not found");
@@ -56,6 +63,10 @@ export class InMemoryAuthStore implements AuthStore {
 
   async countUsers(): Promise<number> {
     return this.users.size;
+  }
+
+  async countCredentials(): Promise<number> {
+    return this.credentials.size;
   }
 
   async createWorkspace(workspace: Workspace): Promise<void> {

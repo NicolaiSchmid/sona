@@ -34,6 +34,11 @@ export interface SessionCookieAttributes {
 
 const COOKIE_NAME_RE = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
 const COOKIE_VALUE_RE = /^[!#-+\--:<-[\]-~]*$/;
+/** RFC 6265 path-value: printable ASCII without `;`. */
+const COOKIE_PATH_RE = /^\/[\x20-\x3a\x3c-\x7e]*$/;
+/** Hostname labels only; no ports, schemes, or attribute separators. */
+const COOKIE_DOMAIN_RE =
+  /^\.?[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$/;
 
 export function sessionCookie(
   token: string,
@@ -67,6 +72,12 @@ export function serializeCookie(attributes: SessionCookieAttributes): string {
   }
   if (!COOKIE_VALUE_RE.test(attributes.value)) {
     throw new Error("Invalid cookie value");
+  }
+  if (!COOKIE_PATH_RE.test(attributes.path)) {
+    throw new Error("Invalid cookie path");
+  }
+  if (attributes.domain !== undefined && !COOKIE_DOMAIN_RE.test(attributes.domain)) {
+    throw new Error("Invalid cookie domain");
   }
   const parts = [`${attributes.name}=${attributes.value}`, `Path=${attributes.path}`];
   if (attributes.domain !== undefined) {

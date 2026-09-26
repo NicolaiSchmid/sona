@@ -62,12 +62,18 @@ export class SqliteAuthRepository implements AuthStore {
       this.#db
         .prepare("INSERT INTO users (id, email, created_at) VALUES (?, ?, ?)")
         .run(user.id, user.email, user.createdAt);
-      this.#db
-        .prepare(
-          "INSERT INTO user_credentials (user_id, password_hash, updated_at) VALUES (?, ?, ?)",
-        )
-        .run(credential.userId, credential.passwordHash, credential.updatedAt);
+      this.#insertCredential(credential);
     });
+  }
+
+  async createCredential(credential: UserCredential): Promise<void> {
+    this.#insertCredential(credential);
+  }
+
+  #insertCredential(credential: UserCredential): void {
+    this.#db
+      .prepare("INSERT INTO user_credentials (user_id, password_hash, updated_at) VALUES (?, ?, ?)")
+      .run(credential.userId, credential.passwordHash, credential.updatedAt);
   }
 
   async getUserById(userId: string): Promise<AuthUser | undefined> {
@@ -98,6 +104,10 @@ export class SqliteAuthRepository implements AuthStore {
 
   async countUsers(): Promise<number> {
     return this.#count("SELECT COUNT(*) AS count FROM users", []);
+  }
+
+  async countCredentials(): Promise<number> {
+    return this.#count("SELECT COUNT(*) AS count FROM user_credentials", []);
   }
 
   // --- Workspaces and memberships ---------------------------------------------

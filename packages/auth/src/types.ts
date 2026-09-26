@@ -155,8 +155,12 @@ export interface UserStore {
   getUserById(userId: string): Promise<AuthUser | undefined>;
   getUserByEmail(email: string): Promise<AuthUser | undefined>;
   getCredential(userId: string): Promise<UserCredential | undefined>;
+  /** Attaches a credential to a user row that has none (pre-auth schema adoption). */
+  createCredential(credential: UserCredential): Promise<void>;
   updateCredential(credential: UserCredential): Promise<void>;
   countUsers(): Promise<number>;
+  /** Users able to log in; zero on a fresh or pre-auth database. */
+  countCredentials(): Promise<number>;
 }
 
 export interface WorkspaceMembershipStore {

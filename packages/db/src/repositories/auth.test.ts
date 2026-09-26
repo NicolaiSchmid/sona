@@ -7,7 +7,11 @@ import {
   isAuthError,
   NO_THROTTLE,
 } from "@sona/auth";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+// scrypt-bound tests share CPU with the rest of the suite on loaded CI hosts.
+vi.setConfig({ testTimeout: 30_000 });
+
 import { SqliteAuditEventRepository } from "./audit-events.js";
 import { SqliteAuthRepository } from "./auth.js";
 import { createTestDatabase, type TestDatabase } from "./test-support.js";
@@ -406,6 +410,38 @@ describe("SqliteAuthRepository", () => {
 });
 
 describe("AuthService on SQLite", () => {
+  it("adopts a pre-auth users row on bootstrap and counts credentials separately", async () => {
+    database.db
+      .prepare("INSERT INTO users (id, email, created_at) VALUES (?, ?, ?)")
+      .run("user_legacy", "owner@sona.test", T0);
+    expect(await repository.countUsers()).toBe(1);
+    expect(await repository.countCredentials()).toBe(0);
+    const service = new AuthService({
+      store: repository,
+      audit: new SqliteAuditEventRepository(database.db),
+      secretCipher: createAesGcmSecretCipher(randomBytes(32)),
+      now: () => new Date(T0),
+      scrypt: FAST_SCRYPT,
+      throttle: NO_THROTTLE,
+    });
+    const result = await service.bootstrapOwner({
+      email: "owner@sona.test",
+      password: OWNER_PASSWORD,
+      workspaceName: "Workspace ws_1",
+      workspaceId: "ws_1",
+    });
+    expect(result?.user.id).toBe("user_legacy");
+    expect(result?.workspace.id).toBe("ws_1");
+    expect(await repository.countUsers()).toBe(1);
+    expect(await repository.countCredentials()).toBe(1);
+    await expect(
+      repository.createCredential({ userId: "user_legacy", passwordHash: "x", updatedAt: T0 }),
+    ).rejects.toThrow(/UNIQUE|PRIMARY/i);
+    await expect(
+      service.login({ email: "owner@sona.test", password: OWNER_PASSWORD }),
+    ).resolves.toMatchObject({ method: "password" });
+  });
+
   it("runs the invite → login → workspace access → API token flow with audit rows", async () => {
     const audit = new SqliteAuditEventRepository(database.db);
     let tick = 0;

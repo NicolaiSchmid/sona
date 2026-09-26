@@ -353,10 +353,14 @@ export class AuthService {
 
   /**
    * Self-hosted single-user mode: creates the first owner and workspace from
-   * config on an empty database. Returns undefined when any user exists.
+   * config while no account can log in yet. Returns undefined once any
+   * credential exists. A `users` or `workspaces` row left by the pre-auth
+   * schema (same email / same workspace id) is adopted rather than duplicated,
+   * so an upgraded installation gets an owner that can sign in; such rows had
+   * no credential, so nobody else could have used them.
    */
   async bootstrapOwner(input: BootstrapOwnerInput): Promise<BootstrapOwnerResult | undefined> {
-    if ((await this.#store.countUsers()) > 0) {
+    if ((await this.#store.countCredentials()) > 0) {
       return undefined;
     }
     const email = normalizeEmail(input.email);
@@ -366,22 +370,39 @@ export class AuthService {
       throw new AuthError("invalid_input", ["workspace_name"]);
     }
     const now = this.#timestamp();
-    const workspace: Workspace = {
-      id: input.workspaceId ?? this.#id("workspace"),
-      name: workspaceName,
-      createdAt: now,
-    };
-    const user: AuthUser = { id: this.#id("user"), email, createdAt: now };
-    const membership: WorkspaceMembership = {
-      workspaceId: workspace.id,
-      userId: user.id,
-      role: "owner",
-      createdAt: now,
-    };
     const passwordHash = await hashPassword(input.password, this.#scrypt);
-    await this.#store.createWorkspace(workspace);
-    await this.#store.createUser(user, { userId: user.id, passwordHash, updatedAt: now });
-    await this.#store.createMembership(membership);
+
+    let workspace =
+      input.workspaceId === undefined
+        ? undefined
+        : await this.#store.getWorkspace(input.workspaceId);
+    if (workspace === undefined) {
+      workspace = {
+        id: input.workspaceId ?? this.#id("workspace"),
+        name: workspaceName,
+        createdAt: now,
+      };
+      await this.#store.createWorkspace(workspace);
+    }
+
+    let user = await this.#store.getUserByEmail(email);
+    const credential = { passwordHash, updatedAt: now };
+    if (user === undefined) {
+      user = { id: this.#id("user"), email, createdAt: now };
+      await this.#store.createUser(user, { userId: user.id, ...credential });
+    } else {
+      await this.#store.createCredential({ userId: user.id, ...credential });
+    }
+
+    let membership = await this.#store.getMembership(workspace.id, user.id);
+    if (membership?.role !== "owner") {
+      if (membership !== undefined) {
+        throw new AuthError("invalid_input", ["existing_membership_not_owner"]);
+      }
+      membership = { workspaceId: workspace.id, userId: user.id, role: "owner", createdAt: now };
+      await this.#store.createMembership(membership);
+    }
+
     await this.#record({
       workspaceId: workspace.id,
       action: "auth.bootstrap.completed",
