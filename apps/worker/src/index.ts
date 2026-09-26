@@ -9,10 +9,13 @@
 export const sonaWorkerVersion = "0.0.0" as const;
 
 export {
+  type AcquirePortalFetchJobInput,
   InMemoryPortalFetchConnectionRepository,
   InMemoryPortalFetchJobStateStore,
   type PortalFetchConnection,
   type PortalFetchConnectionRepository,
+  type PortalFetchJobLeaseKey,
+  type PortalFetchJobReservation,
   type PortalFetchJobStateStore,
   type PortalFetchJobStatus,
   type RunPortalFetchJobInput,

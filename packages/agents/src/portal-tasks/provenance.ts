@@ -20,10 +20,9 @@ export interface TaskRunProvenance {
   fetchedAt: string;
   blockedRequests?: BlockedPortalRequest[];
   allowedNonIdempotentRequests?: AllowedNonIdempotentPortalRequest[];
-  consoleMessages?: CapturedPortalConsoleMessage[];
 }
 
-export type BlockedPortalRequestReason = "off_allowlist" | "non_idempotent_method";
+export type BlockedPortalRequestReason = "off_allowlist" | "non_idempotent_method" | "websocket";
 
 export interface BlockedPortalRequest {
   url: string;
@@ -39,11 +38,6 @@ export interface AllowedNonIdempotentPortalRequest {
   method: string;
   reason: AllowedNonIdempotentRequestReason;
   justification: string;
-}
-
-export interface CapturedPortalConsoleMessage {
-  type: string;
-  text: string;
 }
 
 export type ExtractionStatus = "pending" | "extracted" | "failed";

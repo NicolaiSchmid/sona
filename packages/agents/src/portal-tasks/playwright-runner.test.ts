@@ -1,6 +1,8 @@
 import { createSecretValue, InMemoryDocumentStorage, InMemorySecretStore } from "@sona/core";
 import { describe, expect, it } from "vitest";
+import type { PortalRequest } from "./network-guard.js";
 import {
+  createCdpPlaywrightBrowserProvider,
   InMemoryPortalConnectionRepository,
   InMemoryPortalDocumentRegistry,
   LocalPlaywrightPortalTaskRunner,
@@ -106,11 +108,13 @@ describe("LocalPlaywrightPortalTaskRunner", () => {
     expect(storage.putCount).toBe(2);
   });
 
-  it("redacts injected credentials from logs, provenance, console captures, and metadata", async () => {
+  it("redacts injected credentials from errors, provenance, and stored metadata", async () => {
     const secretMarker = "S3CRET-MARKER-14";
     const storage = new CountingDocumentStorage();
     const page = new FixturePortalPage({
-      consoleMessages: [`login used ${secretMarker}`],
+      download: (url) => {
+        throw new Error(`portal rejected ${url} for ${secretMarker}`);
+      },
     });
     const runner = await makeRunner({
       storage,
@@ -119,15 +123,76 @@ describe("LocalPlaywrightPortalTaskRunner", () => {
     });
 
     const result = await runner.runTask(input());
-    const stored = storage.serializedDocuments();
-    const serialized = JSON.stringify({
-      result,
-      stored,
+    const serialized = JSON.stringify({ result, stored: storage.serializedDocuments() });
+
+    expect(result.status).toBe("failed");
+    expect(result.errors.join(" ")).toContain("[REDACTED_SECRET]");
+    expect(serialized).not.toContain(secretMarker);
+    expect(page.screenshotCount).toBe(0);
+  });
+
+  it("redacts the browser provider's own sensitive values from setup failures", async () => {
+    const endpoint = "wss://connect.browserbase.test?apiKey=bb_live_1234567890";
+    const provider = createCdpPlaywrightBrowserProvider("browserbase", endpoint);
+    const runner = await makeRunner({
+      page: new FixturePortalPage(),
+      providerFailure: new Error(`connect failed: ${endpoint} (key bb_live_1234567890)`),
+      providerSensitiveValues: provider.sensitiveValues,
     });
 
-    expect(serialized).not.toContain(secretMarker);
-    expect(result.provenance.consoleMessages).toBeUndefined();
-    expect(page.screenshotCount).toBe(0);
+    const result = await runner.runTask(input());
+
+    expect(provider.sensitiveValues).toEqual(
+      expect.arrayContaining([endpoint, "bb_live_1234567890"]),
+    );
+    expect(result.status).toBe("failed");
+    expect(JSON.stringify(result)).not.toContain("bb_live_1234567890");
+    expect(JSON.stringify(result)).not.toContain("connect.browserbase.test");
+  });
+
+  it("returns policy_refused for a malformed task instead of throwing", async () => {
+    const runner = await makeRunner({ page: new FixturePortalPage() });
+    const malformed = { id: "broken", version: 1 } as unknown as PortalTask;
+
+    const result = await runner.runTask(input({ task: malformed }));
+
+    expect(result.status).toBe("policy_refused");
+    expect(result.taskId).toBe("broken");
+    expect(result.provenance.portalDomain).toBe("unknown");
+    expect(result.errors[0]).toContain("failed validation");
+  });
+
+  it("reports a route-aborted navigation as blocked rather than failed", async () => {
+    const page = new FixturePortalPage({ abortBlockedRequests: true });
+    const runner = await makeRunner({ page });
+    const offAllowlist: PortalTask = {
+      ...task,
+      steps: [{ kind: "navigate", url: "https://portal.test/login" }],
+      domains: ["other.test"],
+    };
+
+    const result = await runner.runTask(input({ task: offAllowlist }));
+
+    expect(result.status).toBe("blocked");
+    expect(result.provenance.blockedRequests).toHaveLength(1);
+    expect(result.errors.join(" ")).toContain("blocked request");
+  });
+
+  it("returns selector_missing when download matches carry no usable link", async () => {
+    const page = new FixturePortalPage({ hrefAttribute: "data-missing" });
+    const runner = await makeRunner({ page });
+    const buttonLinks: PortalTask = {
+      ...task,
+      steps: task.steps.map((step) =>
+        step.kind === "downloadLinks" ? { ...step, hrefAttribute: "data-missing" } : step,
+      ),
+    };
+
+    const result = await runner.runTask(input({ task: buttonLinks }));
+
+    expect(result.status).toBe("selector_missing");
+    expect(result.errors.join(" ")).toContain('no usable "data-missing"');
+    expect(result.storedDocuments).toEqual([]);
   });
 
   it("returns selector_missing after a single missing-selector wait", async () => {
@@ -279,6 +344,7 @@ interface MakeRunnerInput {
   registry?: InMemoryPortalDocumentRegistry;
   password?: string;
   providerFailure?: Error;
+  providerSensitiveValues?: readonly string[];
 }
 
 async function makeRunner(inputValue: MakeRunnerInput): Promise<LocalPlaywrightPortalTaskRunner> {
@@ -306,7 +372,11 @@ async function makeRunner(inputValue: MakeRunnerInput): Promise<LocalPlaywrightP
   ]);
 
   return new LocalPlaywrightPortalTaskRunner({
-    browserProvider: new FixtureBrowserProvider(inputValue.page, inputValue.providerFailure),
+    browserProvider: new FixtureBrowserProvider(
+      inputValue.page,
+      inputValue.providerFailure,
+      inputValue.providerSensitiveValues,
+    ),
     documentStorage: inputValue.storage ?? new CountingDocumentStorage(),
     documentRegistry: inputValue.registry ?? new InMemoryPortalDocumentRegistry(),
     secretStore,
@@ -316,12 +386,18 @@ async function makeRunner(inputValue: MakeRunnerInput): Promise<LocalPlaywrightP
 
 class FixtureBrowserProvider implements PortalBrowserProvider {
   readonly providerName = "local-playwright";
+  readonly sensitiveValues: readonly string[];
   readonly #page: FixturePortalPage;
   readonly #failure: Error | undefined;
 
-  constructor(page: FixturePortalPage, failure: Error | undefined) {
+  constructor(
+    page: FixturePortalPage,
+    failure: Error | undefined,
+    sensitiveValues: readonly string[] = [],
+  ) {
     this.#page = page;
     this.#failure = failure;
+    this.sensitiveValues = sensitiveValues;
   }
 
   async createSession(): Promise<PortalBrowserSession> {
@@ -338,12 +414,17 @@ class FixtureBrowserProvider implements PortalBrowserProvider {
   }
 }
 
+type FixtureRouteHandler = (request: PortalRequest) => void | Promise<void>;
+
 interface FixturePortalPageOptions {
   missingSelectors?: ReadonlySet<string>;
   timeoutSelectors?: ReadonlySet<string>;
-  consoleMessages?: readonly string[];
   download?: (url: string, options: PortalDownloadRequestOptions) => PortalDownloadResponse;
   linkCount?: number;
+  /** Attribute the fixture links expose their URL under (default `href`). */
+  hrefAttribute?: string;
+  /** Mimic Playwright: a route handler that throws makes the navigation reject. */
+  abortBlockedRequests?: boolean;
 }
 
 class FixturePortalPage implements PortalBrowserPage {
@@ -351,54 +432,54 @@ class FixturePortalPage implements PortalBrowserPage {
   screenshotCount = 0;
   readonly #missingSelectors: ReadonlySet<string>;
   readonly #timeoutSelectors: ReadonlySet<string>;
-  readonly #consoleMessages: readonly string[];
   readonly #download:
     | ((url: string, options: PortalDownloadRequestOptions) => PortalDownloadResponse)
     | undefined;
   readonly #linkCount: number;
-  #routeHandler:
-    | ((request: { url: string; method: string; resourceType: string }) => void)
-    | undefined;
-  #consoleHandler: ((message: { type: string; text: string }) => void) | undefined;
+  readonly #hrefAttribute: string;
+  readonly #abortBlockedRequests: boolean;
+  #routeHandler: FixtureRouteHandler | undefined;
   #currentUrl = "https://portal.test/login";
 
   constructor(options: FixturePortalPageOptions = {}) {
     this.#missingSelectors = options.missingSelectors ?? new Set();
     this.#timeoutSelectors = options.timeoutSelectors ?? new Set();
-    this.#consoleMessages = options.consoleMessages ?? [];
     this.#download = options.download;
     this.#linkCount = options.linkCount ?? 2;
+    this.#hrefAttribute = options.hrefAttribute ?? "href";
+    this.#abortBlockedRequests = options.abortBlockedRequests ?? false;
   }
 
-  async route(
-    _pattern: string,
-    handler: (request: { url: string; method: string; resourceType: string }) => void,
-  ): Promise<void> {
+  async route(_pattern: string, handler: FixtureRouteHandler): Promise<void> {
     this.#routeHandler = handler;
   }
 
-  onConsole(handler: (message: { type: string; text: string }) => void): void {
-    this.#consoleHandler = handler;
-  }
-
   async goto(url: string): Promise<void> {
-    this.#routeHandler?.({ url, method: "GET", resourceType: "document" });
+    await this.emitRequest({ url, method: "GET", resourceType: "document" });
     this.#currentUrl = url;
   }
 
-  async fill(_selector: string, value: string): Promise<void> {
-    for (const message of this.#consoleMessages) {
-      this.#consoleHandler?.({ type: "log", text: message.replace("synthetic-password", value) });
-    }
+  async fill(): Promise<void> {
+    return;
   }
 
   async click(_selector: string): Promise<void> {
-    this.#routeHandler?.({
+    await this.emitRequest({
       url: "https://portal.test/login",
       method: "POST",
       resourceType: "document",
     });
     this.#currentUrl = "https://portal.test/invoices";
+  }
+
+  private async emitRequest(request: PortalRequest): Promise<void> {
+    try {
+      await this.#routeHandler?.(request);
+    } catch (error) {
+      if (this.#abortBlockedRequests) {
+        throw error;
+      }
+    }
   }
 
   async waitForSelector(selector: string): Promise<boolean> {
@@ -418,6 +499,7 @@ class FixturePortalPage implements PortalBrowserPage {
       return new FixtureElement(
         `https://portal.test/invoices/2026-${invoice}.pdf`,
         `2026-${invoice}.pdf`,
+        this.#hrefAttribute,
       );
     });
   }
@@ -426,7 +508,7 @@ class FixturePortalPage implements PortalBrowserPage {
     url: string,
     options: PortalDownloadRequestOptions,
   ): Promise<PortalDownloadResponse> {
-    this.#routeHandler?.({ url, method: "GET", resourceType: "document" });
+    await this.emitRequest({ url, method: "GET", resourceType: "document" });
     if (this.#download !== undefined) {
       return this.#download(url, options);
     }
@@ -451,14 +533,16 @@ class FixturePortalPage implements PortalBrowserPage {
 class FixtureElement implements PortalElementHandle {
   readonly #href: string;
   readonly #filename: string;
+  readonly #hrefAttribute: string;
 
-  constructor(href: string, filename: string) {
+  constructor(href: string, filename: string, hrefAttribute: string) {
     this.#href = href;
     this.#filename = filename;
+    this.#hrefAttribute = hrefAttribute;
   }
 
   async getAttribute(name: string): Promise<string | null> {
-    if (name === "href") {
+    if (name === "href" && this.#hrefAttribute === "href") {
       return this.#href;
     }
     if (name === "data-filename") {

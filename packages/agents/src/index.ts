@@ -36,7 +36,6 @@ export {
   type PortalBrowserSessionInput,
   type PortalConnection,
   type PortalConnectionRepository,
-  type PortalConsoleMessage,
   type PortalDocumentRegistry,
   type PortalDownloadResponse,
   type PortalElementHandle,
@@ -51,7 +50,6 @@ export {
 export {
   type AllowedNonIdempotentPortalRequest,
   type BlockedPortalRequest,
-  type CapturedPortalConsoleMessage,
   type ExtractionStatus,
   type FetchedContent,
   type FetchedDocument,
@@ -69,7 +67,7 @@ export {
 } from "./portal-tasks/runner.js";
 export {
   ALLOWED_NON_IDEMPOTENT_REASONS,
-  NON_IDEMPOTENT_HTTP_METHODS,
+  PORTAL_EXCEPTION_HTTP_METHODS,
   PORTAL_TASK_OUTPUTS,
   PORTAL_TASK_RISKS,
   PORTAL_TASK_STEP_KINDS,

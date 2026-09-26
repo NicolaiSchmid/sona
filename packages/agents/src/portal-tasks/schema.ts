@@ -4,14 +4,22 @@
  * allowlist, only read-only actions, and known output types.
  */
 import { z } from "zod";
-import { destructiveSelectorConceptFor, validateReadOnlyActions } from "./policy.js";
+import {
+  destructiveSelectorConceptFor,
+  forbiddenConceptFor,
+  validateReadOnlyActions,
+} from "./policy.js";
 
 /** Risk labels for portal tasks. Only read-only fetching is supported today. */
 export const PORTAL_TASK_RISKS = ["read_only_document_fetch"] as const;
 
 export const PORTAL_TASK_OUTPUTS = ["document_file", "provenance_json"] as const;
 
-export const NON_IDEMPOTENT_HTTP_METHODS = ["POST", "PUT", "PATCH", "DELETE"] as const;
+/**
+ * The only non-idempotent method a task may justify. Login and search forms
+ * POST; PUT/PATCH/DELETE have no read-only use on a merchant portal.
+ */
+export const PORTAL_EXCEPTION_HTTP_METHODS = ["POST"] as const;
 
 export const ALLOWED_NON_IDEMPOTENT_REASONS = ["login", "search"] as const;
 
@@ -32,6 +40,26 @@ const HOSTNAME_RE = /^(localhost|(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])
 
 const SAFE_PORTAL_URL_RE = /^(https:\/\/[^/?#\s]+[^\s]*|http:\/\/localhost(:[0-9]+)?[^\s]*)$/i;
 
+/**
+ * A portal URL a task may navigate to or justify a POST against: https (or
+ * plain-http localhost for fixtures) and never carrying userinfo, because
+ * credentials belong in the SecretStore, not in a committed task definition.
+ */
+const safePortalUrlSchema = z
+  .string()
+  .url()
+  .regex(SAFE_PORTAL_URL_RE, "must be an https URL or localhost URL")
+  .refine((value) => !hasUserinfo(value), "must not embed credentials in the URL");
+
+function hasUserinfo(rawUrl: string): boolean {
+  try {
+    const url = new URL(rawUrl);
+    return url.username.length > 0 || url.password.length > 0;
+  } catch {
+    return true;
+  }
+}
+
 const baseStepSchema = z.object({
   sensitive: z.boolean().optional(),
 });
@@ -43,7 +71,7 @@ const selectorStepSchema = baseStepSchema.extend({
 export const portalTaskStepSchema = z.discriminatedUnion("kind", [
   baseStepSchema.extend({
     kind: z.literal("navigate"),
-    url: z.string().url().regex(SAFE_PORTAL_URL_RE, "must be an https URL or localhost URL"),
+    url: safePortalUrlSchema,
   }),
   selectorStepSchema.extend({
     kind: z.literal("fill"),
@@ -66,8 +94,8 @@ export const portalTaskStepSchema = z.discriminatedUnion("kind", [
 
 export const portalHttpMethodExceptionSchema = z
   .object({
-    method: z.enum(NON_IDEMPOTENT_HTTP_METHODS),
-    urlPattern: z.string().url().regex(SAFE_PORTAL_URL_RE, "must be an https URL or localhost URL"),
+    method: z.enum(PORTAL_EXCEPTION_HTTP_METHODS),
+    urlPattern: safePortalUrlSchema,
     reason: z.enum(ALLOWED_NON_IDEMPOTENT_REASONS),
     justification: z.string().trim().min(12),
   })
@@ -99,6 +127,19 @@ export const portalTaskSchema = z
       });
     }
 
+    // A justified POST is the only bypass of the read-only network guard, so
+    // its endpoint must not itself name a destructive operation.
+    for (const [index, exception] of task.httpMethodExceptions.entries()) {
+      const concept = forbiddenConceptFor(urlPathAndQuery(exception.urlPattern));
+      if (concept !== undefined) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["httpMethodExceptions", index, "urlPattern"],
+          message: `Exception endpoint implies a forbidden operation (${concept})`,
+        });
+      }
+    }
+
     for (const [index, step] of task.steps.entries()) {
       if ("selector" in step) {
         const concept = destructiveSelectorConceptFor(step.selector);
@@ -112,6 +153,15 @@ export const portalTaskSchema = z
       }
     }
   });
+
+function urlPathAndQuery(rawUrl: string): string {
+  try {
+    const url = new URL(rawUrl);
+    return `${url.pathname}${url.search}`;
+  } catch {
+    return rawUrl;
+  }
+}
 
 export type PortalTask = z.infer<typeof portalTaskSchema>;
 export type PortalTaskStep = z.infer<typeof portalTaskStepSchema>;

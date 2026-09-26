@@ -23,3 +23,23 @@ jobs:
       - run: pnpm install --frozen-lockfile
 
       - run: pnpm check
+
+  portal-browser:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.4.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - run: pnpm --filter @sona/agents exec playwright install --with-deps chromium-headless-shell
+
+      - run: pnpm test:portal-browser
