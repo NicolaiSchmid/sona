@@ -57,6 +57,15 @@ importers:
         specifier: ^3.24.0
         version: 3.25.76
 
+  packages/auth:
+    dependencies:
+      '@sona/core':
+        specifier: workspace:*
+        version: link:../core
+      zod:
+        specifier: ^3.24.0
+        version: 3.25.76
+
   packages/connectors:
     dependencies:
       '@sona/core':
@@ -74,6 +83,9 @@ importers:
 
   packages/db:
     dependencies:
+      '@sona/auth':
+        specifier: workspace:*
+        version: link:../auth
       '@sona/core':
         specifier: workspace:*
         version: link:../core

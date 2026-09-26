@@ -1,5 +1,5 @@
 {
-  "name": "@sona/db",
+  "name": "@sona/auth",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -16,8 +16,7 @@
     "typecheck": "tsc -b"
   },
   "dependencies": {
-    "@sona/auth": "workspace:*",
     "@sona/core": "workspace:*",
-    "@sona/receipts": "workspace:*"
+    "zod": "^3.24.0"
   }
 }

@@ -7,6 +7,7 @@
  * in sync with the domain model. Mapping to camelCase domain types happens in
  * the repository layer (`./repositories/*`).
  */
+import type { WorkspaceRole } from "@sona/auth";
 import type {
   AccountKind,
   AssetComponentRole,
@@ -45,7 +46,7 @@ export interface WorkspaceRow {
 export interface WorkspaceMemberRow {
   workspace_id: string;
   user_id: string;
-  role: string;
+  role: WorkspaceRole;
   created_at: string;
 }
 
@@ -527,3 +528,79 @@ export interface EmailSyncCursorRow {
 export const EMAIL_TABLES = ["email_sync_cursors"] as const;
 
 export type EmailTableName = (typeof EMAIL_TABLES)[number];
+
+// --- Auth schema (migrations/0009_auth.sql) ---------------------------------
+
+export interface UserCredentialRow {
+  user_id: string;
+  password_hash: string;
+  updated_at: string;
+}
+
+export interface UserTotpEnrollmentRow {
+  user_id: string;
+  secret_ciphertext: string;
+  last_used_step: number;
+  created_at: string;
+  confirmed_at: string | null;
+}
+
+export interface UserRecoveryCodeRow {
+  id: string;
+  user_id: string;
+  code_hash: string;
+  created_at: string;
+  used_at: string | null;
+}
+
+export interface WorkspaceInviteRow {
+  id: string;
+  workspace_id: string;
+  email: string;
+  role: WorkspaceRole;
+  token_hash: string;
+  created_by_user_id: string;
+  created_at: string;
+  expires_at: string;
+  accepted_at: string | null;
+  accepted_by_user_id: string | null;
+  revoked_at: string | null;
+}
+
+export interface AuthSessionRow {
+  id: string;
+  user_id: string;
+  token_hash: string;
+  created_at: string;
+  expires_at: string;
+  absolute_expires_at: string;
+  last_seen_at: string;
+  revoked_at: string | null;
+  client_label: string | null;
+}
+
+export interface ApiTokenRow {
+  id: string;
+  workspace_id: string;
+  created_by_user_id: string;
+  name: string;
+  token_hash: string;
+  /** JSON array of `ApiTokenScope`. */
+  scopes_json: string;
+  created_at: string;
+  expires_at: string;
+  last_used_at: string | null;
+  revoked_at: string | null;
+}
+
+/** Names of every table created by the auth migration. */
+export const AUTH_TABLES = [
+  "user_credentials",
+  "user_totp_enrollments",
+  "user_recovery_codes",
+  "workspace_invites",
+  "auth_sessions",
+  "api_tokens",
+] as const;
+
+export type AuthTableName = (typeof AUTH_TABLES)[number];

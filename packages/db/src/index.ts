@@ -17,6 +17,7 @@ export {
   type ListAuditEventsOptions,
   SqliteAuditEventRepository,
 } from "./repositories/audit-events.js";
+export { SqliteAuthRepository } from "./repositories/auth.js";
 export {
   createWorkspaceBankRecordStore,
   type PersistedBankAccount,
