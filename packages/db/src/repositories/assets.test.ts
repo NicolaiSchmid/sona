@@ -300,6 +300,140 @@ describe("SqliteAssetRepository", () => {
       close();
     }
   });
+
+  it("rejects an improvement whose component belongs to another workspace at the database", async () => {
+    const { db, close } = createTestDatabase();
+    try {
+      const repo = new SqliteAssetRepository(db);
+      await repo.create(property());
+      await repo.create(
+        property({
+          id: "asset_other",
+          workspaceId: "ws_2",
+          components: property().components.map((c) => ({ ...c, id: `${c.id}_ws2` })),
+        }),
+      );
+      // The asset exists in ws_2, so the repository's own check passes; only the
+      // composite (workspace_id, component_id) foreign key can refuse this.
+      await expect(
+        repo.appendEvent({
+          ...improvement,
+          id: "evt_cross",
+          workspaceId: "ws_2",
+          assetId: "asset_other",
+          componentId: "cmp_building",
+        }),
+      ).rejects.toThrow();
+      expect(await repo.listEvents("ws_2", "asset_other")).toEqual([]);
+    } finally {
+      close();
+    }
+  });
+
+  it("round-trips a disposal without proceeds", async () => {
+    const { db, close } = createTestDatabase();
+    try {
+      const repo = new SqliteAssetRepository(db);
+      await repo.create(property());
+      const { proceeds: _omitted, ...scrapped } = disposal;
+      const withoutProceeds: AssetDisposalEvent = { ...scrapped, id: "evt_scrapped" };
+      await repo.appendEvent(withoutProceeds);
+      const [loaded] = await repo.listEvents("ws_1", "asset_flat");
+      expect(loaded).toEqual(withoutProceeds);
+      if (loaded?.kind !== "disposal") {
+        throw new Error("expected a disposal");
+      }
+      expect(loaded.proceeds).toBeUndefined();
+    } finally {
+      close();
+    }
+  });
+
+  it("round-trips a rounding scale of zero and a residual value on the config", async () => {
+    const { db, close } = createTestDatabase();
+    try {
+      const repo = new SqliteAssetRepository(db);
+      await repo.create(property());
+      const wholeUnits = config({
+        roundingScale: 0,
+        residualValue: { amount: "1000", commodity: "EUR" },
+        method: { kind: "linear_useful_life", usefulLifeYears: 10 },
+      });
+      await repo.saveScheduleConfig(wholeUnits);
+      const loaded = await repo.getScheduleConfig("ws_1", "cfg_v1");
+      expect(loaded).toEqual(wholeUnits);
+      // 0 must survive as 0, not collapse to "unset".
+      expect(loaded?.roundingScale).toBe(0);
+      expect(loaded?.residualValue).toEqual({ amount: "1000", commodity: "EUR" });
+    } finally {
+      close();
+    }
+  });
+
+  it("refuses a depreciation entry pointing at an unknown or foreign schedule config", async () => {
+    const { db, close } = createTestDatabase();
+    try {
+      const repo = new SqliteAssetRepository(db);
+      await repo.create(property());
+      await repo.create(
+        property({
+          id: "asset_other",
+          workspaceId: "ws_2",
+          components: property().components.map((c) => ({ ...c, id: `${c.id}_ws2` })),
+        }),
+      );
+      await repo.saveScheduleConfig(
+        config({ id: "cfg_ws2", workspaceId: "ws_2", assetId: "asset_other" }),
+      );
+
+      await expect(
+        repo.recordDepreciationEntry({ ...entry(2024), scheduleId: "cfg_missing" }),
+      ).rejects.toThrow();
+      // Config exists, but in another workspace.
+      await expect(
+        repo.recordDepreciationEntry({ ...entry(2024), scheduleId: "cfg_ws2" }),
+      ).rejects.toThrow();
+      expect(await repo.listDepreciationEntries("ws_1", "asset_flat")).toEqual([]);
+    } finally {
+      close();
+    }
+  });
+
+  it("lists assets ordered by acquisition date, then id", async () => {
+    const { db, close } = createTestDatabase();
+    try {
+      const repo = new SqliteAssetRepository(db);
+      const withComponents = (id: string, acquiredOn: string): Asset =>
+        property({
+          id,
+          acquiredOn,
+          components: property().components.map((c) => ({ ...c, id: `${c.id}_${id}` })),
+        });
+      await repo.create(withComponents("asset_c", "2023-05-01"));
+      await repo.create(withComponents("asset_a", "2025-01-01"));
+      await repo.create(withComponents("asset_b", "2023-05-01"));
+      expect((await repo.list("ws_1")).map((a) => a.id)).toEqual(["asset_b", "asset_c", "asset_a"]);
+    } finally {
+      close();
+    }
+  });
+
+  it("rolls back the asset row when a component insert fails", async () => {
+    const { db, close } = createTestDatabase();
+    try {
+      const repo = new SqliteAssetRepository(db);
+      await repo.create(property());
+      // Component ids are a global primary key, so reusing them collides even
+      // in another workspace; the whole create must be atomic.
+      await expect(
+        repo.create(property({ id: "asset_dup_components", workspaceId: "ws_2" })),
+      ).rejects.toThrow();
+      expect(await repo.getById("ws_2", "asset_dup_components")).toBeUndefined();
+      expect(await repo.list("ws_2")).toEqual([]);
+    } finally {
+      close();
+    }
+  });
 });
 
 function entry(year: number): RecordedDepreciationEntry {

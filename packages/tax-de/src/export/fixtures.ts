@@ -80,6 +80,59 @@ export const SAMPLE_DEPRECIATION: DepreciationScheduleExportInput = {
   ],
 };
 
+/** Single-component equipment acquired 2025-10; 12 000 over a configured 3-year life. */
+export const SAMPLE_EQUIPMENT_ASSET: Asset = {
+  id: "asset_workstation",
+  workspaceId: "ws_1",
+  kind: "equipment",
+  name: "Synthetic workstation",
+  commodity: "EUR",
+  acquiredOn: "2025-10-10",
+  components: [
+    {
+      id: "cmp_workstation",
+      role: "whole_asset",
+      label: "Workstation",
+      cost: { amount: "12000.00", commodity: "EUR" },
+      depreciable: true,
+    },
+  ],
+  acquisitionSideCosts: [],
+  evidenceDocumentIds: ["doc_workstation_invoice"],
+  createdAt: "2026-01-01T00:00:00Z",
+};
+
+export const SAMPLE_EQUIPMENT_SCHEDULE_CONFIG: DepreciationScheduleConfig = {
+  id: "cfg_workstation_v1",
+  workspaceId: "ws_1",
+  assetId: "asset_workstation",
+  version: 1,
+  method: { kind: "linear_useful_life", usefulLifeYears: 3 },
+  proRataTemporis: true,
+  expenseAccount: "Expenses:Depreciation:Workstation",
+  accumulatedDepreciationAccount: "Assets:Equipment:Workstation:AccumulatedDepreciation",
+  createdAt: "2026-01-01T00:00:00Z",
+};
+
+/** Second asset for multi-asset exports; its 2026 transaction is user-reviewed. */
+export const SAMPLE_EQUIPMENT_DEPRECIATION: DepreciationScheduleExportInput = {
+  assetId: SAMPLE_EQUIPMENT_ASSET.id,
+  assetName: SAMPLE_EQUIPMENT_ASSET.name,
+  assetKind: SAMPLE_EQUIPMENT_ASSET.kind,
+  schedule: computeDepreciationSchedule({
+    asset: SAMPLE_EQUIPMENT_ASSET,
+    config: SAMPLE_EQUIPMENT_SCHEDULE_CONFIG,
+  }),
+  transactions: [
+    {
+      year: 2026,
+      transactionId: "t_depr_workstation",
+      postingIds: ["p_depr_workstation", "p_depr_workstation_accumulated"],
+      reviewState: "user_reviewed",
+    },
+  ],
+};
+
 export const SAMPLE_POSTINGS: TaxPostingInput[] = [
   {
     postingId: "p_maint",

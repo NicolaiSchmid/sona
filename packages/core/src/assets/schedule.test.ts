@@ -412,3 +412,384 @@ describe("describeDepreciationMethod", () => {
     );
   });
 });
+
+describe("computeDepreciationSchedule — acquisition month boundaries", () => {
+  it("treats a January acquisition as a full year without a pro-rata note", () => {
+    const s = computeDepreciationSchedule({
+      asset: { ...SAMPLE_PROPERTY, acquiredOn: "2024-01-31" },
+      config: SAMPLE_PROPERTY_CONFIG,
+    });
+    const first = rowFor(s, 2024);
+    expect(first.monthsInService).toBe(12);
+    expect(first.amount).toBe("6360.00");
+    expect(first.notes).toEqual([]);
+    // 318 000 / 6 360 = 50 exact full years, so no remainder year is needed.
+    expect(s.rows).toHaveLength(50);
+    expect(lastRow(s).year).toBe(2073);
+    expect(totalOf(s)).toBe("318000.00");
+  });
+
+  it("counts a single month for a December acquisition", () => {
+    const s = computeDepreciationSchedule({
+      asset: { ...SAMPLE_PROPERTY, acquiredOn: "2024-12-01" },
+      config: SAMPLE_PROPERTY_CONFIG,
+    });
+    const first = rowFor(s, 2024);
+    expect(first.monthsInService).toBe(1);
+    // 318 000 × 2 % / 12 = 530.
+    expect(first.amount).toBe("530.00");
+    expect(first.notes).toEqual(["pro_rata"]);
+    expect(lastRow(s).amount).toBe("5830.00");
+    expect(lastRow(s).notes).toContain("final_remainder");
+    expect(totalOf(s)).toBe("318000.00");
+  });
+});
+
+describe("computeDepreciationSchedule — improvement timing", () => {
+  it("applies an improvement in the acquisition year to the pro-rata first row", () => {
+    const s = computeDepreciationSchedule({
+      asset: SAMPLE_PROPERTY,
+      config: SAMPLE_PROPERTY_CONFIG,
+      events: [{ ...SAMPLE_IMPROVEMENT, occurredOn: "2024-09-01" }],
+    });
+    const first = rowFor(s, 2024);
+    expect(first.depreciableBasis).toBe("368000.00");
+    // 368 000 × 2 % × 6/12 = 3 680.
+    expect(first.amount).toBe("3680.00");
+    expect(first.monthsInService).toBe(6);
+    expect(first.appliedEventIds).toEqual(["evt_bath_2026"]);
+    expect(first.evidenceDocumentIds).toContain("doc_bath_invoice");
+    expect(totalOf(s)).toBe("368000.00");
+    expect(s.complete).toBe(true);
+  });
+
+  it("applies several improvements in one year together and keeps all their evidence", () => {
+    const kitchen = {
+      ...SAMPLE_IMPROVEMENT,
+      id: "evt_kitchen_2026",
+      occurredOn: "2026-11-01",
+      amount: { amount: "10000.00", commodity: "EUR" },
+      evidenceDocumentIds: ["doc_kitchen_invoice"],
+    };
+    const s = computeDepreciationSchedule({
+      asset: SAMPLE_PROPERTY,
+      config: SAMPLE_PROPERTY_CONFIG,
+      events: [kitchen, SAMPLE_IMPROVEMENT],
+    });
+    expect(rowFor(s, 2025).depreciableBasis).toBe("318000.00");
+    const improved = rowFor(s, 2026);
+    expect(improved.depreciableBasis).toBe("378000.00");
+    expect(improved.amount).toBe("7560.00");
+    expect([...improved.appliedEventIds].sort()).toEqual(["evt_bath_2026", "evt_kitchen_2026"]);
+    expect(improved.evidenceDocumentIds).toEqual(
+      expect.arrayContaining(["doc_bath_invoice", "doc_kitchen_invoice"]),
+    );
+    expect(totalOf(s)).toBe("378000.00");
+  });
+
+  it("resumes a fully depreciated useful-life asset in the year of a later improvement", () => {
+    const s = computeDepreciationSchedule({
+      asset: SAMPLE_EQUIPMENT,
+      config: { ...SAMPLE_EQUIPMENT_CONFIG, proRataTemporis: false },
+      events: [
+        {
+          ...SAMPLE_IMPROVEMENT,
+          id: "evt_late",
+          assetId: "asset_laptop",
+          componentId: "cmp_laptop",
+          occurredOn: "2031-02-01",
+          amount: { amount: "600.00", commodity: "EUR" },
+          evidenceDocumentIds: ["doc_late_invoice"],
+        },
+      ],
+    });
+    // Original life 2025–2027, nothing for 2028–2030, then the improvement alone in 2031.
+    expect(s.rows.map((r) => r.year)).toEqual([2025, 2026, 2027, 2031]);
+    expect(rowFor(s, 2027).closingBookValue).toBe("0.00");
+    const resumed = rowFor(s, 2031);
+    expect(resumed.depreciableBasis).toBe("12600.00");
+    expect(resumed.openingBookValue).toBe("600.00");
+    expect(resumed.amount).toBe("600.00");
+    expect(resumed.closingBookValue).toBe("0.00");
+    expect(resumed.appliedEventIds).toEqual(["evt_late"]);
+    expect(resumed.evidenceDocumentIds).toEqual(["doc_laptop_invoice", "doc_late_invoice"]);
+    expect(totalOf(s)).toBe("12600.00");
+    expect(s.complete).toBe(true);
+  });
+
+  it("resumes a fully depreciated percentage asset in the year of a later improvement", () => {
+    const s = computeDepreciationSchedule({
+      asset: SAMPLE_EQUIPMENT,
+      config: {
+        ...SAMPLE_EQUIPMENT_CONFIG,
+        proRataTemporis: false,
+        method: { kind: "linear_percentage", annualRatePercent: "50" },
+      },
+      events: [
+        {
+          ...SAMPLE_IMPROVEMENT,
+          id: "evt_late",
+          assetId: "asset_laptop",
+          componentId: "cmp_laptop",
+          occurredOn: "2030-02-01",
+          amount: { amount: "600.00", commodity: "EUR" },
+        },
+      ],
+    });
+    expect(s.rows.map((r) => [r.year, r.amount])).toEqual([
+      [2025, "6000.00"],
+      [2026, "6000.00"],
+      [2030, "600.00"],
+    ]);
+    expect(totalOf(s)).toBe("12600.00");
+    expect(s.complete).toBe(true);
+  });
+});
+
+describe("computeDepreciationSchedule — percentage with residual and rounding scale", () => {
+  it("stops a percentage schedule at the configured residual value", () => {
+    const s = computeDepreciationSchedule({
+      asset: SAMPLE_EQUIPMENT,
+      config: {
+        ...SAMPLE_EQUIPMENT_CONFIG,
+        proRataTemporis: false,
+        method: { kind: "linear_percentage", annualRatePercent: "25" },
+        residualValue: { amount: "2000.00", commodity: "EUR" },
+      },
+    });
+    expect(s.rows.map((r) => r.amount)).toEqual(["3000.00", "3000.00", "3000.00", "1000.00"]);
+    expect(lastRow(s).notes).toEqual(["final_remainder"]);
+    expect(lastRow(s).closingBookValue).toBe("2000.00");
+    expect(totalOf(s)).toBe("10000.00");
+    expect(s.complete).toBe(true);
+  });
+
+  it("rejects a residual value in a different commodity", () => {
+    expect(() =>
+      computeDepreciationSchedule({
+        asset: SAMPLE_EQUIPMENT,
+        config: {
+          ...SAMPLE_EQUIPMENT_CONFIG,
+          residualValue: { amount: "1.00", commodity: "USD" },
+        },
+      }),
+    ).toThrow(/denominated in USD/);
+  });
+
+  it("rejects an improvement in a different commodity", () => {
+    expect(() =>
+      computeDepreciationSchedule({
+        asset: SAMPLE_PROPERTY,
+        config: SAMPLE_PROPERTY_CONFIG,
+        events: [{ ...SAMPLE_IMPROVEMENT, amount: { amount: "1.00", commodity: "CHF" } }],
+      }),
+    ).toThrow(/denominated in CHF/);
+  });
+
+  it("totals exactly at rounding scale 0 (whole units)", () => {
+    const asset: Asset = {
+      ...SAMPLE_EQUIPMENT,
+      acquiredOn: "2025-01-01",
+      components: [
+        { ...componentOf(SAMPLE_EQUIPMENT, 0), cost: { amount: "1000", commodity: "EUR" } },
+      ],
+    };
+    const s = computeDepreciationSchedule({
+      asset,
+      config: { ...SAMPLE_EQUIPMENT_CONFIG, proRataTemporis: false, roundingScale: 0 },
+    });
+    expect(s.scale).toBe(0);
+    expect(s.rows.map((r) => r.amount)).toEqual(["333", "334", "333"]);
+    expect(s.acquisitionBasis).toBe("1000");
+    expect(totalOf(s)).toBe("1000");
+    expect(s.totalDepreciation).toBe("1000");
+  });
+
+  it("totals exactly at rounding scale 4", () => {
+    const asset: Asset = {
+      ...SAMPLE_EQUIPMENT,
+      acquiredOn: "2025-01-01",
+      components: [
+        { ...componentOf(SAMPLE_EQUIPMENT, 0), cost: { amount: "1000.00", commodity: "EUR" } },
+      ],
+    };
+    const s = computeDepreciationSchedule({
+      asset,
+      config: { ...SAMPLE_EQUIPMENT_CONFIG, proRataTemporis: false, roundingScale: 4 },
+    });
+    expect(s.rows.map((r) => r.amount)).toEqual(["333.3333", "333.3334", "333.3333"]);
+    expect(totalOf(s)).toBe("1000.0000");
+    expect(lastRow(s).closingBookValue).toBe("0.0000");
+  });
+
+  it("rejects component costs with more fractional digits than the rounding scale", () => {
+    const asset: Asset = {
+      ...SAMPLE_EQUIPMENT,
+      components: [
+        { ...componentOf(SAMPLE_EQUIPMENT, 0), cost: { amount: "1000.50", commodity: "EUR" } },
+      ],
+    };
+    expect(() =>
+      computeDepreciationSchedule({
+        asset,
+        config: { ...SAMPLE_EQUIPMENT_CONFIG, roundingScale: 0 },
+      }),
+    ).toThrow(/fractional/);
+  });
+
+  it("applies a rate with more fractional digits than the basis scale", () => {
+    const asset: Asset = {
+      ...SAMPLE_EQUIPMENT,
+      acquiredOn: "2025-01-01",
+      components: [
+        { ...componentOf(SAMPLE_EQUIPMENT, 0), cost: { amount: "1000.00", commodity: "EUR" } },
+      ],
+    };
+    const s = computeDepreciationSchedule({
+      asset,
+      config: {
+        ...SAMPLE_EQUIPMENT_CONFIG,
+        proRataTemporis: false,
+        method: { kind: "linear_percentage", annualRatePercent: "33.333" },
+      },
+    });
+    // 1000 × 33.333 % = 333.33 per year. The percentage method applies the
+    // configured rate every year and lets the last year absorb the remainder,
+    // so a rate that is not an exact divisor leaves a small trailing stub year.
+    expect(s.rows.map((r) => r.amount)).toEqual(["333.33", "333.33", "333.33", "0.01"]);
+    expect(lastRow(s).notes).toEqual(["final_remainder"]);
+    expect(totalOf(s)).toBe("1000.00");
+  });
+});
+
+describe("computeDepreciationSchedule — termination and degenerate inputs", () => {
+  it("refuses a rate so small the schedule would not terminate within the year cap", () => {
+    expect(() =>
+      computeDepreciationSchedule({
+        asset: SAMPLE_PROPERTY,
+        config: {
+          ...SAMPLE_PROPERTY_CONFIG,
+          method: { kind: "linear_percentage", annualRatePercent: "0.1" },
+        },
+      }),
+    ).toThrow(/did not terminate within 200 years/);
+  });
+
+  it("refuses a basis so small every yearly amount rounds to zero", () => {
+    const asset: Asset = {
+      ...SAMPLE_EQUIPMENT,
+      components: [
+        { ...componentOf(SAMPLE_EQUIPMENT, 0), cost: { amount: "0.10", commodity: "EUR" } },
+      ],
+    };
+    expect(() =>
+      computeDepreciationSchedule({
+        asset,
+        config: {
+          ...SAMPLE_EQUIPMENT_CONFIG,
+          method: { kind: "linear_percentage", annualRatePercent: "2" },
+        },
+      }),
+    ).toThrow(DepreciationScheduleError);
+  });
+
+  it("yields an empty, complete schedule for an asset with no depreciable component", () => {
+    const s = computeDepreciationSchedule({
+      asset: { ...SAMPLE_PROPERTY, components: [componentOf(SAMPLE_PROPERTY, 1)] },
+      config: SAMPLE_PROPERTY_CONFIG,
+    });
+    expect(s.acquisitionBasis).toBe("0.00");
+    expect(s.rows).toEqual([]);
+    expect(s.totalDepreciation).toBe("0.00");
+    expect(s.complete).toBe(true);
+  });
+
+  it("keeps a land-only schedule empty even when the land is improved", () => {
+    const s = computeDepreciationSchedule({
+      asset: { ...SAMPLE_PROPERTY, components: [componentOf(SAMPLE_PROPERTY, 1)] },
+      config: SAMPLE_PROPERTY_CONFIG,
+      events: [{ ...SAMPLE_IMPROVEMENT, componentId: "cmp_land" }],
+    });
+    expect(s.rows).toEqual([]);
+    expect(s.totalDepreciation).toBe("0.00");
+    expect(s.complete).toBe(true);
+  });
+
+  it("rejects a malformed acquisition or event date", () => {
+    expect(() =>
+      computeDepreciationSchedule({
+        asset: { ...SAMPLE_PROPERTY, acquiredOn: "2024-13-01" },
+        config: SAMPLE_PROPERTY_CONFIG,
+      }),
+    ).toThrow(/invalid month/);
+    expect(() =>
+      computeDepreciationSchedule({
+        asset: SAMPLE_PROPERTY,
+        config: SAMPLE_PROPERTY_CONFIG,
+        events: [{ ...SAMPLE_IMPROVEMENT, occurredOn: "01.03.2026" }],
+      }),
+    ).toThrow(/ISO date/);
+  });
+});
+
+describe("computeDepreciationSchedule — disposal variants", () => {
+  it("pro-rates a useful-life disposal year over the remaining months", () => {
+    const s = computeDepreciationSchedule({
+      asset: SAMPLE_EQUIPMENT,
+      config: SAMPLE_EQUIPMENT_CONFIG,
+      events: [
+        {
+          ...SAMPLE_DISPOSAL,
+          id: "evt_laptop_sale",
+          assetId: "asset_laptop",
+          occurredOn: "2027-03-15",
+          proceeds: undefined,
+        },
+      ],
+    });
+    expect(s.rows.map((r) => [r.year, r.monthsInService, r.amount])).toEqual([
+      [2025, 3, "1000.00"],
+      [2026, 12, "4000.00"],
+      // 7 000 remaining over 21 remaining months × 3 months = 1 000.
+      [2027, 3, "1000.00"],
+    ]);
+    expect(lastRow(s).notes).toEqual(["pro_rata", "disposal_year"]);
+    expect(lastRow(s).closingBookValue).toBe("6000.00");
+    expect(s.disposedOn).toBe("2027-03-15");
+    expect(s.complete).toBe(true);
+  });
+
+  it("takes a full year in the disposal year when pro rata is disabled", () => {
+    const s = computeDepreciationSchedule({
+      asset: SAMPLE_PROPERTY,
+      config: { ...SAMPLE_PROPERTY_CONFIG, proRataTemporis: false },
+      events: [SAMPLE_DISPOSAL],
+    });
+    expect(s.rows.map((r) => r.year)).toEqual([2024, 2025, 2026, 2027]);
+    const last = rowFor(s, 2027);
+    expect(last.monthsInService).toBe(12);
+    expect(last.amount).toBe("6360.00");
+    expect(last.notes).toEqual(["disposal_year"]);
+    expect(totalOf(s)).toBe("25440.00");
+  });
+
+  it("does not label a disposal-year amount as a final remainder", () => {
+    // Disposal in the last scheduled year of a 3-year life: the remaining
+    // book value is taken, but flagged as disposal, not as remainder.
+    const s = computeDepreciationSchedule({
+      asset: SAMPLE_EQUIPMENT,
+      config: { ...SAMPLE_EQUIPMENT_CONFIG, proRataTemporis: false },
+      events: [
+        {
+          ...SAMPLE_DISPOSAL,
+          id: "evt_laptop_sale",
+          assetId: "asset_laptop",
+          occurredOn: "2027-12-31",
+        },
+      ],
+    });
+    expect(lastRow(s).amount).toBe("4000.00");
+    expect(lastRow(s).notes).toEqual(["disposal_year"]);
+    expect(lastRow(s).closingBookValue).toBe("0.00");
+  });
+});
