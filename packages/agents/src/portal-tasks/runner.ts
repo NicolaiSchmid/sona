@@ -14,7 +14,7 @@
 import type { StoredDocument } from "@sona/core";
 import { sha256Hex } from "@sona/core";
 import { validateReadOnlyActions } from "./policy.js";
-import type { FetchedDocument, TaskRunProvenance } from "./provenance.js";
+import type { BrowserProviderName, FetchedDocument, TaskRunProvenance } from "./provenance.js";
 import type { PortalTask } from "./schema.js";
 
 export interface RunPortalTaskInput {
@@ -60,7 +60,7 @@ export type PortalTaskRunStatus =
  */
 export function createInitialRunResult(
   input: RunPortalTaskInput,
-  provider: string,
+  provider: BrowserProviderName,
 ): RunPortalTaskResult {
   const identity = taskIdentity(input.task);
   return {
@@ -150,6 +150,7 @@ export class FakePortalTaskRunner implements PortalTaskRunner {
         contentHash,
         fetchedAt: input.now,
         browserProvider: "fake",
+        connectionId: input.connectionId,
         workspaceId: input.workspaceId,
         extractionStatus: "pending",
       },

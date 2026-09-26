@@ -133,7 +133,7 @@ Implemented controls and their known limits:
   cleartext, destructive-URL, WebSocket, and unreviewed non-idempotent traffic
   before it is sent. Requests are issued by the worker with redirects disabled
   so every hop is evaluated first; should the browser ever follow a redirect on
-  its own, the hop is recorded and the session fails closed.
+  its own, a refused hop is recorded and the session fails closed.
 - Domain allowlists are hostname-based. They do not protect against DNS
   rebinding or portals resolving to private addresses, so browsers and
   workers must run in an egress-isolated network with no route to internal
@@ -143,8 +143,8 @@ Implemented controls and their known limits:
   carry references, not document bytes.
 - Because requests are issued by the worker through Playwright's request
   interception, every response body is buffered in the worker before the page
-  sees it; streaming responses (server-sent events, media) are not supported
-  inside guarded sessions.
+  sees it; WebSocket and EventSource channels are refused and long-lived media
+  streams are not supported inside guarded sessions.
 
 ## Early launch posture
 

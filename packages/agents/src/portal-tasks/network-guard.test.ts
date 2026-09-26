@@ -256,7 +256,7 @@ describe("createNetworkGuard", () => {
     expect(guard.snapshot().blockedRequests[0]).toMatchObject({
       url: "wss://portal.test/live",
       resourceType: "websocket",
-      reason: "websocket",
+      reason: "streaming_channel",
     });
   });
 
@@ -417,7 +417,7 @@ describe("NetworkGuard host matching", () => {
     });
 
     expect(remote).toEqual({ action: "abort", reason: "off_allowlist" });
-    expect(local).toEqual({ action: "abort", reason: "websocket" });
+    expect(local).toEqual({ action: "abort", reason: "streaming_channel" });
   });
 });
 
@@ -821,7 +821,8 @@ describe("isMaterialBlock", () => {
     expect(isMaterialBlock(blocked("image", "off_allowlist"))).toBe(false);
     expect(isMaterialBlock(blocked("font", "off_allowlist"))).toBe(false);
     expect(isMaterialBlock(blocked("xhr", "off_allowlist"))).toBe(false);
-    expect(isMaterialBlock(blocked("websocket", "websocket"))).toBe(false);
+    expect(isMaterialBlock(blocked("websocket", "streaming_channel"))).toBe(false);
+    expect(isMaterialBlock(blocked("eventsource", "streaming_channel"))).toBe(false);
     expect(isMaterialBlock(blocked("websocket", "off_allowlist"))).toBe(false);
   });
 

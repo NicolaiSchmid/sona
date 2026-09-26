@@ -57,8 +57,7 @@ export type PortalFetchJobReservation =
 
 export interface RecordPortalFetchRunInput {
   context: WorkspaceContext;
-  /** The approved connection the run used; several connections may share a task. */
-  connectionId: string;
+  /** Carries the connection id in `provenance.connectionId`. */
   result: RunPortalTaskResult;
 }
 
@@ -197,7 +196,7 @@ async function recordRunOrKeepLease(
   let lastError: unknown;
   for (let attempt = 1; attempt <= RECORD_RUN_ATTEMPTS; attempt += 1) {
     try {
-      await input.runs.recordRun({ context, connectionId: input.connectionId, result });
+      await input.runs.recordRun({ context, result });
       return;
     } catch (error) {
       lastError = error;

@@ -743,7 +743,7 @@ describe("LocalPlaywrightPortalTaskRunner", () => {
     expect(result.status).toBe("selector_missing");
     expect(page.screenshotCount).toBe(1);
     expect(result.warnings.filter((warning) => warning.includes("screenshot"))).toEqual([
-      expect.stringMatching(/^failure screenshot captured: [0-9a-f]{64}$/),
+      expect.stringMatching(/^failure screenshot hashed, bytes not retained: [0-9a-f]{64}$/),
     ]);
   });
 
@@ -762,10 +762,10 @@ describe("LocalPlaywrightPortalTaskRunner", () => {
     expect(result.documents).toEqual([]);
     expect(
       result.warnings.filter((warning) => warning === "download blocked: off_allowlist"),
-    ).toHaveLength(2);
+    ).toHaveLength(1);
+    // The run stops at the first refused link instead of probing the rest.
     expect(result.provenance.blockedRequests.map((request) => request.url)).toEqual([
       "https://evil.test/a.pdf",
-      "https://portal.test.evil.example/b.pdf",
     ]);
   });
 
@@ -781,7 +781,6 @@ describe("LocalPlaywrightPortalTaskRunner", () => {
     expect(page.requestCount).toBe(0);
     expect(result.storedDocuments).toEqual([]);
     expect(result.provenance.blockedRequests.map((request) => request.reason)).toEqual([
-      "off_allowlist",
       "off_allowlist",
     ]);
   });
@@ -1337,6 +1336,7 @@ describe("LocalPlaywrightPortalTaskRunner evidence and warnings", () => {
         contentHash: fetched.contentHash,
         fetchedAt: now,
         browserProvider: "local-playwright",
+        connectionId: "conn_1",
         extractionStatus: "pending",
       },
       retentionState: "active",
@@ -1396,7 +1396,7 @@ describe("LocalPlaywrightPortalTaskRunner evidence and warnings", () => {
     expect(result.provenance.blockedRequests.map((blocked) => blocked.reason)).toEqual([
       "off_allowlist",
       "off_allowlist",
-      "websocket",
+      "streaming_channel",
     ]);
   });
 

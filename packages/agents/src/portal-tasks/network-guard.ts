@@ -42,7 +42,7 @@ const LOCALHOST_PROTOCOLS = new Set([...SECURE_PROTOCOLS, "http:", "ws:"]);
  * well as through a link.
  */
 const STATIC_ASSET_RE =
-  /\.(?:js|mjs|css|map|png|jpe?g|gif|svg|webp|ico|woff2?|ttf|otf|eot|mp4|webm|mp3|json|xml|txt)$/i;
+  /\.(?:js|mjs|css|png|jpe?g|gif|svg|webp|ico|woff2?|ttf|otf|eot|mp4|webm|mp3)$/i;
 
 /**
  * Blocks that mean the task itself tried to leave the read-only boundary: a
@@ -80,9 +80,10 @@ export class NetworkGuard {
     }
 
     // A WebSocket is a bidirectional channel whose messages the guard cannot
-    // classify as idempotent, so guarded sessions never open one.
-    if (request.resourceType === "websocket") {
-      return this.block(request, method, "websocket");
+    // classify as idempotent, and an EventSource never ends, so guarded
+    // sessions open neither.
+    if (request.resourceType === "websocket" || request.resourceType === "eventsource") {
+      return this.block(request, method, "streaming_channel");
     }
 
     // Merchant portals do not reliably keep GET side-effect free, so a URL
@@ -207,7 +208,9 @@ function isReviewedBody(
       continue;
     }
     const pinned = exception.pinnedBodyValues[name];
-    if (pinned !== undefined ? !pinned.includes(value) : forbiddenConceptFor(value) !== undefined) {
+    const reviewed =
+      pinned === undefined ? forbiddenConceptFor(value) === undefined : pinned.includes(value);
+    if (!reviewed) {
       return false;
     }
   }
@@ -217,10 +220,10 @@ function isReviewedBody(
 type BodyField = readonly [name: string, value: string];
 
 function parseBodyFields(postData: string | undefined): readonly BodyField[] | undefined {
-  if (postData === undefined || postData.trim().length === 0) {
+  const trimmed = postData?.trim() ?? "";
+  if (trimmed.length === 0) {
     return [];
   }
-  const trimmed = postData.trim();
   if (trimmed.startsWith("{")) {
     return parseJsonFields(trimmed);
   }

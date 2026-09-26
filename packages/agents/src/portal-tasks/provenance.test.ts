@@ -18,6 +18,7 @@ function makeFetched(overrides: Partial<FetchedDocument> = {}): FetchedDocument 
       contentHash: "a".repeat(64),
       fetchedAt: "2026-02-01T00:00:00Z",
       browserProvider: "fake",
+      connectionId: "conn_1",
       workspaceId: "ws_1",
       extractionStatus: "pending",
     },

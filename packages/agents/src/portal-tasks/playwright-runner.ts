@@ -16,6 +16,7 @@ import type {
 import { isSelectorTimeoutError } from "./browser.js";
 import {
   documentBytesProblem,
+  fileExtensionFor,
   isExpectedMimeType,
   isSuccessfulStatus,
   MAX_REDIRECT_HOPS,
@@ -104,6 +105,8 @@ export interface SavePortalEvidenceInput {
 /**
  * Where fetched files become first-class `@sona/receipts` evidence records
  * (source kind `portal`) so extraction and reconciliation can pick them up.
+ * `saveDocument` must be an upsert by `id`: a retry after a failed store
+ * re-registers the same deterministic id.
  */
 export interface PortalEvidenceRepository {
   saveDocument(input: SavePortalEvidenceInput): Promise<void>;
@@ -271,7 +274,11 @@ export class LocalPlaywrightPortalTaskRunner implements PortalTaskRunner {
         try {
           await session.close();
         } catch (error) {
-          result.status = "failed";
+          // Runners only downgrade: a terminal `blocked`/`selector_missing` must
+          // not become retryable because the browser exited uncleanly.
+          if (result.status === "completed") {
+            result.status = "failed";
+          }
           result.errors.push(describeError(redactor, error));
         }
       }
@@ -505,7 +512,6 @@ async function downloadLinks(
 
 type DownloadLinkOutcome =
   | { kind: "no_href" }
-  | { kind: "refused" }
   | { kind: "duplicate" }
   | { kind: "stored" }
   | { kind: "stopped"; status: DownloadProblem["status"] };
@@ -524,8 +530,10 @@ async function downloadLink(
   const href = resolveUrl(rawHref, state.session.page.url());
   const decision = evaluateDownloadUrl(state, href);
   if (decision.action === "abort") {
+    // A refused download link is a task-boundary violation; stop rather than
+    // keep contacting the portal for the remaining links.
     state.result.warnings.push(`download blocked: ${decision.reason}`);
-    return { kind: "refused" };
+    return { kind: "stopped", status: "blocked" };
   }
 
   const blockedBeforeDownload = state.guard.snapshot().blockedRequests.length;
@@ -630,7 +638,8 @@ async function captureFailureArtifact(state: ExecutionState): Promise<void> {
   }
   const screenshot = await state.session.page.screenshot();
   const hash = sha256Hex(screenshot);
-  state.result.warnings.push(`failure screenshot captured: ${hash}`);
+  // Bytes are not retained until a retention-bounded artifact store exists.
+  state.result.warnings.push(`failure screenshot hashed, bytes not retained: ${hash}`);
 }
 
 interface FetchedDocumentInput {
@@ -661,6 +670,7 @@ function makeFetchedDocument(state: ExecutionState, input: FetchedDocumentInput)
       contentHash: input.contentHash,
       fetchedAt: state.input.now,
       browserProvider: state.result.provenance.browserProvider,
+      connectionId: state.input.connectionId,
       workspaceId: state.input.workspaceId,
       extractionStatus: "pending",
     },
@@ -729,7 +739,7 @@ async function resolveFilename(
   }
   const pathname = new URL(href).pathname;
   const basename = pathname.split("/").filter(Boolean).at(-1);
-  return basename ?? `portal-document-${index + 1}.pdf`;
+  return basename ?? `portal-document-${index + 1}.${fileExtensionFor(step.mimeType)}`;
 }
 
 function connectionKey(workspaceId: string, connectionId: string): string {

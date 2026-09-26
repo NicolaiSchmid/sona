@@ -36,7 +36,7 @@ export type BlockedPortalRequestReason =
   | "destructive_url"
   | "non_idempotent_method"
   | "unreviewed_body"
-  | "websocket";
+  | "streaming_channel";
 
 /** Playwright's resource classification; adapters map unknown kinds to `other`. */
 export const PORTAL_RESOURCE_TYPES = [
@@ -88,7 +88,9 @@ export interface FetchedDocumentProvenance {
   downloadedFilename: string;
   contentHash: string;
   fetchedAt: string;
-  browserProvider: string;
+  browserProvider: BrowserProviderName;
+  /** The approved connection whose credentials fetched the document. */
+  connectionId: string;
   workspaceId: string;
   extractionStatus: ExtractionStatus;
 }
@@ -169,6 +171,7 @@ function provenanceToJson(provenance: FetchedDocumentProvenance): JsonValue {
     contentHash: provenance.contentHash,
     fetchedAt: provenance.fetchedAt,
     browserProvider: provenance.browserProvider,
+    connectionId: provenance.connectionId,
     extractionStatus: provenance.extractionStatus,
   };
 }

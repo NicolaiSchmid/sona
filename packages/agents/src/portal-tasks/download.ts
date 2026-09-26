@@ -1,6 +1,7 @@
 /**
  * Download policy helpers shared by the runner and browser adapters.
  */
+import { resolveUrl } from "./url.js";
 
 export class DownloadTooLargeError extends Error {
   readonly maxBytes: number;
@@ -84,17 +85,20 @@ export interface RedirectTargetInput {
   currentUrl: string;
   /** Hops already followed before this one. */
   hop: number;
+  /** Defaults to {@link MAX_REDIRECT_HOPS}. */
+  maxHops?: number;
 }
 
 /** Resolves the next hop of a redirect chain or throws when it cannot be followed safely. */
 export function redirectTarget(input: RedirectTargetInput): string {
-  if (input.hop >= MAX_REDIRECT_HOPS) {
-    throw new Error(`redirect chain exceeded ${MAX_REDIRECT_HOPS} hops`);
+  const maxHops = input.maxHops ?? MAX_REDIRECT_HOPS;
+  if (input.hop >= maxHops) {
+    throw new Error(`redirect chain exceeded ${maxHops} hops`);
   }
   if (input.location === undefined || input.location === null) {
     throw new Error(`redirect ${input.status} without a Location header`);
   }
-  return new URL(input.location, input.currentUrl).toString();
+  return resolveUrl(input.location, input.currentUrl);
 }
 
 /** Compares media types only; parameters such as `charset` are ignored. */
@@ -106,6 +110,18 @@ export function isExpectedMimeType(actual: string, expected: string): boolean {
 export const DOWNLOAD_MIME_TYPES = ["application/pdf", "image/png", "image/jpeg"] as const;
 
 export type DownloadMimeType = (typeof DOWNLOAD_MIME_TYPES)[number];
+
+const FILE_EXTENSIONS: Readonly<Record<DownloadMimeType, string>> = {
+  "application/pdf": "pdf",
+  "image/png": "png",
+  "image/jpeg": "jpg",
+};
+
+/** File extension for a declared download type; falls back to `bin` for unknown input. */
+export function fileExtensionFor(mimeType: string): string {
+  const declared = mediaType(mimeType);
+  return isDownloadMimeType(declared) ? FILE_EXTENSIONS[declared] : "bin";
+}
 
 const SIGNATURES: Readonly<Record<DownloadMimeType, readonly Uint8Array[]>> = {
   "application/pdf": [new TextEncoder().encode("%PDF-")],
