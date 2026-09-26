@@ -10,6 +10,7 @@
 export const sonaDbVersion = "0.0.0" as const;
 
 export { CORE_MIGRATIONS, type Migration } from "./migrations/index";
+export * from "./repositories/audit-events.js";
 export {
   createWorkspaceBankRecordStore,
   type PersistedBankAccount,
@@ -22,6 +23,8 @@ export {
   SqliteDocumentRepository,
   type StoredDocumentExtraction,
 } from "./repositories/documents.js";
+export * from "./repositories/evidence-links.js";
+export * from "./repositories/ledger.js";
 export { SqliteMatchCandidateRepository } from "./repositories/matches.js";
 export { SqlitePortalTaskRunRepository } from "./repositories/portal-task-runs.js";
 export { SqliteRawRecordRepository } from "./repositories/raw-records.js";
