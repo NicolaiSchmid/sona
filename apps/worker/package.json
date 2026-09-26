@@ -13,10 +13,16 @@
   },
   "scripts": {
     "build": "tsc -b",
-    "typecheck": "tsc -b"
+    "typecheck": "tsc -b",
+    "start": "tsx src/main.ts"
   },
   "dependencies": {
     "@sona/agents": "workspace:*",
-    "@sona/core": "workspace:*"
+    "@sona/connectors": "workspace:*",
+    "@sona/core": "workspace:*",
+    "@sona/db": "workspace:*",
+    "@sona/receipts": "workspace:*",
+    "@sona/tax-de": "workspace:*",
+    "zod": "^3.24.0"
   }
 }

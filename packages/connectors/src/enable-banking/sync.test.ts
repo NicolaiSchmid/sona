@@ -94,6 +94,23 @@ function harness(options: { failTransactionsFor?: string } = {}): Harness {
 const baseInput = { workspaceId: "ws_1", sourceId: "src_1", sessionId: "sess_demo_1" };
 
 describe("runEnableBankingSync", () => {
+  it("derives raw record ids from the dedup key so an unchanged re-sync links to existing records", async () => {
+    const first = harness();
+    await runEnableBankingSync({ ...baseInput, ...first });
+    const second = harness();
+    await runEnableBankingSync({ ...baseInput, ...second });
+
+    const idsOf = (h: Harness) => h.raws.map((r) => r.id).sort();
+    expect(idsOf(second)).toEqual(idsOf(first));
+    expect(new Set(idsOf(first)).size).toBe(first.raws.length);
+    expect(second.txLinks.sort()).toEqual(first.txLinks.sort());
+
+    // Another workspace observing identical payloads gets its own ids.
+    const other = harness();
+    await runEnableBankingSync({ ...baseInput, workspaceId: "ws_2", ...other });
+    expect(idsOf(other).some((id) => idsOf(first).includes(id))).toBe(false);
+  });
+
   it("syncs all accounts and writes raw records before normalized ones", async () => {
     const h = harness();
     const summary = await runEnableBankingSync({ ...baseInput, ...h });

@@ -527,3 +527,40 @@ export interface EmailSyncCursorRow {
 export const EMAIL_TABLES = ["email_sync_cursors"] as const;
 
 export type EmailTableName = (typeof EMAIL_TABLES)[number];
+
+// --- Jobs schema (migrations/0008_jobs.sql) ---------------------------------
+
+export interface JobRow {
+  id: string;
+  workspace_id: string;
+  kind: string;
+  payload_json: string;
+  idempotency_key: string;
+  status: string;
+  attempts: number;
+  max_attempts: number;
+  run_after: string;
+  lease_owner: string | null;
+  lease_until: string | null;
+  last_error: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface JobRunRow {
+  id: string;
+  workspace_id: string;
+  job_id: string;
+  attempt: number;
+  worker_id: string;
+  status: string;
+  started_at: string;
+  finished_at: string | null;
+  error: string | null;
+  result_json: string | null;
+  produced_json: string;
+}
+
+export const JOB_TABLES = ["jobs", "job_runs"] as const;
+
+export type JobTableName = (typeof JOB_TABLES)[number];

@@ -4,7 +4,13 @@
  * failures (one flaky ASPSP account must not fail the whole sync). All stores
  * are injected so this composes with real repositories or in-memory fakes.
  */
-import { createRawSourceRecord, type JsonValue, type RawSourceRecord } from "@sona/core";
+import {
+  createRawSourceRecord,
+  type JsonValue,
+  type RawSourceRecord,
+  sha256Hex,
+  stableJsonHash,
+} from "@sona/core";
 import {
   type RawLink,
   type RawRecordStore,
@@ -104,13 +110,18 @@ export async function runEnableBankingSync(input: RunEnableBankingSyncInput): Pr
   // so two accounts returning identical provider payloads (e.g. equal balances)
   // still hash distinctly and each keeps its own raw source-record trail under
   // the `uq_raw_records_dedup` (workspace, source, payload_hash) index.
+  //
+  // The record id is derived from that same dedup key. A re-sync that sees an
+  // unchanged payload is ignored by the store, and the normalized rows written
+  // afterwards link to the id that already exists instead of a dangling one.
   const appendRaw = async (
     recordType: RawSourceRecord["recordType"],
     externalId: string,
     context: { accountExternalId: string; kind: string; page?: number },
     payload: JsonValue,
   ): Promise<string> => {
-    const id = env.ids();
+    const payloadJson: JsonValue = { ...context, payload };
+    const id = rawRecordId(workspaceId, sourceId, stableJsonHash(payloadJson));
     const at = env.nowIso();
     await rawStore.append(
       createRawSourceRecord({
@@ -119,7 +130,7 @@ export async function runEnableBankingSync(input: RunEnableBankingSyncInput): Pr
         sourceId,
         externalId,
         recordType,
-        payloadJson: { ...context, payload },
+        payloadJson,
         observedAt: at,
         createdAt: at,
       }),
@@ -214,4 +225,9 @@ export async function runEnableBankingSync(input: RunEnableBankingSyncInput): Pr
   const status: SyncStatus = summary.errors.length > 0 ? "completed_with_errors" : "succeeded";
   await runStore.finish({ runId, status, finishedAt: env.nowIso(), summary });
   return summary;
+}
+
+/** Deterministic raw record id for one (workspace, source, payload) observation. */
+export function rawRecordId(workspaceId: string, sourceId: string, payloadHash: string): string {
+  return `raw_${sha256Hex(`${workspaceId}\u0000${sourceId}\u0000${payloadHash}`).slice(0, 40)}`;
 }

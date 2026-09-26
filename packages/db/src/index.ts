@@ -18,6 +18,9 @@ export {
   SqliteAuditEventRepository,
 } from "./repositories/audit-events.js";
 export {
+  type BankTransactionFilter,
+  bankAccountId,
+  bankTransactionId,
   createWorkspaceBankRecordStore,
   type PersistedBankAccount,
   type PersistedBankBalance,
@@ -41,6 +44,25 @@ export {
   SqliteEvidenceLinkRepository,
 } from "./repositories/evidence-links.js";
 export { withTransaction, withTransactionAsync } from "./repositories/helpers.js";
+export {
+  type ClaimedJob,
+  type ClaimJobsInput,
+  type EnqueueJobInput,
+  type EnqueueJobResult,
+  type FailJobRunInput,
+  isJobRunStatus,
+  isJobStatus,
+  JOB_RUN_STATUSES,
+  JOB_STATUSES,
+  JobLeaseLostError,
+  type JobRunStatus,
+  type JobStatus,
+  type ListJobsFilter,
+  type PersistedJob,
+  type PersistedJobRun,
+  SqliteJobRepository,
+  type SucceedJobRunInput,
+} from "./repositories/jobs.js";
 export {
   type CreateLedgerTransactionInput,
   type CreateLedgerTransactionResult,
@@ -76,6 +98,12 @@ export {
   type ReviewTransitionInput,
   SqliteReviewQueueRepository,
 } from "./repositories/review-queue.js";
+export {
+  type PersistedSourceCredential,
+  type SchedulableSource,
+  type SourceCredentialInput,
+  SqliteSourceRepository,
+} from "./repositories/sources.js";
 export {
   createWorkspaceSyncRunStore,
   type PersistedSyncRun,

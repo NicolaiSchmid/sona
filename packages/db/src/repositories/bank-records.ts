@@ -1,5 +1,5 @@
 import type { JsonValue } from "@sona/core";
-import type { DbClient } from "../runner.js";
+import type { DbClient, DbValue } from "../runner.js";
 import { optionalString, parseJson, requiredString, row, rows, stringifyJson } from "./helpers.js";
 import type {
   BankRecordStore,
@@ -36,6 +36,8 @@ export interface PersistedBankBalance {
 }
 
 export interface PersistedBankTransaction {
+  /** `bank_transactions.id`, see {@link bankTransactionId}. */
+  id: string;
   workspaceId: string;
   sourceId: string;
   accountExternalId: string;
@@ -52,6 +54,29 @@ export interface PersistedBankTransaction {
   updatedAt: string;
 }
 
+export interface BankTransactionFilter {
+  /** Inclusive lower bound on the booking/value date (YYYY-MM-DD). */
+  from?: string;
+  /** Inclusive upper bound on the booking/value date (YYYY-MM-DD). */
+  to?: string;
+  /** Maximum number of transactions, oldest first. */
+  limit?: number;
+}
+
+/** Primary key of a bank account row: `bank_account:<source>:<account>`. */
+export function bankAccountId(sourceId: string, accountExternalId: string): string {
+  return `bank_account:${sourceId}:${accountExternalId}`;
+}
+
+/** Primary key of a bank transaction row: `bank_transaction:<source>:<account>:<external>`. */
+export function bankTransactionId(
+  sourceId: string,
+  accountExternalId: string,
+  externalId: string,
+): string {
+  return `bank_transaction:${sourceId}:${accountExternalId}:${externalId}`;
+}
+
 interface RawRecordScope {
   workspaceId: string;
   sourceId: string;
@@ -66,7 +91,7 @@ export class SqliteBankRecordRepository {
 
   async saveAccount(workspaceId: string, account: NormalizedAccount, link: RawLink): Promise<void> {
     const scope = this.rawScope(workspaceId, link.rawRecordId);
-    const id = `bank_account:${scope.sourceId}:${account.externalId}`;
+    const id = bankAccountId(scope.sourceId, account.externalId);
     this.#db
       .prepare(
         "INSERT INTO bank_accounts (id, workspace_id, source_id, external_id, name, iban, currency, product, raw_json, raw_record_id, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (workspace_id, source_id, external_id) DO UPDATE SET name = excluded.name, iban = excluded.iban, currency = excluded.currency, product = excluded.product, raw_json = excluded.raw_json, raw_record_id = excluded.raw_record_id, updated_at = excluded.updated_at",
@@ -116,7 +141,11 @@ export class SqliteBankRecordRepository {
     link: RawLink,
   ): Promise<void> {
     const scope = this.rawScope(workspaceId, link.rawRecordId);
-    const id = `bank_transaction:${scope.sourceId}:${transaction.accountExternalId}:${transaction.externalId}`;
+    const id = bankTransactionId(
+      scope.sourceId,
+      transaction.accountExternalId,
+      transaction.externalId,
+    );
     this.#db
       .prepare(
         "INSERT INTO bank_transactions (id, workspace_id, source_id, account_external_id, external_id, booked_on, value_date, amount, currency, status, counterparty_name, remittance_info, raw_json, raw_record_id, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (workspace_id, source_id, account_external_id, external_id) DO UPDATE SET booked_on = excluded.booked_on, value_date = excluded.value_date, amount = excluded.amount, currency = excluded.currency, status = excluded.status, counterparty_name = excluded.counterparty_name, remittance_info = excluded.remittance_info, raw_json = excluded.raw_json, raw_record_id = excluded.raw_record_id, updated_at = excluded.updated_at",
@@ -203,6 +232,45 @@ export class SqliteBankRecordRepository {
     ).map(transactionFromRow);
   }
 
+  /**
+   * Transactions in a workspace whose booking date (or value date when the
+   * booking date is unknown) falls in the inclusive `[from, to]` window,
+   * across sources and accounts. Undated transactions are only returned when
+   * no window is given.
+   */
+  async listTransactions(
+    workspaceId: string,
+    filter: BankTransactionFilter = {},
+  ): Promise<PersistedBankTransaction[]> {
+    const clauses = ["workspace_id = ?"];
+    const params: DbValue[] = [workspaceId];
+    if (filter.from !== undefined) {
+      clauses.push("COALESCE(booked_on, value_date) >= ?");
+      params.push(filter.from);
+    }
+    if (filter.to !== undefined) {
+      clauses.push("COALESCE(booked_on, value_date) <= ?");
+      params.push(filter.to);
+    }
+    let limitClause = "";
+    if (filter.limit !== undefined) {
+      if (!Number.isInteger(filter.limit) || filter.limit < 1) {
+        throw new Error(
+          `bank transaction limit must be a positive integer, got ${String(filter.limit)}`,
+        );
+      }
+      limitClause = " LIMIT ?";
+      params.push(filter.limit);
+    }
+    return rows(
+      this.#db
+        .prepare(
+          `SELECT * FROM bank_transactions WHERE ${clauses.join(" AND ")} ORDER BY COALESCE(booked_on, value_date), source_id, account_external_id, external_id${limitClause}`,
+        )
+        .all(...params),
+    ).map(transactionFromRow);
+  }
+
   private rawScope(workspaceId: string, rawRecordId: string): RawRecordScope {
     const result = row(
       this.#db
@@ -265,6 +333,7 @@ function balanceFromRow(source: Record<string, unknown>): PersistedBankBalance {
 
 function transactionFromRow(source: Record<string, unknown>): PersistedBankTransaction {
   return {
+    id: requiredString(source, "id"),
     workspaceId: requiredString(source, "workspace_id"),
     sourceId: requiredString(source, "source_id"),
     accountExternalId: requiredString(source, "account_external_id"),
