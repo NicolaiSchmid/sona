@@ -241,28 +241,15 @@ async function resolveRouteThroughGuard(
 ): Promise<void> {
   const request = route.request();
   const resourceType = toResourceType(request.resourceType());
-  const originalMethod = request.method();
-  const originalOrigin = new URL(request.url()).origin;
-  let url = request.url();
-  let method = originalMethod;
-  let postData = request.postData() ?? undefined;
+  let current: Hop = {
+    url: request.url(),
+    method: request.method(),
+    postData: request.postData() ?? undefined,
+  };
   for (let hop = 0; ; hop += 1) {
+    // The first hop re-sends the browser's request as is; later hops are rebuilt.
     const response = await route.fetch(
-      hop === 0
-        ? { maxRedirects: 0 }
-        : {
-            url,
-            method,
-            headers: hopHeaders(request.headers(), {
-              methodChanged: method !== originalMethod,
-              originChanged: new URL(url).origin !== originalOrigin,
-            }),
-            // An empty Buffer is an explicit "no body"; undefined would re-send
-            // the original. Playwright still labels it `application/octet-stream`
-            // with `content-length: 0`, which is harmless for a body-less GET.
-            postData: postData === undefined ? Buffer.alloc(0) : postData,
-            maxRedirects: 0,
-          },
+      hop === 0 ? { maxRedirects: 0 } : hopFetchOptions(request, current),
     );
     const status = response.status();
     if (!isRedirectStatus(status)) {
@@ -272,14 +259,17 @@ async function resolveRouteThroughGuard(
     const nextUrl = redirectTarget({
       status,
       location: response.headers()["location"],
-      currentUrl: url,
+      currentUrl: current.url,
       hop,
     });
     const preservesMethod = redirectPreservesMethod(status);
-    const nextMethod = preservesMethod ? method : "GET";
-    const nextPostData = preservesMethod ? postData : undefined;
-    await guard({ url: nextUrl, method: nextMethod, resourceType, postData: nextPostData });
-    if (request.isNavigationRequest() && nextMethod === "GET") {
+    const next: Hop = {
+      url: nextUrl,
+      method: preservesMethod ? current.method : "GET",
+      postData: preservesMethod ? current.postData : undefined,
+    };
+    await guard({ resourceType, ...next });
+    if (request.isNavigationRequest() && next.method === "GET") {
       await route.fulfill({
         status: 200,
         contentType: "text/html",
@@ -287,10 +277,31 @@ async function resolveRouteThroughGuard(
       });
       return;
     }
-    url = nextUrl;
-    method = nextMethod;
-    postData = nextPostData;
+    current = next;
   }
+}
+
+interface Hop {
+  url: string;
+  method: string;
+  postData: string | undefined;
+}
+
+/** Fetch options for a hop the worker follows in place of the browser. */
+function hopFetchOptions(request: PlaywrightRequest, target: Hop): PlaywrightRouteFetchOptions {
+  return {
+    url: target.url,
+    method: target.method,
+    headers: hopHeaders(request.headers(), {
+      methodChanged: target.method !== request.method(),
+      originChanged: new URL(target.url).origin !== new URL(request.url()).origin,
+    }),
+    // An empty Buffer is an explicit "no body"; undefined would re-send the
+    // original. Playwright still labels it `application/octet-stream` with
+    // `content-length: 0`, which is harmless for a body-less GET.
+    postData: target.postData ?? Buffer.alloc(0),
+    maxRedirects: 0,
+  };
 }
 
 const BODY_HEADERS = new Set([

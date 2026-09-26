@@ -174,8 +174,8 @@ export function createNetworkGuard(options: NetworkGuardOptions): NetworkGuard {
 
 function isDestructiveUrl(rawUrl: string): boolean {
   const pathAndQuery = decodedPathAndQuery(rawUrl);
-  const path = pathAndQuery.split("?", 1)[0] ?? pathAndQuery;
-  if (STATIC_ASSET_RE.test(path) && path === pathAndQuery) {
+  // Only a bare asset path is exempt; `logo.png?action=delete` is still screened.
+  if (!pathAndQuery.includes("?") && STATIC_ASSET_RE.test(pathAndQuery)) {
     return false;
   }
   return forbiddenConceptFor(pathAndQuery) !== undefined;
