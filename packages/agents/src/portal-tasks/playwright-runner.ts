@@ -124,7 +124,6 @@ export interface LocalPlaywrightPortalTaskRunnerOptions {
 const MAX_DOWNLOAD_DOCUMENTS_PER_RUN = 50;
 const DEFAULT_MAX_DOWNLOAD_BYTES = 10 * 1024 * 1024;
 const DEFAULT_SELECTOR_TIMEOUT_MS = 15_000;
-const MAX_DOWNLOAD_REDIRECTS = 5;
 
 interface ExecutionState {
   input: RunPortalTaskInput;

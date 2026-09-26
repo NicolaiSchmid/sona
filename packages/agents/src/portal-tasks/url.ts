@@ -7,6 +7,11 @@
 
 export const UNPARSEABLE_URL = "[unparseable url]";
 const REDACTED_SEGMENT = "[REDACTED_SEGMENT]";
+const URL_IN_TEXT_RE = /\b(?:https?|wss?):\/\/[^\s"'<>()[\]]+/gi;
+const DIGIT_RUN_RE = /(?:\D*\d){8}/;
+const TOKEN_CHARS_RE = /^[A-Za-z0-9._~+=%-]+$/;
+const FILE_EXTENSION_RE = /\.[a-z]{2,4}$/i;
+const MIN_TOKEN_SEGMENT_LENGTH = 20;
 
 /**
  * Keeps protocol, host, and path shape; drops query, fragment, and userinfo
@@ -31,8 +36,6 @@ export function redactUrlsInText(text: string): string {
   return text.replace(URL_IN_TEXT_RE, (match) => redactUrl(match) ?? UNPARSEABLE_URL);
 }
 
-const URL_IN_TEXT_RE = /\b(?:https?|wss?):\/\/[^\s"'<>()[\]]+/gi;
-
 /**
  * Path and query with percent escapes decoded, for screening: servers decode
  * `/%64elete` to `/delete`, so the guard must too. Malformed input is returned
@@ -46,11 +49,6 @@ export function decodedPathAndQuery(rawUrl: string): string {
     return safeDecode(rawUrl);
   }
 }
-
-const DIGIT_RUN_RE = /(?:\D*\d){8}/;
-const TOKEN_CHARS_RE = /^[A-Za-z0-9._~+=%-]+$/;
-const FILE_EXTENSION_RE = /\.[a-z]{2,4}$/i;
-const MIN_TOKEN_SEGMENT_LENGTH = 20;
 
 /**
  * E-mail-like segments, anything carrying eight or more digits (account and

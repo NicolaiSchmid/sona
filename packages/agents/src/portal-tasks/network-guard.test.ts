@@ -1,6 +1,20 @@
 import { describe, expect, it } from "vitest";
 import { createNetworkGuard, type PortalRequest } from "./network-guard.js";
-import type { PortalTask } from "./schema.js";
+import type { PortalHttpMethodException, PortalTask } from "./schema.js";
+
+/** A reviewed POST exception; the login form fields are the default body review. */
+function postException(
+  overrides: Pick<PortalHttpMethodException, "urlPattern" | "reason" | "justification"> &
+    Partial<PortalHttpMethodException>,
+): PortalHttpMethodException {
+  return {
+    method: "POST",
+    allowedBodyFields: ["email", "password", "action", "q"],
+    credentialBodyFields: ["email", "password"],
+    pinnedBodyValues: {},
+    ...overrides,
+  };
+}
 
 const task: PortalTask = {
   id: "synthetic-reference-portal",
@@ -13,15 +27,11 @@ const task: PortalTask = {
   forbiddenActions: ["purchase", "cancel_order"],
   outputs: ["document_file", "provenance_json"],
   httpMethodExceptions: [
-    {
-      method: "POST",
+    postException({
       urlPattern: "https://portal.test/login",
       reason: "login",
       justification: "Portal login form requires a POST before read-only invoice access.",
-      allowedBodyFields: ["email", "password", "action", "q"],
-      credentialBodyFields: ["email", "password"],
-      pinnedBodyValues: {},
-    },
+    }),
   ],
   steps: [],
 };
@@ -112,15 +122,11 @@ describe("createNetworkGuard", () => {
     const searchTask: PortalTask = {
       ...task,
       httpMethodExceptions: [
-        {
-          method: "POST",
+        postException({
           urlPattern: "https://portal.test/api?action=search",
           reason: "search",
           justification: "Invoice search form posts its filter before listing results.",
-          allowedBodyFields: ["email", "password", "action", "q"],
-          credentialBodyFields: ["email", "password"],
-          pinnedBodyValues: {},
-        },
+        }),
       ],
     };
     const guard = createNetworkGuard({ task: searchTask });
@@ -151,15 +157,13 @@ describe("createNetworkGuard", () => {
     const searchTask: PortalTask = {
       ...task,
       httpMethodExceptions: [
-        {
-          method: "POST",
+        postException({
           urlPattern: "https://portal.test/api",
           reason: "search",
           justification: "Invoice search form posts its filter before listing results.",
           allowedBodyFields: ["action", "q"],
           credentialBodyFields: [],
-          pinnedBodyValues: {},
-        },
+        }),
       ],
     };
     const post = (postData: string | undefined) =>
@@ -208,15 +212,13 @@ describe("createNetworkGuard", () => {
     const loginTask: PortalTask = {
       ...task,
       httpMethodExceptions: [
-        {
-          method: "POST",
+        postException({
           urlPattern: "https://portal.test/api",
           reason: "login",
           justification: "Multiplexed login endpoint dispatches on the action field.",
           allowedBodyFields: ["action", "email", "password", "remember"],
-          credentialBodyFields: ["email", "password"],
           pinnedBodyValues: { action: ["login"] },
-        },
+        }),
       ],
     };
     const post = (postData: string) =>
@@ -508,15 +510,11 @@ describe("NetworkGuard methods and exceptions", () => {
       ...task,
       httpMethodExceptions: [
         ...task.httpMethodExceptions,
-        {
-          method: "POST",
+        postException({
           urlPattern: "https://portal.test/invoices/search",
           reason: "search",
           justification: "Invoice search form posts its filter before listing results.",
-          allowedBodyFields: ["email", "password", "action", "q"],
-          credentialBodyFields: ["email", "password"],
-          pinnedBodyValues: {},
-        },
+        }),
       ],
     };
     const guard = createNetworkGuard({ task: multiTask });
@@ -542,15 +540,11 @@ describe("NetworkGuard methods and exceptions", () => {
     const leakyTask: PortalTask = {
       ...task,
       httpMethodExceptions: [
-        {
-          method: "POST",
+        postException({
           urlPattern: "https://sso.other.test/login",
           reason: "login",
           justification: "Third-party SSO login is not on the task allowlist.",
-          allowedBodyFields: ["email", "password", "action", "q"],
-          credentialBodyFields: ["email", "password"],
-          pinnedBodyValues: {},
-        },
+        }),
       ],
     };
     const guard = createNetworkGuard({ task: leakyTask });
@@ -570,15 +564,13 @@ describe("NetworkGuard destructive URLs and reviewed bodies", () => {
   const searchTask: PortalTask = {
     ...task,
     httpMethodExceptions: [
-      {
-        method: "POST",
+      postException({
         urlPattern: "https://portal.test/api",
         reason: "search",
         justification: "Invoice search form posts its filter before listing results.",
         allowedBodyFields: ["action", "q"],
         credentialBodyFields: [],
-        pinnedBodyValues: {},
-      },
+      }),
     ],
   };
   const get = (url: string, resourceType: PortalRequest["resourceType"]) =>
@@ -709,9 +701,6 @@ describe("NetworkGuard destructive URLs and reviewed bodies", () => {
     expect(post("q=2026&q=2025")).toEqual({ action: "allow" });
   });
 
-  // Production gap: `new Map(new URLSearchParams(body))` keeps only the last
-  // value of a repeated key, so a forbidden value in an earlier duplicate is
-  // never screened. Flip to `it` once every value is inspected.
   it("screens every value of a repeated form key", () => {
     expect(post("action=delete&action=search")).toEqual({
       action: "abort",
@@ -723,15 +712,13 @@ describe("NetworkGuard destructive URLs and reviewed bodies", () => {
     const accountTask: PortalTask = {
       ...task,
       httpMethodExceptions: [
-        {
-          method: "POST",
+        postException({
           urlPattern: "https://portal.test/accounts/12345678/search",
           reason: "search",
           justification: "Account-scoped invoice search posts its filter before listing.",
           allowedBodyFields: ["q"],
           credentialBodyFields: [],
-          pinnedBodyValues: {},
-        },
+        }),
       ],
     };
     const guard = createNetworkGuard({ task: accountTask });

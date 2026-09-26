@@ -176,7 +176,6 @@ export async function runPortalFetchJob(
 }
 
 /** Job statuses that consume the job id; anything else releases the lease for a retry. */
-
 type SettledJobStatus = Extract<PortalFetchJobStatus, "completed" | "rejected">;
 
 /** Exhaustive: a new runner status must decide explicitly whether it is retryable. */
