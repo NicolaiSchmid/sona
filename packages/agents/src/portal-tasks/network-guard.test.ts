@@ -520,6 +520,191 @@ describe("NetworkGuard methods and exceptions", () => {
   });
 });
 
+describe("NetworkGuard destructive URLs and reviewed bodies", () => {
+  const searchTask: PortalTask = {
+    ...task,
+    httpMethodExceptions: [
+      {
+        method: "POST",
+        urlPattern: "https://portal.test/api",
+        reason: "search",
+        justification: "Invoice search form posts its filter before listing results.",
+        allowedBodyFields: ["action", "q"],
+      },
+    ],
+  };
+  const get = (url: string, resourceType: PortalRequest["resourceType"]) =>
+    createNetworkGuard({ task }).evaluateRequest({ url, method: "GET", resourceType });
+  const post = (postData: string | null | undefined) =>
+    createNetworkGuard({ task: searchTask }).evaluateRequest({
+      url: "https://portal.test/api",
+      method: "POST",
+      resourceType: "xhr",
+      postData,
+    });
+
+  it("screens document, xhr, fetch, and other requests but exempts every static type", () => {
+    for (const resourceType of ["document", "xhr", "fetch", "other"] as const) {
+      expect(get("https://portal.test/remove-item", resourceType), resourceType).toEqual({
+        action: "abort",
+        reason: "destructive_url",
+      });
+    }
+    for (const resourceType of [
+      "stylesheet",
+      "image",
+      "media",
+      "font",
+      "script",
+      "texttrack",
+    ] as const) {
+      expect(get("https://portal.test/remove-item.css", resourceType), resourceType).toEqual({
+        action: "allow",
+      });
+    }
+  });
+
+  it("matches forbidden operations case-insensitively, through encoded separators, and in the query alone", () => {
+    expect(get("https://portal.test/Cancel-Subscription", "document")).toEqual({
+      action: "abort",
+      reason: "destructive_url",
+    });
+    expect(get("https://portal.test/cancel%2Dsubscription", "document")).toEqual({
+      action: "abort",
+      reason: "destructive_url",
+    });
+    expect(get("https://portal.test/api?op=delete", "other")).toEqual({
+      action: "abort",
+      reason: "destructive_url",
+    });
+    expect(get("https://portal.test/api?Op=DELETE", "xhr")).toEqual({
+      action: "abort",
+      reason: "destructive_url",
+    });
+    expect(get("https://portal.test/api?op=list", "xhr")).toEqual({ action: "allow" });
+  });
+
+  // Production gap: the screen inspects the raw path and query without
+  // percent-decoding, so `%63ancel` (which the server decodes to `cancel`) is
+  // not recognized. Flip to `it` once the guard decodes before screening.
+  it.fails("recognizes forbidden operations spelled with percent-encoded letters", () => {
+    expect(get("https://portal.test/%63ancel-subscription", "document")).toEqual({
+      action: "abort",
+      reason: "destructive_url",
+    });
+    expect(get("https://portal.test/api?op=%64elete", "xhr")).toEqual({
+      action: "abort",
+      reason: "destructive_url",
+    });
+  });
+
+  it("records a destructive_url block with the normalized method and a redacted path", () => {
+    const guard = createNetworkGuard({ task });
+
+    guard.evaluateRequest({
+      url: "https://portal.test/orders/12345678/refund?token=t0k3n",
+      method: "get",
+      resourceType: "fetch",
+    });
+
+    expect(guard.snapshot().blockedRequests).toEqual([
+      {
+        url: "https://portal.test/orders/[REDACTED_SEGMENT]/refund",
+        method: "GET",
+        resourceType: "fetch",
+        reason: "destructive_url",
+      },
+    ]);
+  });
+
+  it("decodes plus-encoded spaces before screening body values", () => {
+    expect(post("q=hello+world")).toEqual({ action: "allow" });
+    expect(post("q=cancel+order")).toEqual({ action: "abort", reason: "unreviewed_body" });
+  });
+
+  it("screens nested JSON values as serialized text and tolerates surrounding whitespace", () => {
+    expect(post('{"action":{"op":"delete"}}')).toEqual({
+      action: "abort",
+      reason: "unreviewed_body",
+    });
+    expect(post('{"action":["search",{"then":"refund"}]}')).toEqual({
+      action: "abort",
+      reason: "unreviewed_body",
+    });
+    expect(post('{"q":2026,"action":true}')).toEqual({ action: "allow" });
+    expect(post('  {"action":"search"}  ')).toEqual({ action: "allow" });
+  });
+
+  it("treats an empty or whitespace-only body as a body without fields", () => {
+    expect(post("")).toEqual({ action: "allow" });
+    expect(post("  \n\t ")).toEqual({ action: "allow" });
+    expect(post(null)).toEqual({ action: "allow" });
+  });
+
+  it("refuses JSON bodies that are not objects and bodies it cannot parse", () => {
+    expect(post("null")).toEqual({ action: "abort", reason: "unreviewed_body" });
+    expect(post("[]")).toEqual({ action: "abort", reason: "unreviewed_body" });
+    expect(post('"search"')).toEqual({ action: "abort", reason: "unreviewed_body" });
+    expect(post("{not json")).toEqual({ action: "abort", reason: "unreviewed_body" });
+  });
+
+  it("refuses multipart bodies even when the only part name is reviewed", () => {
+    expect(
+      post(
+        '------WebKitFormBoundary\r\nContent-Disposition: form-data; name="q"\r\n\r\n2026\r\n------WebKitFormBoundary--',
+      ),
+    ).toEqual({ action: "abort", reason: "unreviewed_body" });
+  });
+
+  it("allows a repeated reviewed key whose values are all safe", () => {
+    expect(post("q=2026&q=2025")).toEqual({ action: "allow" });
+  });
+
+  // Production gap: `new Map(new URLSearchParams(body))` keeps only the last
+  // value of a repeated key, so a forbidden value in an earlier duplicate is
+  // never screened. Flip to `it` once every value is inspected.
+  it.fails("screens every value of a repeated form key", () => {
+    expect(post("action=delete&action=search")).toEqual({
+      action: "abort",
+      reason: "unreviewed_body",
+    });
+  });
+
+  it("redacts identifier-like path segments in allowed exception records too", () => {
+    const accountTask: PortalTask = {
+      ...task,
+      httpMethodExceptions: [
+        {
+          method: "POST",
+          urlPattern: "https://portal.test/accounts/12345678/search",
+          reason: "search",
+          justification: "Account-scoped invoice search posts its filter before listing.",
+          allowedBodyFields: ["q"],
+        },
+      ],
+    };
+    const guard = createNetworkGuard({ task: accountTask });
+
+    const decision = guard.evaluateRequest({
+      url: "https://portal.test/accounts/12345678/search",
+      method: "post",
+      resourceType: "xhr",
+      postData: "q=2026",
+    });
+
+    expect(decision).toEqual({ action: "allow" });
+    expect(guard.snapshot().allowedNonIdempotentRequests).toEqual([
+      {
+        url: "https://portal.test/accounts/[REDACTED_SEGMENT]/search",
+        method: "POST",
+        reason: "search",
+        justification: "Account-scoped invoice search posts its filter before listing.",
+      },
+    ]);
+    expect(JSON.stringify(guard.snapshot())).not.toContain("12345678");
+  });
+});
+
 describe("NetworkGuard snapshot", () => {
   it("returns copies so callers cannot mutate the guard's records", () => {
     const guard = createNetworkGuard({ task });

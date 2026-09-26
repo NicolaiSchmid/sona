@@ -297,7 +297,217 @@ describe("LocalPlaywrightPortalTaskRunner", () => {
       },
     ]);
     expect(page.waitCounts.has("[data-testid='invoice-list']")).toBe(false);
+    expect(page.clickCount).toBe(1);
+    expect(page.queryAllCount).toBe(0);
     expect(page.requestCount).toBe(0);
+    expect(result.errors).toEqual([]);
+  });
+
+  it("reports a click target that never appears as selector_missing with one screenshot", async () => {
+    const page = new FixturePortalPage({ missingSelectors: new Set(["button.login"]) });
+    const nonSensitive: PortalTask = {
+      ...task,
+      steps: task.steps.map((step) => ({ ...step, sensitive: false })),
+    };
+    const runner = await makeRunner({ page, connectionTask: nonSensitive });
+
+    const result = await runner.runTask(input({ task: nonSensitive }));
+
+    expect(result.status).toBe("selector_missing");
+    expect(result.errors).toEqual(["selector_missing: button.login"]);
+    expect(page.waitCounts.get("button.login")).toBe(1);
+    expect(page.clickCount).toBe(0);
+    expect(page.screenshotCount).toBe(1);
+    expect(page.waitCounts.has("[data-testid='invoice-list']")).toBe(false);
+    expect(result.provenance.allowedNonIdempotentRequests).toEqual([]);
+  });
+
+  it("keeps a click that times out on a present element as a retryable failure", async () => {
+    const page = new FixturePortalPage({ timeoutSelectors: new Set(["button.login"]) });
+    const runner = await makeRunner({ page });
+
+    const result = await runner.runTask(input());
+
+    expect(result.status).toBe("failed");
+    expect(result.errors).toEqual(["Timeout 15000ms exceeded"]);
+    expect(page.waitCounts.get("button.login")).toBe(1);
+    expect(page.screenshotCount).toBe(0);
+  });
+
+  it("reports an off-allowlist final URL as blocked before judging status or content type", async () => {
+    const storage = new CountingDocumentStorage();
+    const page = new FixturePortalPage({
+      download: () => ({
+        bytes: new Uint8Array(0),
+        mimeType: "text/html",
+        finalUrl: "https://evil.test/invoice.pdf",
+        status: 500,
+      }),
+    });
+    const runner = await makeRunner({ page, storage });
+
+    const result = await runner.runTask(input());
+
+    expect(result.status).toBe("blocked");
+    expect(result.errors).toEqual(["download blocked: redirect left the portal policy"]);
+    expect(storage.putCount).toBe(0);
+  });
+
+  it("reports a non-2xx download as failed once its final URL is on the allowlist", async () => {
+    const page = new FixturePortalPage({
+      download: (url) => ({
+        bytes: new TextEncoder().encode("%PDF-1.4 error page"),
+        mimeType: "application/pdf",
+        finalUrl: url,
+        status: 500,
+      }),
+    });
+    const runner = await makeRunner({ page });
+
+    const result = await runner.runTask(input());
+
+    expect(result.status).toBe("failed");
+    expect(result.errors).toEqual(["download failed with status 500"]);
+  });
+
+  it("follows download redirects the guard allows and retains the final URL", async () => {
+    const page = new FixturePortalPage({
+      download: (url, options) => {
+        const redirected = url.replace("/invoices/", "/files/");
+        if (!options.onRedirect(redirected)) {
+          throw new Error("download redirect blocked by portal network policy");
+        }
+        return {
+          bytes: new TextEncoder().encode(`%PDF-1.4 ${redirected}`),
+          mimeType: "application/pdf",
+          finalUrl: redirected,
+          status: 200,
+        };
+      },
+    });
+    const runner = await makeRunner({ page });
+
+    const result = await runner.runTask(input());
+
+    expect(result.status).toBe("completed");
+    expect(result.documents.map((document) => document.sourceUrl)).toEqual([
+      "https://portal.test/files/2026-01.pdf",
+      "https://portal.test/files/2026-02.pdf",
+    ]);
+    expect(result.provenance.blockedRequests).toEqual([]);
+  });
+
+  it("refuses a download redirect that leaves the allowlist and reports the run as blocked", async () => {
+    const storage = new CountingDocumentStorage();
+    let redirectAllowed: boolean | undefined;
+    const page = new FixturePortalPage({
+      download: (url, options) => {
+        redirectAllowed = options.onRedirect("https://evil.test/leak.pdf?sid=abc123");
+        if (!redirectAllowed) {
+          throw new Error("download redirect blocked by portal network policy");
+        }
+        return {
+          bytes: new TextEncoder().encode("%PDF-1.4 leaked"),
+          mimeType: "application/pdf",
+          finalUrl: url,
+          status: 200,
+        };
+      },
+    });
+    const runner = await makeRunner({ page, storage });
+
+    const result = await runner.runTask(input());
+
+    expect(redirectAllowed).toBe(false);
+    expect(result.status).toBe("blocked");
+    expect(result.errors).toEqual(["download redirect blocked by portal network policy"]);
+    expect(page.requestCount).toBe(1);
+    expect(storage.putCount).toBe(0);
+    expect(result.provenance.blockedRequests).toEqual([
+      {
+        url: "https://evil.test/leak.pdf",
+        method: "GET",
+        resourceType: "document",
+        reason: "off_allowlist",
+      },
+    ]);
+    expect(JSON.stringify(result)).not.toContain("abc123");
+  });
+
+  it("rejects an empty download payload before storage", async () => {
+    const storage = new CountingDocumentStorage();
+    const page = new FixturePortalPage({
+      download: (url) => ({
+        bytes: new Uint8Array(0),
+        mimeType: "application/pdf",
+        finalUrl: url,
+        status: 200,
+      }),
+    });
+    const runner = await makeRunner({ page, storage });
+
+    const result = await runner.runTask(input());
+
+    expect(result.status).toBe("failed");
+    expect(result.errors).toEqual(["download payload is empty"]);
+    expect(storage.putCount).toBe(0);
+  });
+
+  it("never serializes download bytes into the run result whatever the outcome", async () => {
+    const pdf = (text: string) => new TextEncoder().encode(`%PDF-1.4 ${text}`);
+    const scenarios: { name: string; page: FixturePortalPage; closeFailure?: Error }[] = [
+      {
+        name: "failed status",
+        page: new FixturePortalPage({
+          download: (url) => ({
+            bytes: pdf("error"),
+            mimeType: "application/pdf",
+            finalUrl: url,
+            status: 500,
+          }),
+        }),
+      },
+      {
+        name: "off-allowlist final url",
+        page: new FixturePortalPage({
+          download: () => ({
+            bytes: pdf("exfiltrated"),
+            mimeType: "application/pdf",
+            finalUrl: "https://evil.test/x.pdf",
+            status: 200,
+          }),
+        }),
+      },
+      {
+        name: "unexpected content type",
+        page: new FixturePortalPage({
+          download: (url) => ({
+            bytes: pdf("mislabelled"),
+            mimeType: "text/html",
+            finalUrl: url,
+            status: 200,
+          }),
+        }),
+      },
+      {
+        name: "completed then close failure",
+        page: new FixturePortalPage(),
+        closeFailure: new Error("browser exited"),
+      },
+    ];
+
+    for (const scenario of scenarios) {
+      const runner = await makeRunner({
+        page: scenario.page,
+        ...(scenario.closeFailure === undefined ? {} : { closeFailure: scenario.closeFailure }),
+      });
+      const result = await runner.runTask(input());
+      const serialized = JSON.stringify(result);
+
+      expect(result.status, scenario.name).not.toBe("completed");
+      expect(serialized, scenario.name).not.toContain('"bytes"');
+      expect(serialized, scenario.name).not.toContain("%PDF");
+    }
   });
 
   it("refuses a login POST whose body carries fields outside the reviewed form", async () => {
@@ -847,6 +1057,10 @@ interface FixturePortalPageOptions {
 class FixturePortalPage implements PortalBrowserPage {
   readonly waitCounts = new Map<string, number>();
   screenshotCount = 0;
+  /** Number of `click` calls that reached the page, i.e. actions past the presence wait. */
+  clickCount = 0;
+  /** Number of `queryAll` calls, i.e. download steps that started. */
+  queryAllCount = 0;
   /** Number of `requestBytes` calls, i.e. download fetches actually attempted. */
   requestCount = 0;
   readonly #linkHrefs: readonly string[] | undefined;
@@ -891,6 +1105,7 @@ class FixturePortalPage implements PortalBrowserPage {
 
   async click(selector: string): Promise<void> {
     this.throwIfTimingOut(selector);
+    this.clickCount += 1;
     await this.emitRequest({
       url: "https://portal.test/login",
       method: "POST",
@@ -925,6 +1140,7 @@ class FixturePortalPage implements PortalBrowserPage {
   }
 
   async queryAll(selector: string): Promise<PortalElementHandle[]> {
+    this.queryAllCount += 1;
     if (selector !== "a.invoice-download") {
       return [];
     }

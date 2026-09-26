@@ -252,6 +252,73 @@ describe("portal_fetch job", () => {
     expect(result.error).toBe("browser crashed; lease release failed: lease store offline");
   });
 
+  it("propagates a failing complete after a recorded run and leaves the job id leased", async () => {
+    // Documents current behavior: the run is already in the audit history, the
+    // error surfaces to the queue, and the lease is not released, so a retry
+    // of the same job id is refused until a durable store expires the lease.
+    const state = new InMemoryPortalFetchJobStateStore();
+    const recorder = new InMemoryPortalFetchRunRecorder();
+    const connections = singleConnection();
+    const brokenComplete: PortalFetchJobStateStore = {
+      acquire: state.acquire.bind(state),
+      release: state.release.bind(state),
+      async complete(): Promise<void> {
+        throw new Error("lease store offline");
+      },
+    };
+
+    await expect(
+      runPortalFetchJob(jobInput({ state: brokenComplete, connections, runs: recorder })),
+    ).rejects.toThrow("lease store offline");
+    const retry = await runPortalFetchJob(
+      jobInput({ state, connections, now: "2026-02-01T00:05:00Z", runs: recorder }),
+    );
+
+    expect(recorder.listRuns({ workspaceId: "ws_1" }).map((run) => run.runId)).toEqual(["job_1:1"]);
+    expect(retry.status).toBe("duplicate");
+  });
+
+  it("leaves error undefined for a failed run result whose lease was released cleanly", async () => {
+    const result = await runPortalFetchJob(
+      jobInput({
+        state: new InMemoryPortalFetchJobStateStore(),
+        connections: singleConnection(),
+        runner: new StatusPortalTaskRunner("failed"),
+      }),
+    );
+
+    expect(result).toMatchObject({
+      status: "failed",
+      runId: "job_1:1",
+      cooldownUntil: "2026-02-01T00:01:00.000Z",
+      error: undefined,
+    });
+    expect(result.runResult?.status).toBe("failed");
+  });
+
+  it("reports only the release failure when the runner returned a failed result", async () => {
+    const state = new InMemoryPortalFetchJobStateStore();
+    const brokenRelease: PortalFetchJobStateStore = {
+      acquire: state.acquire.bind(state),
+      complete: state.complete.bind(state),
+      async release(): Promise<void> {
+        throw new Error("lease store offline");
+      },
+    };
+
+    const result = await runPortalFetchJob(
+      jobInput({
+        state: brokenRelease,
+        connections: singleConnection(),
+        runner: new StatusPortalTaskRunner("failed"),
+      }),
+    );
+
+    expect(result.status).toBe("failed");
+    expect(result.error).toBe("lease release failed: lease store offline");
+    expect(result.runResult?.status).toBe("failed");
+  });
+
   it("never invokes the runner for duplicate or cooling-down reservations", async () => {
     const state = new InMemoryPortalFetchJobStateStore();
     const connections = singleConnection();
